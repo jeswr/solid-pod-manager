@@ -84,20 +84,3 @@ export class ProfileAgent extends Agent {
     );
   }
 }
-
-// usage shape — wire into WebIdDataset-derived data
-import { WebIdDataset } from "@solid/object";
-import { DataFactory } from "n3";
-import { fetchRdf } from "@jeswr/fetch-rdf";
-
-export async function renderable(webId: string) {
-  const { dataset } = await fetchRdf(webId);
-  const me = new WebIdDataset(dataset, DataFactory).mainSubject;
-  if (!me) throw new Error("No Solid-OIDC subject found in profile");
-  const profile = new ProfileAgent(me.value, dataset, DataFactory); // pass the IRI string
-
-  // Multiple storages: surface ALL of them and let the USER choose — never pick silently.
-  const storages = [...profile.storageUrls];
-
-  return { name: profile.displayName, avatar: profile.avatarUrl, storages };
-}

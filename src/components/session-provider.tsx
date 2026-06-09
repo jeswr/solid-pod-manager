@@ -152,12 +152,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         const candidate = await fetchLoginCandidate(rawWebId);
         pendingWebIdRef.current = candidate.webId;
 
-        // Drive the popup: an authenticated request to the user's own pod.
-        // The profile is public, but reading the pod root container requires
-        // auth on most servers — its success means we are logged in.
+        // Drive the popup: a GET against a reliably PRIVATE resource so the
+        // server returns 401, which the reactive provider upgrades to a login.
+        // The pod root container is world-readable on a fresh CSS pod, so we
+        // probe its `.acl` (owner-only Control) instead — its 200 after auth is
+        // what "logged in" means here.
         const p = await fetchProfile(candidate.webId);
-        const probeTarget = p.storages[0] ?? candidate.webId;
-        // A HEAD/GET that the server gates triggers the 401→login upgrade.
+        const podRoot = p.storages[0];
+        const probeTarget = podRoot ? `${podRoot}.acl` : candidate.webId;
+        // The patched fetch handles 401→login→retry; we only need it to settle.
         await fetch(probeTarget, { method: "GET" }).catch(() => undefined);
 
         setWebId(candidate.webId);

@@ -4,6 +4,8 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { SessionProvider } from "@/components/session-provider";
+import { AppShell } from "@/components/app-shell";
 
 // Inter: a workhorse UI sans with strong tabular figures — ideal for the
 // data-dense "My data" lists and dashboard counts (web-typography skill).
@@ -46,7 +48,11 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <TooltipProvider delayDuration={200}>{children}</TooltipProvider>
+          <TooltipProvider delayDuration={200}>
+            <SessionProvider>
+              <AppShell>{children}</AppShell>
+            </SessionProvider>
+          </TooltipProvider>
           <Toaster richColors closeButton />
         </ThemeProvider>
       </body>

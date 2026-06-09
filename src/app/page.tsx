@@ -1,65 +1,222 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import Link from "next/link";
+import {
+  AppWindow,
+  ArrowRight,
+  Database,
+  FolderOpen,
+  Plus,
+  ShieldCheck,
+} from "lucide-react";
+import { useSession } from "@/components/session-provider";
+import { useCategorySummaries } from "@/components/use-pod-data";
+import { categoriesWithDataCount } from "@/lib/pod-data";
+import { categoryIcon } from "@/components/category-icon";
+import { ErrorState } from "@/components/states";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+
+export default function HomePage() {
+  const { profile } = useSession();
+  const { data: summaries, loading, error } = useCategorySummaries();
+
+  const firstName = profile?.displayName?.split(/\s+/)[0];
+  const withData = summaries ? categoriesWithDataCount(summaries) : undefined;
+  const topCategories = (summaries ?? []).filter((s) => s.hasData).slice(0, 4);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <div className="flex flex-col gap-8">
+      <header>
+        <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
+          {firstName ? `Welcome back, ${firstName}` : "Welcome back"}
+        </h1>
+        <p className="mt-1 text-muted-foreground text-pretty">
+          Here&apos;s an overview of your pod and who can see it.
+        </p>
+      </header>
+
+      {/* Headline stats — the top of the inverted pyramid (R7). */}
+      <section aria-label="Overview" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <StatCard
+          icon={AppWindow}
+          label="Apps with access"
+          value="0"
+          hint="Connected apps arrive soon — you'll manage every grant here."
+          tone="primary"
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+        <StatCard
+          icon={Database}
+          label="Categories with data"
+          value={loading ? undefined : (withData ?? 0).toString()}
+          hint="Across your pod, in plain categories."
+          href="/my-data"
+        />
+        <StatCard
+          icon={ShieldCheck}
+          label="Privacy"
+          value="Private"
+          hint="Only apps you approve can read your data."
+          tone="success"
+        />
+      </section>
+
+      {/* Quick actions */}
+      <section aria-label="Quick actions" className="flex flex-wrap gap-3">
+        <Button asChild>
+          <Link href="/my-data">
+            <FolderOpen className="size-4" aria-hidden="true" />
+            Browse my data
+          </Link>
+        </Button>
+        <Button variant="outline" asChild>
+          <Link href="/connected-apps">
+            <AppWindow className="size-4" aria-hidden="true" />
+            Review apps
+          </Link>
+        </Button>
+      </section>
+
+      {/* Categories with data — one drill-down to anything (R7). */}
+      <section aria-label="Your data" className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Your data</h2>
+          <Button variant="ghost" size="sm" asChild>
+            <Link href="/my-data">
+              See all
+              <ArrowRight className="size-4" aria-hidden="true" />
+            </Link>
+          </Button>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+
+        {error ? (
+          <ErrorState error={error} />
+        ) : loading ? (
+          <div className="grid gap-4 sm:grid-cols-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-24 rounded-2xl" />
+            ))}
+          </div>
+        ) : topCategories.length === 0 ? (
+          <Card>
+            <CardContent className="flex flex-col items-start gap-3 py-6">
+              <p className="text-sm text-muted-foreground">
+                No data categories found in your pod yet. As apps store data, it
+                will show up here, neatly organised.
+              </p>
+              <Button variant="outline" size="sm" asChild>
+                <Link href="/my-data">
+                  <Plus className="size-4" aria-hidden="true" />
+                  Explore categories
+                </Link>
+              </Button>
+            </CardContent>
+          </Card>
+        ) : (
+          <ul className="grid gap-4 sm:grid-cols-2">
+            {topCategories.map((s) => {
+              const Icon = categoryIcon(s.category.icon);
+              return (
+                <li key={s.category.id}>
+                  <Link
+                    href={`/my-data/${s.category.id}`}
+                    className="group flex h-full items-center gap-4 rounded-2xl border border-border bg-card p-4 transition-colors hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="grid size-11 place-items-center rounded-xl bg-accent text-accent-foreground"
+                    >
+                      <Icon className="size-5" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium">{s.category.label}</span>
+                      <span className="block truncate text-sm text-muted-foreground">
+                        {s.locations.length}{" "}
+                        {s.locations.length === 1 ? "location" : "locations"}
+                      </span>
+                    </span>
+                    <ArrowRight
+                      className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5"
+                      aria-hidden="true"
+                    />
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {/* Recent activity strip — stubbed for P3. */}
+      <section aria-label="Recent activity" className="flex flex-col gap-3">
+        <h2 className="text-lg font-semibold">Recent activity</h2>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base font-medium text-muted-foreground">
+              Activity log coming soon
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            You&apos;ll see a plain-language record here of which app read or wrote
+            which data, and when.
+          </CardContent>
+        </Card>
+      </section>
     </div>
   );
+}
+
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+  hint,
+  href,
+  tone = "default",
+}: {
+  icon: typeof Database;
+  label: string;
+  value?: string;
+  hint: string;
+  href?: string;
+  tone?: "default" | "primary" | "success";
+}) {
+  const toneClass =
+    tone === "primary"
+      ? "text-primary"
+      : tone === "success"
+        ? "text-success"
+        : "text-foreground";
+
+  const body = (
+    <Card className="h-full transition-colors hover:bg-accent/30">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+        <CardTitle className="text-sm font-medium text-muted-foreground">
+          {label}
+        </CardTitle>
+        <Icon className={`size-5 ${toneClass}`} aria-hidden="true" />
+      </CardHeader>
+      <CardContent>
+        {value === undefined ? (
+          <Skeleton className="h-9 w-16" />
+        ) : (
+          <p className={`text-3xl font-semibold tabular ${toneClass}`}>{value}</p>
+        )}
+        <p className="mt-1 text-xs text-muted-foreground text-pretty">{hint}</p>
+      </CardContent>
+    </Card>
+  );
+
+  if (href) {
+    return (
+      <Link
+        href={href}
+        className="rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      >
+        {body}
+      </Link>
+    );
+  }
+  return body;
 }

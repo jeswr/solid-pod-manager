@@ -1,0 +1,101 @@
+"use client";
+
+import { Database, Fingerprint, LogOut, Server } from "lucide-react";
+import { toast } from "sonner";
+import { useSession } from "@/components/session-provider";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+
+export default function SettingsPage() {
+  const { profile, webId, activeStorage, logout } = useSession();
+
+  return (
+    <div className="flex flex-col gap-6">
+      <header>
+        <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Settings</h1>
+        <p className="mt-1 text-muted-foreground text-pretty">
+          Your account and pod basics.
+        </p>
+      </header>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Account</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <Field icon={Fingerprint} label="Display name">
+            {profile ? profile.displayName : <Skeleton className="h-5 w-40" />}
+          </Field>
+          <Field icon={Fingerprint} label="WebID">
+            <span className="break-all font-mono text-sm">{webId ?? "—"}</span>
+          </Field>
+          <Field icon={Server} label="Identity provider">
+            <span className="break-all font-mono text-sm">
+              {profile?.issuers[0] ?? "—"}
+            </span>
+          </Field>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Storage</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <Field icon={Database} label="Active pod">
+            <span className="break-all font-mono text-sm">{activeStorage ?? "—"}</span>
+          </Field>
+          {profile && profile.storages.length > 1 ? (
+            <p className="text-sm text-muted-foreground">
+              You have {profile.storages.length} pods. Switching between them
+              arrives with the write features.
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Session</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Button
+            variant="outline"
+            onClick={() => {
+              logout();
+              toast.success("Signed out", {
+                description: "Your data stays in your pod.",
+              });
+            }}
+          >
+            <LogOut className="size-4" aria-hidden="true" />
+            Sign out
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function Field({
+  icon: Icon,
+  label,
+  children,
+}: {
+  icon: typeof Database;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <div className="min-w-0">
+        <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          {label}
+        </dt>
+        <dd className="mt-0.5">{children}</dd>
+      </div>
+    </div>
+  );
+}

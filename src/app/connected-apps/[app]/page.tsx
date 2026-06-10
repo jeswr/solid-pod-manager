@@ -63,6 +63,12 @@ export default function ConnectedAppPage({
                   permissionsBackend
                     .grant(ctx, app.agentId, categoryId, access.modes)
                     .then(() => {
+                      // Un-hide the optimistically removed row before reloading.
+                      setRemovedCategories((r) => {
+                        const next = new Set(r);
+                        next.delete(categoryId);
+                        return next;
+                      });
                       toast.success(`${app.name} can access your ${label} again.`);
                       reload();
                     })

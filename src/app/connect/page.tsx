@@ -19,7 +19,14 @@ import {
 
 export default function ConnectPage() {
   const entries = allCatalogEntries();
+  // Tier A is split by its REAL status, not its tier: an adapter is only
+  // "Connect now" if a client id is actually configured (statusOf === "live").
+  // Otherwise it's a demo. This keeps the section title true in any build —
+  // a deploy with no integration credentials shows an empty "Connect now"
+  // (hidden) rather than presenting sample-data imports as real (PM blocker #1).
   const tierA = entries.filter((e) => e.tier === "A");
+  const live = tierA.filter((e) => statusOf(e) === "live");
+  const demo = tierA.filter((e) => statusOf(e) !== "live");
   const tierB = entries.filter((e) => e.tier === "B");
   const tierC = entries.filter((e) => e.tier === "C");
 
@@ -29,17 +36,25 @@ export default function ConnectPage() {
         <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Connect sources</h1>
         <p className="measure mt-1 text-muted-foreground text-pretty">
           Pull copies of your data out of the services you use and into your
-          pod — where you decide who sees it. Connections labelled
-          &ldquo;Demo&rdquo; import sample data until this app is registered
-          with that platform.
+          pod — where you decide who sees it. Each connection only ever pulls
+          data <em>in</em>; nothing leaves your pod.
         </p>
       </header>
 
-      <CatalogSection
-        title="Connect now"
-        description="Sign in with the service and import — or try the demo."
-        entries={tierA}
-      />
+      {live.length > 0 ? (
+        <CatalogSection
+          title="Connect now"
+          description="Sign in with the service and import your data straight into your pod."
+          entries={live}
+        />
+      ) : null}
+      {demo.length > 0 ? (
+        <CatalogSection
+          title="Preview with demo data"
+          description="The full import experience, running on realistic sample data. These go live once this app is registered with the platform — we label the demo rather than pretend it's your real account."
+          entries={demo}
+        />
+      ) : null}
       <CatalogSection
         title="Coming soon"
         description="These platforms require an app-approval process before anyone can connect. We say so rather than pretend."

@@ -135,8 +135,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const restore = useCallback(async (id: string) => {
-    // Silent restore: read the (public) profile; if a private probe later 401s
+    // Silent restore: read the (public) profile; if a private read later 401s
     // it re-auths silently while the IdP cookie lives.
+    //
+    // Seed pendingWebIdRef FIRST: the reactive provider's WebID resolver reads
+    // it on a 401 to know whose issuer to authenticate against. login() sets it,
+    // but after a hard navigation / reload (tokens are in-memory only) only this
+    // restore path runs — without this, the first private read throws "No WebID
+    // provided for login" and the page hangs on its loading skeleton (e.g. an
+    // external app deep-linking into /connected-apps/grant). See connected-apps
+    // e2e.
+    pendingWebIdRef.current = id;
     const p = await fetchProfile(id);
     setWebId(id);
     setProfile(p);

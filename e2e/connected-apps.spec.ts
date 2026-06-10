@@ -38,17 +38,16 @@ function authedFetch(acct: CssAccount): typeof fetch {
 }
 
 test.describe("Connected apps: consent-grant → list → revoke → ACL changed", () => {
-  // KNOWN ISSUE (tracked): this lifecycle reaches the consent screen via a HARD
-  // navigation (page.goto to /connected-apps/grant), simulating an external app
-  // deep-linking to it. After a hard nav the @solid/reactive-authentication session
-  // (tokens in memory) is dropped and the grant screen's read-model load doesn't
-  // recover in-browser, so the consent heading never renders. The permission LOGIC
-  // (grant/revoke/listApps/ACL parsing) is covered by 19 green vitest unit tests
-  // (src/lib/permissions.test.ts); the in-app client-side flow (sidebar nav, session
-  // preserved) is the common path. The hard-nav consent-deeplink session restore is a
-  // real but narrower gap needing a dedicated debug pass in a stable env. Un-fixme once
-  // session-restore-on-deeplink is fixed.
-  test.fixme(true, "consent-deeplink hard-nav session restore — see comment above");
+  // This lifecycle reaches the consent screen via a HARD navigation (page.goto to
+  // /connected-apps/grant), simulating an external app deep-linking into it. After a
+  // hard nav the @solid/reactive-authentication tokens (in memory) are gone, so the
+  // SessionProvider silently restores from the last active WebID (localStorage) and
+  // re-auths private reads via the live IdP cookie. That restore now seeds the
+  // provider's pending-WebID (session-provider.tsx restore()), without which the first
+  // private ACL read threw "No WebID provided for login" and the consent screen hung
+  // on its skeleton. The permission LOGIC (grant/revoke/listApps/ACL parsing) also has
+  // 19 vitest unit tests (src/lib/permissions.test.ts); this asserts the full in-browser
+  // deep-link flow end to end.
   test("grants and revokes a fake app end to end", async ({ page, context }) => {
     test.setTimeout(180_000);
 

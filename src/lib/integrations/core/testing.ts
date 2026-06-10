@@ -62,14 +62,27 @@ export function createMemoryPod(): MemoryPod {
       const existing = resources.get(url);
 
       if (method === "GET") {
-        if (!existing) return new Response("Not found", { status: 404 });
-        return new Response(existing.body, {
-          status: 200,
-          headers: {
-            "content-type": "text/turtle",
-            etag: `"v${existing.version}"`,
-          },
-        });
+        if (existing) {
+          return new Response(existing.body, {
+            status: 200,
+            headers: {
+              "content-type": "text/turtle",
+              etag: `"v${existing.version}"`,
+            },
+          });
+        }
+        // Synthesize an LDP container listing for a container URL with children,
+        // so code that lists a container (never PUT as a document) still works.
+        if (url.endsWith("/")) {
+          const listing = containerListing(url, [...resources.keys()]);
+          if (listing) {
+            return new Response(listing, {
+              status: 200,
+              headers: { "content-type": "text/turtle", etag: '"container"' },
+            });
+          }
+        }
+        return new Response("Not found", { status: 404 });
       }
 
       if (method === "PUT") {
@@ -91,10 +104,37 @@ export function createMemoryPod(): MemoryPod {
         });
       }
 
+      if (method === "DELETE") {
+        if (!existing) return new Response("Not found", { status: 404 });
+        resources.delete(url);
+        return new Response(null, { status: 205 });
+      }
+
       return new Response("Method not allowed", { status: 405 });
     }) as typeof fetch,
   };
   return pod;
+}
+
+/**
+ * Build an `ldp:Container` Turtle listing for a container URL given every
+ * stored resource URL — only the container's *direct* children (one path
+ * segment below it). Returns `undefined` when the container has no children.
+ */
+function containerListing(containerUrl: string, allUrls: string[]): string | undefined {
+  const children = new Set<string>();
+  for (const u of allUrls) {
+    if (u === containerUrl || !u.startsWith(containerUrl)) continue;
+    const rest = u.slice(containerUrl.length);
+    const slash = rest.indexOf("/");
+    // Direct child: a document (`rest`) or a sub-container (`seg/`).
+    children.add(slash === -1 ? u : `${containerUrl}${rest.slice(0, slash + 1)}`);
+  }
+  if (children.size === 0) return undefined;
+  const contains = [...children].map((c) => `<${c}>`).join(", ");
+  return `@prefix ldp: <http://www.w3.org/ns/ldp#>.
+<${containerUrl}> a ldp:Container, ldp:BasicContainer ; ldp:contains ${contains} .
+`;
 }
 
 /** Parse Turtle into an n3 Store (absolute IRIs resolved against `baseIri`). */

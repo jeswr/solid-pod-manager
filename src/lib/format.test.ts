@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { formatBytes, formatModified } from "./format.js";
+import {
+  formatBytes,
+  formatModified,
+  toDateTimeLocal,
+  fromDateTimeLocal,
+} from "./format.js";
 
 describe("formatBytes", () => {
   it("formats across units", () => {
@@ -23,5 +28,21 @@ describe("formatModified", () => {
   it("returns undefined for bad input", () => {
     expect(formatModified(undefined, now)).toBeUndefined();
     expect(formatModified("not-a-date", now)).toBeUndefined();
+  });
+});
+
+describe("datetime-local round-trip", () => {
+  it("formats a Date to local wall-clock and parses it back", () => {
+    const d = new Date(2026, 6, 1, 10, 30); // 1 Jul 2026 10:30 local
+    const value = toDateTimeLocal(d);
+    expect(value).toBe("2026-07-01T10:30");
+    const back = fromDateTimeLocal(value);
+    expect(back?.getTime()).toBe(d.getTime());
+  });
+  it("handles empty / invalid input", () => {
+    expect(toDateTimeLocal(undefined)).toBe("");
+    expect(toDateTimeLocal(new Date("nope"))).toBe("");
+    expect(fromDateTimeLocal("")).toBeUndefined();
+    expect(fromDateTimeLocal(undefined)).toBeUndefined();
   });
 });

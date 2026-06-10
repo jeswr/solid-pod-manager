@@ -92,3 +92,29 @@ export class ResourceWriteError extends PodDataError {
     this.status = status;
   }
 }
+
+/** A single item could not be read or parsed from the pod. */
+export class ItemReadError extends PodDataError {
+  readonly url: string;
+  /** HTTP status from the underlying fetch (404 = not found). */
+  readonly status: number;
+  constructor(url: string, status: number, options?: { cause?: unknown }) {
+    super(`Could not open this item (${status}) at ${url}.`, options);
+    this.name = "ItemReadError";
+    this.url = url;
+    this.status = status;
+  }
+}
+
+/** A pod delete (DELETE) was rejected by the server. */
+export class ResourceDeleteError extends PodDataError {
+  readonly url: string;
+  /** HTTP status the server answered with. */
+  readonly status: number;
+  constructor(url: string, status: number) {
+    super(`Could not delete from your pod (${status}) at ${url}.`);
+    this.name = "ResourceDeleteError";
+    this.url = url;
+    this.status = status;
+  }
+}

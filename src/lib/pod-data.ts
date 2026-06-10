@@ -10,7 +10,7 @@
 import { fetchRdf } from "@jeswr/fetch-rdf";
 import { ContainerDataset } from "@solid/object";
 import { DataFactory, Writer } from "n3";
-import { ResourceWriteError } from "./errors.js";
+import { ResourceDeleteError, ResourceWriteError } from "./errors.js";
 import {
   CATEGORIES,
   UNCATEGORISED,
@@ -207,6 +207,41 @@ export async function writeResource(
   const res = opts.fetchImpl ? await opts.fetchImpl(url, init) : await fetch(url, init);
   if (!res.ok) throw new ResourceWriteError(url, res.status);
   return { etag: res.headers.get("etag") };
+}
+
+/**
+ * Read a single RDF resource and keep its ETag for a later conditional write.
+ * A thin pass-through over `fetchRdf` so app modules never import it directly.
+ *
+ * @param fetchImpl - test-only override; **omit in production** so the
+ *   auth-patched global runs (AGENTS.md §Reading data). Errors propagate as
+ *   `RdfFetchError` (branch on `.status`; 404 = not found).
+ */
+export async function readResource(
+  url: string,
+  fetchImpl?: typeof fetch,
+): Promise<{ dataset: import("@rdfjs/types").DatasetCore; etag: string | null }> {
+  return fetchRdf(url, fetchImpl ? { fetch: fetchImpl } : undefined);
+}
+
+/**
+ * Delete a resource from the pod.
+ *
+ * A `404`/`410` is treated as success (idempotent delete — the resource is
+ * already gone, which is the caller's desired end state).
+ *
+ * @param fetchImpl - test-only override; **omit in production** so the
+ *   auth-patched global runs.
+ * @throws ResourceDeleteError on any other non-2xx answer.
+ */
+export async function deleteResource(
+  url: string,
+  fetchImpl?: typeof fetch,
+): Promise<void> {
+  const init: RequestInit = { method: "DELETE" };
+  const res = fetchImpl ? await fetchImpl(url, init) : await fetch(url, init);
+  if (res.ok || res.status === 404 || res.status === 410) return;
+  throw new ResourceDeleteError(url, res.status);
 }
 
 /** Derive a friendly name from a resource URL (last non-empty path segment). */

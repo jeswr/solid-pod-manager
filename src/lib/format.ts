@@ -38,3 +38,42 @@ function formatDate(date: Date): string {
     day: "numeric",
   });
 }
+
+/** Human time of day, e.g. "9:00 AM" — locale-formatted. */
+export function formatTime(date: Date): string {
+  return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+/** Full, readable date + time for an event detail, e.g. "Wed, 1 Jul 2026, 10:00". */
+export function formatDateTime(date: Date): string {
+  return date.toLocaleString(undefined, {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * Format a `Date` for an `<input type="datetime-local">` value (the control
+ * needs local wall-clock `YYYY-MM-DDTHH:mm`, never a UTC `Z` string).
+ */
+export function toDateTimeLocal(date: Date | undefined): string {
+  if (!date || Number.isNaN(date.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours(),
+  )}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * Parse a `datetime-local` input value (local wall-clock) into a `Date`.
+ * Returns `undefined` for empty/invalid input.
+ */
+export function fromDateTimeLocal(value: string | undefined): Date | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}

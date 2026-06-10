@@ -3,14 +3,16 @@ import { Parser, Store } from "n3";
 import {
   summariseCategories,
   categoriesWithDataCount,
+  deleteResource,
   listContainer,
   listCategoryItems,
   nameFromUrl,
+  readResource,
   serializeTurtle,
   writeResource,
   type CategorySummary,
 } from "./pod-data.js";
-import { ResourceWriteError } from "./errors.js";
+import { ResourceDeleteError, ResourceWriteError } from "./errors.js";
 import type { RegisteredLocation } from "./type-index.js";
 
 const SCHEMA = "https://schema.org/";
@@ -184,6 +186,38 @@ describe("writeResource", () => {
     ).rejects.toSatisfy(
       (e: unknown) => e instanceof ResourceWriteError && e.status === 412,
     );
+  });
+});
+
+describe("readResource", () => {
+  it("returns the parsed dataset and the etag", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response('<https://a.example/n.ttl#it> <https://schema.org/name> "Hi" .', {
+        status: 200,
+        headers: { "content-type": "text/turtle", etag: '"v3"' },
+      });
+    const { dataset, etag } = await readResource("https://a.example/n.ttl", fetchImpl);
+    expect(etag).toBe('"v3"');
+    expect([...dataset]).toHaveLength(1);
+  });
+});
+
+describe("deleteResource", () => {
+  it("resolves on a 2xx", async () => {
+    const fetchImpl: typeof fetch = async () => new Response(null, { status: 205 });
+    await expect(deleteResource("https://a.example/x.ttl", fetchImpl)).resolves.toBeUndefined();
+  });
+  it("treats 404/410 as success (idempotent)", async () => {
+    const f404: typeof fetch = async () => new Response(null, { status: 404 });
+    const f410: typeof fetch = async () => new Response(null, { status: 410 });
+    await expect(deleteResource("https://a.example/x.ttl", f404)).resolves.toBeUndefined();
+    await expect(deleteResource("https://a.example/x.ttl", f410)).resolves.toBeUndefined();
+  });
+  it("throws a typed ResourceDeleteError on other failures", async () => {
+    const fetchImpl: typeof fetch = async () => new Response(null, { status: 403 });
+    await expect(
+      deleteResource("https://a.example/x.ttl", fetchImpl),
+    ).rejects.toSatisfy((e: unknown) => e instanceof ResourceDeleteError && e.status === 403);
   });
 });
 

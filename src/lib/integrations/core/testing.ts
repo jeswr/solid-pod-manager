@@ -7,6 +7,8 @@
  * type-index bootstrap, idempotent re-import) without any network.
  */
 import { Parser, Store } from "n3";
+import { type ImportReport, runImport } from "./import-runner.js";
+import type { IntegrationAdapter } from "./types.js";
 
 export const TEST_POD_ROOT = "https://pod.test/alice/";
 export const TEST_WEBID = `${TEST_POD_ROOT}profile/card#me`;
@@ -107,4 +109,24 @@ export function parseTurtle(text: string, baseIri?: string): Store {
 function stripFragment(url: string): string {
   const i = url.indexOf("#");
   return i === -1 ? url : url.slice(0, i);
+}
+
+/**
+ * The shared contract-test entry: run one demo-mode import (fixtures → memory
+ * pod) and hand back both for assertions. `cursor` exercises incremental runs.
+ */
+export async function demoImport(
+  adapter: IntegrationAdapter,
+  opts?: { pod?: MemoryPod; cursor?: string },
+): Promise<{ pod: MemoryPod; report: ImportReport }> {
+  const pod = opts?.pod ?? createMemoryPod();
+  const report = await runImport({
+    adapter,
+    webId: TEST_WEBID,
+    podRoot: TEST_POD_ROOT,
+    mode: "demo",
+    cursor: opts?.cursor,
+    podFetch: pod.fetch,
+  });
+  return { pod, report };
 }

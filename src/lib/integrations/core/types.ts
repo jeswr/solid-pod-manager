@@ -119,6 +119,11 @@ export interface ImportContext {
   readonly api: typeof fetch;
   /** Resolve a slug to the absolute pod URL it will be written at (for fragment IRIs). */
   resolve(slug: string): string;
+  /**
+   * Read a previously-written document back (for incremental imports that
+   * merge new items into an existing collection). `undefined` when absent.
+   */
+  read(slug: string): Promise<DatasetCore | undefined>;
   /** Serialise + PUT a normalised document into the pod. */
   write(doc: NormalisedDoc): Promise<WrittenDoc>;
   /** Report progress to the UI. */

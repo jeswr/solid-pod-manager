@@ -27,7 +27,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/my-data", label: "My data", icon: Database, primary: true },
   { href: "/connect", label: "Connect", icon: Plug },
   { href: "/connected-apps", label: "Connected apps", icon: AppWindow, primary: true },
-  { href: "/activity", label: "Activity", icon: Activity, stub: true },
+  { href: "/activity", label: "Activity", icon: Activity },
   { href: "/settings", label: "Settings", icon: Settings, primary: true },
   // First-party productivity apps — each reads/writes standard RDF to the pod
   // and is registered in the Type Index, so its data also appears under "My data".

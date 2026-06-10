@@ -12,8 +12,10 @@ import {
 import { useSession } from "@/components/session-provider";
 import { useCategorySummaries } from "@/components/use-pod-data";
 import { useConnectedApps } from "@/components/use-permissions";
+import { useRecentActivity } from "@/components/use-activity";
 import { categoriesWithDataCount } from "@/lib/pod-data";
 import { categoryIcon } from "@/components/category-icon";
+import { ActivityFeed, ActivityEmpty } from "@/components/activity-feed";
 import { ErrorState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,6 +25,7 @@ export default function HomePage() {
   const { profile } = useSession();
   const { data: summaries, loading, error } = useCategorySummaries();
   const apps = useConnectedApps();
+  const activity = useRecentActivity(5);
 
   const firstName = profile?.displayName?.split(/\s+/)[0];
   const withData = summaries ? categoriesWithDataCount(summaries) : undefined;
@@ -160,20 +163,37 @@ export default function HomePage() {
         )}
       </section>
 
-      {/* Recent activity strip — stubbed for P3. */}
+      {/* Recent activity — the newest changes across the pod (honest: changes,
+          not a fabricated read-log). */}
       <section aria-label="Recent activity" className="flex flex-col gap-3">
-        <h2 className="text-lg font-semibold">Recent activity</h2>
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base font-medium text-muted-foreground">
-              Activity log coming soon
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="text-sm text-muted-foreground">
-            You&apos;ll see a plain-language record here of which app read or wrote
-            which data, and when.
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Recent activity</h2>
+          {(activity.data?.length ?? 0) > 0 ? (
+            <Button variant="ghost" size="sm" asChild>
+              <Link href="/activity">
+                See all
+                <ArrowRight className="size-4" aria-hidden="true" />
+              </Link>
+            </Button>
+          ) : null}
+        </div>
+        {activity.error ? (
+          <Card>
+            <CardContent className="py-4 text-sm text-muted-foreground">
+              Couldn&apos;t load recent changes right now.
+            </CardContent>
+          </Card>
+        ) : activity.loading ? (
+          <div className="flex flex-col gap-2">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-16 rounded-xl" />
+            ))}
+          </div>
+        ) : (activity.data?.length ?? 0) === 0 ? (
+          <ActivityEmpty />
+        ) : (
+          <ActivityFeed entries={(activity.data ?? []).slice(0, 5)} />
+        )}
       </section>
     </div>
   );

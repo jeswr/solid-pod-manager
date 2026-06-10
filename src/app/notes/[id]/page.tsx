@@ -8,11 +8,12 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronRight, Loader2, Save, Trash2 } from "lucide-react";
+import { ChevronRight, Eye, Loader2, Pencil, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { notesStore, type Note } from "@/lib/notes";
 import { useStore, useItem } from "@/components/use-productivity";
 import { ErrorState } from "@/components/states";
+import { Markdown } from "@/components/markdown";
 import { ResourceWriteError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,6 +35,7 @@ export default function NoteEditorPage({ params }: { params: Promise<{ id: strin
   const [etag, setEtag] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [preview, setPreview] = useState(false);
 
   // Seed the form once the existing note loads.
   useEffect(() => {
@@ -121,14 +123,48 @@ export default function NoteEditorPage({ params }: { params: Promise<{ id: strin
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="note-text">Note</Label>
-            <Textarea
-              id="note-text"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Write anything — plain text or Markdown."
-              className="min-h-64"
-            />
+            <div className="flex items-center justify-between">
+              <Label htmlFor="note-text">Note</Label>
+              {/* Write / Preview toggle — Markdown renders in Preview. */}
+              <div className="flex gap-1" role="group" aria-label="Editor mode">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={preview ? "ghost" : "secondary"}
+                  aria-pressed={!preview}
+                  onClick={() => setPreview(false)}
+                >
+                  <Pencil className="size-4" aria-hidden="true" />
+                  Write
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={preview ? "secondary" : "ghost"}
+                  aria-pressed={preview}
+                  onClick={() => setPreview(true)}
+                >
+                  <Eye className="size-4" aria-hidden="true" />
+                  Preview
+                </Button>
+              </div>
+            </div>
+            {preview ? (
+              <div
+                className="min-h-64 rounded-md border border-input bg-background px-3 py-2"
+                aria-label="Markdown preview"
+              >
+                <Markdown source={text} />
+              </div>
+            ) : (
+              <Textarea
+                id="note-text"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Write anything — plain text or Markdown."
+                className="min-h-64"
+              />
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">

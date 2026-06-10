@@ -27,10 +27,10 @@ export default function SettingsPage() {
           <Field icon={Fingerprint} label="Display name">
             {profile ? profile.displayName : <Skeleton className="h-5 w-40" />}
           </Field>
-          <Field icon={Fingerprint} label="WebID">
+          <Field icon={Fingerprint} label="Your pod address" hint="sometimes called your WebID">
             <span className="break-all font-mono text-sm">{webId ?? "—"}</span>
           </Field>
-          <Field icon={Server} label="Identity provider">
+          <Field icon={Server} label="Sign-in provider" hint="who you log in with">
             <span className="break-all font-mono text-sm">
               {profile?.issuers[0] ?? "—"}
             </span>
@@ -81,10 +81,13 @@ export default function SettingsPage() {
 function Field({
   icon: Icon,
   label,
+  hint,
   children,
 }: {
   icon: typeof Database;
   label: string;
+  /** Optional plain-language gloss for a technical term (no-jargon principle). */
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -94,6 +97,11 @@ function Field({
       <dl className="m-0 min-w-0">
         <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {label}
+          {hint ? (
+            <span className="ml-1.5 normal-case font-normal tracking-normal lowercase opacity-80">
+              ({hint})
+            </span>
+          ) : null}
         </dt>
         <dd className="m-0 mt-0.5">{children}</dd>
       </dl>

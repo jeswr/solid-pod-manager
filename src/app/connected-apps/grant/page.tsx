@@ -226,14 +226,16 @@ function GrantScreen() {
         })}
       </fieldset>
 
-      {/* Equal visual weight: identical variant + size, side by side (R5). */}
+      {/* Equal visual weight: identical variant + size, side by side (R5). Both
+          neutral `outline` rather than two filled primaries — equal weight, but
+          without reading as a double-confirm (PM review #5). */}
       <div className="grid grid-cols-2 gap-3">
-        <Button size="lg" variant="default" disabled={busy} onClick={decline}>
+        <Button size="lg" variant="outline" disabled={busy} onClick={decline}>
           Don&apos;t allow
         </Button>
         <Button
           size="lg"
-          variant="default"
+          variant="outline"
           disabled={busy || checked.size === 0}
           onClick={accept}
         >

@@ -126,7 +126,7 @@ export default function NoteEditorPage({ params }: { params: Promise<{ id: strin
               id="note-text"
               value={text}
               onChange={(e) => setText(e.target.value)}
-              placeholder="Write anything. Markdown is welcome."
+              placeholder="Write anything — plain text or Markdown."
               className="min-h-64"
             />
           </div>

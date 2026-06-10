@@ -1,9 +1,16 @@
 /**
  * Shared e2e helpers for driving the Solid-OIDC popup login against the local
  * CSS (extracted from golden-path.spec.ts so every suite reuses the verified
- * buffered-popup pattern).
+ * buffered-popup pattern), plus the seeded account constants. Imported by spec
+ * files only — global-setup.ts must stay self-contained (cross-file imports
+ * from it trip Playwright's config transpiler; see its header).
  */
-import type { BrowserContext, Page } from "@playwright/test";
+import { expect, type BrowserContext, type Page } from "@playwright/test";
+
+// Keep in sync with CSS_PORT in playwright.config.ts and e2e/global-setup.ts.
+export const WEBID = "http://localhost:3099/alice/profile/card#me";
+export const EMAIL = "alice@example.com";
+export const PASSWORD = "test-password-123";
 
 /**
  * Buffer every new page in the context so none is missed while another is being
@@ -101,4 +108,17 @@ export async function loginThroughPopup(
   await page.getByRole("button", { name: /^sign in$/i }).click();
   const popup = await waitForLoginPopup(nextPage);
   await completeCssLogin(popup, email, password);
+}
+
+/** Full golden login: WebID entry → OIDC popup → authenticated Home. */
+export async function loginAsAlice(page: Page, context: BrowserContext): Promise<void> {
+  await revealSignInForm(page);
+  await page.fill('input[type="url"]', WEBID);
+  const nextPage = bufferPages(context);
+  await page.getByRole("button", { name: /^sign in$/i }).click();
+  const popup = await waitForLoginPopup(nextPage);
+  await completeCssLogin(popup, EMAIL, PASSWORD);
+  await expect(page.getByRole("heading", { name: /welcome back/i })).toBeVisible({
+    timeout: 30_000,
+  });
 }

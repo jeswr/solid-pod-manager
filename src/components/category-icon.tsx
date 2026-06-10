@@ -7,6 +7,7 @@ import {
   FileText,
   HeartPulse,
   ImageIcon,
+  MessageCircle,
   UserRound,
   Wallet,
   type LucideIcon,
@@ -23,6 +24,7 @@ const ICONS: Record<CategoryIconName, LucideIcon> = {
   briefcase: Briefcase,
   "car-front": CarFront,
   "file-text": FileText,
+  "message-circle": MessageCircle,
   boxes: Boxes,
 };
 

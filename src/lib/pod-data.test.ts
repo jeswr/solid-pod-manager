@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
+import { Parser, Store } from "n3";
 import {
   summariseCategories,
   categoriesWithDataCount,
   listContainer,
   listCategoryItems,
   nameFromUrl,
+  serializeTurtle,
+  writeResource,
   type CategorySummary,
 } from "./pod-data.js";
+import { ResourceWriteError } from "./errors.js";
 import type { RegisteredLocation } from "./type-index.js";
 
 const SCHEMA = "https://schema.org/";
@@ -125,5 +129,70 @@ describe("listCategoryItems", () => {
     const items = await listCategoryItems(summary, fetchImpl);
     expect(items.some((i) => i.url === "https://a.example/cover.jpg")).toBe(true);
     expect(items.some((i) => i.url.endsWith("events.ttl"))).toBe(true);
+  });
+});
+
+function datasetWithOneTriple(): Store {
+  const store = new Store();
+  store.addQuads(
+    new Parser().parse(
+      '<https://a.example/notes.ttl#it> <https://schema.org/name> "Hello" .',
+    ),
+  );
+  return store;
+}
+
+describe("writeResource", () => {
+  it("PUTs serialised Turtle with an explicit content-type", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      captured = { url: String(input), init: init ?? {} };
+      return new Response(null, { status: 201, headers: { etag: '"v1"' } });
+    };
+
+    const { etag } = await writeResource(
+      "https://a.example/notes.ttl",
+      datasetWithOneTriple(),
+      { fetchImpl },
+    );
+
+    expect(captured?.url).toBe("https://a.example/notes.ttl");
+    expect(captured?.init.method).toBe("PUT");
+    const headers = captured?.init.headers as Record<string, string>;
+    expect(headers["content-type"]).toBe("text/turtle");
+    expect(String(captured?.init.body)).toContain('"Hello"');
+    expect(etag).toBe('"v1"');
+  });
+
+  it("sends If-Match / If-None-Match preconditions when asked", async () => {
+    const seen: Record<string, string>[] = [];
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      seen.push(init?.headers as Record<string, string>);
+      return new Response(null, { status: 205 });
+    };
+    const ds = datasetWithOneTriple();
+    await writeResource("https://a.example/x.ttl", ds, { fetchImpl, etag: '"v7"' });
+    await writeResource("https://a.example/x.ttl", ds, { fetchImpl, createOnly: true });
+    expect(seen[0]["if-match"]).toBe('"v7"');
+    expect(seen[1]["if-none-match"]).toBe("*");
+  });
+
+  it("throws a typed ResourceWriteError carrying the status", async () => {
+    const fetchImpl: typeof fetch = async () => new Response(null, { status: 412 });
+    await expect(
+      writeResource("https://a.example/x.ttl", datasetWithOneTriple(), { fetchImpl }),
+    ).rejects.toSatisfy(
+      (e: unknown) => e instanceof ResourceWriteError && e.status === 412,
+    );
+  });
+});
+
+describe("serializeTurtle", () => {
+  it("round-trips the dataset content", async () => {
+    const turtle = await serializeTurtle(datasetWithOneTriple(), {
+      schema: "https://schema.org/",
+    });
+    expect(turtle).toContain("schema:name");
+    expect(turtle).toContain('"Hello"');
   });
 });

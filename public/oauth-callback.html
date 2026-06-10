@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Connecting…</title>
+  </head>
+  <body>
+    <p>Finishing the connection… you can close this window.</p>
+    <script>
+      // Hand the full callback URL (code + state) back to the app window.
+      // Same-origin target: the message never leaves this origin.
+      if (window.opener) {
+        window.opener.postMessage(
+          { type: "pod-manager-oauth", url: location.href },
+          location.origin,
+        );
+      }
+    </script>
+  </body>
+</html>

@@ -39,6 +39,10 @@ export const CLASSES = {
   VideoGame: `${SCHEMA}VideoGame`,
   Message: `${SCHEMA}Message`,
   Event: `${SCHEMA}Event`,
+  // Tier-B OAuth integrations (photos, videos, work positions).
+  ImageObject: `${SCHEMA}ImageObject`,
+  VideoObject: `${SCHEMA}VideoObject`,
+  Organization: `${SCHEMA}Organization`,
 } as const;
 
 /** Shared schema.org basics every imported entity may carry. */
@@ -411,7 +415,7 @@ export class TextDocument extends PodThing {
   }
 }
 
-/** A calendar event (Google Takeout activity) — schema:Event → Calendar. */
+/** A calendar event (Google Calendar, Takeout activity) — schema:Event → Calendar. */
 export class CalendarEvent extends PodThing {
   mark(): this {
     this.types.add(CLASSES.Event);
@@ -422,6 +426,108 @@ export class CalendarEvent extends PodThing {
   }
   set startDate(v: Date | undefined) {
     OptionalAs.object(this, `${SCHEMA}startDate`, v, LiteralFrom.dateTime);
+  }
+  get endDate(): Date | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}endDate`, LiteralAs.date);
+  }
+  set endDate(v: Date | undefined) {
+    OptionalAs.object(this, `${SCHEMA}endDate`, v, LiteralFrom.dateTime);
+  }
+  /** Free-text location (schema:location allows Text). */
+  get location(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}location`, LiteralAs.string);
+  }
+  set location(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}location`, v, LiteralFrom.string);
+  }
+}
+
+/**
+ * A media object (photo or video) — schema:ImageObject / schema:VideoObject →
+ * Media. Carries a content URL (the platform-hosted asset) and, where the API
+ * states one, dimensions and a human-readable duration (videos).
+ */
+export class MediaItem extends PodThing {
+  /** Stamp as a photo ({@link CLASSES.ImageObject}) or video ({@link CLASSES.VideoObject}). */
+  mark(classIri: string = CLASSES.ImageObject): this {
+    this.types.add(classIri);
+    return this;
+  }
+  /** The hosted asset URL (schema:contentUrl). */
+  get contentUrl(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}contentUrl`, NamedNodeAs.string);
+  }
+  set contentUrl(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}contentUrl`, v, NamedNodeFrom.string);
+  }
+  get encodingFormat(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}encodingFormat`, LiteralAs.string);
+  }
+  set encodingFormat(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}encodingFormat`, v, LiteralFrom.string);
+  }
+  get width(): number | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}width`, LiteralAs.number);
+  }
+  set width(v: number | undefined) {
+    OptionalAs.object(this, `${SCHEMA}width`, v, LiteralFrom.integer);
+  }
+  get height(): number | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}height`, LiteralAs.number);
+  }
+  set height(v: number | undefined) {
+    OptionalAs.object(this, `${SCHEMA}height`, v, LiteralFrom.integer);
+  }
+  /** ISO-8601 duration (videos). */
+  get duration(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}duration`, LiteralAs.string);
+  }
+  set duration(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}duration`, v, LiteralFrom.string);
+  }
+}
+
+/**
+ * An organisation or organisational unit (Slack workspace + its channels) —
+ * `schema:Organization` → Work & education. Channels are modelled as member
+ * organisations (a faithful, no-invented-IRI mapping that lands in the right
+ * category, since `foaf:Group` is claimed by Social).
+ */
+export class Organisation extends PodThing {
+  mark(): this {
+    this.types.add(CLASSES.Organization);
+    return this;
+  }
+}
+
+/**
+ * A work position the user held (LinkedIn) — modelled as the employer
+ * `schema:Organization` carrying the role title (schema:jobTitle, allowed as a
+ * Text on the role) and the dates worked. Lands in Work & education.
+ */
+export class WorkPosition extends PodThing {
+  mark(): this {
+    this.types.add(CLASSES.Organization);
+    return this;
+  }
+  /** The role/title held at this organisation. */
+  get jobTitle(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}jobTitle`, LiteralAs.string);
+  }
+  set jobTitle(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}jobTitle`, v, LiteralFrom.string);
+  }
+  get startDate(): Date | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}startDate`, LiteralAs.date);
+  }
+  set startDate(v: Date | undefined) {
+    OptionalAs.object(this, `${SCHEMA}startDate`, v, LiteralFrom.dateTime);
+  }
+  get endDate(): Date | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}endDate`, LiteralAs.date);
+  }
+  set endDate(v: Date | undefined) {
+    OptionalAs.object(this, `${SCHEMA}endDate`, v, LiteralFrom.dateTime);
   }
 }
 

@@ -103,20 +103,24 @@ function fakePod(options?: {
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
-    if (method === "HEAD") {
-      if (!resources.has(url)) return new Response(null, { status: 404 });
-      return new Response(null, {
-        status: 200,
-        headers: { link: '<.acl>; rel="acl"' },
-      });
-    }
-    if (method === "GET") {
-      const body = docs.get(url);
-      if (body === undefined) return new Response("missing", { status: 404 });
-      return new Response(body, {
-        status: 200,
-        headers: { "content-type": "text/turtle", etag: '"v1"' },
-      });
+    if (method === "HEAD" || method === "GET") {
+      // ACL documents serve their turtle body + etag.
+      const aclBody = docs.get(url);
+      if (aclBody !== undefined) {
+        return new Response(method === "HEAD" ? null : aclBody, {
+          status: 200,
+          headers: { "content-type": "text/turtle", etag: '"v1"' },
+        });
+      }
+      // Resources answer with the Link: rel="acl" discovery header. Discovery
+      // uses GET (the auth-patched fetch only upgrades GET on a 401).
+      if (resources.has(url)) {
+        return new Response(method === "HEAD" ? null : "", {
+          status: 200,
+          headers: { link: '<.acl>; rel="acl"', "content-type": "text/turtle" },
+        });
+      }
+      return new Response("missing", { status: 404 });
     }
     if (method === "PUT") {
       const headers: Record<string, string> = {};

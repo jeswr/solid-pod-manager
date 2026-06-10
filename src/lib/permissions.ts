@@ -258,14 +258,21 @@ export class WacPermissionsBackend implements PermissionsBackend {
    * Discover the ACL document URL for a resource from its `Link: rel="acl"`
    * header (never guessed). Returns `undefined` when the resource itself is
    * absent (a registered-but-missing location — skip, not an error).
+   *
+   * Uses **GET**, not HEAD: the reactive-authentication global-fetch patch only
+   * replays the 401→DPoP upgrade for GET, so a HEAD to a protected resource
+   * returns a bare 401 that never authenticates (observed in e2e). The body is
+   * discarded — only the `Link` header matters.
    */
   private async discoverAclUrl(resourceUrl: string): Promise<string | undefined> {
     let res: Response;
     try {
-      res = await this.call(resourceUrl, { method: "HEAD" });
+      res = await this.call(resourceUrl, { method: "GET" });
     } catch (cause) {
       throw new AclDiscoveryError(resourceUrl, { cause });
     }
+    // Drain the body so the connection is freed (we only wanted the headers).
+    await res.body?.cancel().catch(() => undefined);
     if (res.status === 404) return undefined;
     if (!res.ok) throw new AclDiscoveryError(resourceUrl);
     const acl = aclUrlFromLinkHeader(res.headers.get("link"), resourceUrl);

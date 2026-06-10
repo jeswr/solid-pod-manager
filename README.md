@@ -1,5 +1,29 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Integrations (Connect sources)
+
+The `/connect` catalog ships 30 apps (see `docs/integrations-catalog.md`); the 8 Tier-A
+adapters (Spotify, GitHub, Strava, Reddit, Discord, Twitch, Notion, Dropbox) run in
+**demo mode** (fixture data, honestly labelled) until configured. To take one live, set
+its env var at build time:
+
+| App | Live when set | Also needs |
+|---|---|---|
+| Spotify | `NEXT_PUBLIC_SPOTIFY_CLIENT_ID` | — (secretless PKCE) |
+| GitHub | `NEXT_PUBLIC_GITHUB_CLIENT_ID` | `NEXT_PUBLIC_GITHUB_TOKEN_PROXY` |
+| Strava | `NEXT_PUBLIC_STRAVA_CLIENT_ID` | `NEXT_PUBLIC_STRAVA_TOKEN_PROXY` |
+| Reddit | `NEXT_PUBLIC_REDDIT_CLIENT_ID` | — (installed-app flow) |
+| Discord | `NEXT_PUBLIC_DISCORD_CLIENT_ID` | — (secretless PKCE) |
+| Twitch | `NEXT_PUBLIC_TWITCH_CLIENT_ID` | `NEXT_PUBLIC_TWITCH_TOKEN_PROXY` |
+| Notion | `NEXT_PUBLIC_NOTION_CLIENT_ID` | `NEXT_PUBLIC_NOTION_TOKEN_PROXY` |
+| Dropbox | `NEXT_PUBLIC_DROPBOX_CLIENT_ID` | — (secretless PKCE) |
+
+`*_TOKEN_PROXY` = a tiny serverless endpoint that forwards the PKCE code→token exchange
+adding the client secret, for the platforms that refuse secretless public clients. Each
+platform's full registration checklist is in its adapter's `metadata.requirements`
+(rendered on the app's connect page). Register `<origin>/oauth-callback.html` as the
+redirect URI everywhere. OAuth tokens live in memory only — never persisted.
+
 ## Getting Started
 
 First, run the development server:

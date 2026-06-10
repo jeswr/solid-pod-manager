@@ -88,10 +88,24 @@ async function seedProfile(ccId: string, ccSecret: string) {
 }
 
 export default async function globalSetup() {
-  // Guard: make sure :3000 is actually a CSS — a stray dev server (e.g. a `next dev`
-  // with its default port) answers 200 on "/" and poisons everything downstream
+  // Wait for CSS to accept connections: on a cold start the webServer boot
+  // (~15-20 s) can still be in flight when globalSetup runs — observed, not
+  // hypothetical (a single immediate fetch failed with ECONNREFUSED while
+  // Components.js was still loading). Poll, then run the identity guard below.
+  const deadline = Date.now() + 120_000;
+  let probe: Response;
+  for (;;) {
+    try {
+      probe = await fetch(`${BASE}/.account/`, { headers: { accept: "application/json" } });
+      break;
+    } catch (e) {
+      if (Date.now() > deadline) throw e;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  // Guard: make sure the listener is actually a CSS — a stray dev server (e.g. a
+  // `next dev` on this port) answers 200 on "/" and poisons everything downstream
   // with cryptic 308/HTML responses.
-  const probe = await fetch(`${BASE}/.account/`, { headers: { accept: "application/json" } });
   if (!probe.ok || !(probe.headers.get("content-type") ?? "").includes("json")) {
     throw new Error(
       `Whatever is listening on ${BASE} is not a Community Solid Server ` +

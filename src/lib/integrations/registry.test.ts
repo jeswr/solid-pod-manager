@@ -7,6 +7,8 @@ import {
   allCatalogEntries,
   isLive,
   statusOf,
+  TIER_B,
+  TIER_B_ADAPTERS,
   TIER_C,
 } from "./registry.js";
 
@@ -37,6 +39,54 @@ describe("integrations registry", () => {
       expect(a.fixtures().length).toBeGreaterThan(0);
       expect(a.metadata.requirements.length).toBeGreaterThan(0); // honest go-live list
       expect(adapterById(a.metadata.id)).toBe(a);
+    }
+  });
+
+  it("ships the 12 Tier-B adapters, each demoable now with an honest blocker", () => {
+    expect(TIER_B_ADAPTERS.map((a) => a.metadata.id).sort()).toEqual([
+      "facebook",
+      "fitbit",
+      "garmin",
+      "google-calendar",
+      "google-photos",
+      "instagram",
+      "linkedin",
+      "pinterest",
+      "slack",
+      "tiktok",
+      "x-twitter",
+      "youtube",
+    ]);
+    for (const a of TIER_B_ADAPTERS) {
+      expect(a.metadata.tier).toBe("B");
+      expect(a.metadata.authKind).toBe("oauth-pkce");
+      expect(a.oauth).toBeDefined();
+      // A real, fixture-backed import drives the demo.
+      expect(a.fixtures().length).toBeGreaterThan(0);
+      // The first requirement is the specific platform-approval blocker.
+      expect(a.metadata.requirements.length).toBeGreaterThan(0);
+      expect(adapterById(a.metadata.id)).toBe(a);
+      // Even with config they never auto-go-live: the catalog gates them.
+      expect(statusOf({ ...a.metadata })).toBe("approval-needed");
+    }
+  });
+
+  it("Tier-B catalog entries are derived from the adapters and carry a blocker", () => {
+    expect(TIER_B).toHaveLength(TIER_B_ADAPTERS.length);
+    for (const entry of TIER_B) {
+      expect(entry.blocker).toBeTruthy();
+      expect(adapterById(entry.id)).toBeDefined();
+    }
+  });
+
+  it("proxy-requiring Tier-B platforms document their proxy env var", () => {
+    for (const a of TIER_B_ADAPTERS) {
+      if (a.oauth?.tokenExchange === "proxy") {
+        expect(
+          a.metadata.requirements.some((r) => r.includes("TOKEN_PROXY")),
+          `${a.metadata.id} must document its proxy requirement`,
+        ).toBe(true);
+      }
     }
   });
 

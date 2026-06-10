@@ -84,11 +84,7 @@ export default function ConnectAppPage({ params }: { params: Promise<{ id: strin
       {entry.tier === "A" ? (
         <TierAFlow entry={entry} />
       ) : entry.tier === "B" ? (
-        <EmptyState
-          icon={Clock}
-          title="Coming soon — needs platform approval"
-          description={`${entry.blocker ?? "This platform reviews apps before users may connect."} We'll enable this the moment approval lands; nothing about your pod changes in the meantime.`}
-        />
+        <TierBFlow entry={entry} />
       ) : (
         <TierCFlow entry={entry} />
       )}
@@ -109,6 +105,93 @@ function TierCFlow({ entry }: { entry: CatalogEntry }) {
     );
   }
   return <TierCImport entry={entry} adapter={adapter} />;
+}
+
+/**
+ * Tier B: the platform has a real OAuth API and a working import, but app
+ * review gates any *live* connect. We let the user run the **demo** import
+ * (clearly-labelled sample data, the full real UX) while stating honestly that
+ * connecting their real account needs platform approval + credentials.
+ */
+function TierBFlow({ entry }: { entry: CatalogEntry }) {
+  const adapter = adapterById(entry.id);
+  const { state, start, reset } = useConnect(adapter);
+
+  if (!adapter) {
+    return (
+      <EmptyState
+        icon={Clock}
+        title="Coming soon — needs platform approval"
+        description={`${entry.blocker ?? "This platform reviews apps before users may connect."} We'll enable this the moment approval lands; nothing about your pod changes in the meantime.`}
+      />
+    );
+  }
+
+  const busy = state.phase === "importing";
+
+  return (
+    <section aria-label="Import" className="flex flex-col gap-4">
+      {state.phase !== "done" ? (
+        <Alert>
+          <Clock className="size-4" aria-hidden="true" />
+          <AlertTitle>Needs platform approval to use your real account</AlertTitle>
+          <AlertDescription>
+            {entry.name} has a real API, and this import works end-to-end — but
+            the platform reviews apps before they may touch a real account. So
+            the button below runs the <strong>demo</strong>: it writes
+            clearly-labelled <strong>sample data</strong> into your pod (the full
+            experience, honestly staged). To connect your real {entry.name}{" "}
+            account, the app&apos;s maintainer still needs to:
+            <ul className="mt-2 list-disc pl-5">
+              {entry.requirements.map((r) => (
+                <li key={r}>{r}</li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <div aria-live="polite" className="flex flex-col gap-4">
+        {state.phase === "importing" ? (
+          <ImportProgressBar
+            label={state.progress?.label ?? "Importing…"}
+            done={state.progress?.done ?? 0}
+            total={state.progress?.total}
+          />
+        ) : null}
+
+        {state.phase === "done" && state.report ? (
+          <SuccessPanel entry={entry} report={state.report} demo />
+        ) : null}
+
+        {state.phase === "error" && state.error ? (
+          <ErrorState error={state.error} onRetry={start} />
+        ) : null}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        {state.phase === "done" ? (
+          <Button variant="outline" onClick={reset}>
+            Import again
+          </Button>
+        ) : (
+          <Button onClick={start} disabled={busy}>
+            {busy ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Download className="size-4" aria-hidden="true" />
+            )}
+            Import demo data
+          </Button>
+        )}
+        {state.phase !== "done" ? (
+          <span className="text-xs text-muted-foreground">
+            No {entry.name} account needed for the demo.
+          </span>
+        ) : null}
+      </div>
+    </section>
+  );
 }
 
 function CategoryList({ entry }: { entry: CatalogEntry }) {

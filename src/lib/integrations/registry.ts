@@ -13,12 +13,24 @@
  */
 import { discordAdapter } from "./discord/adapter.js";
 import { dropboxAdapter } from "./dropbox/adapter.js";
+import { facebookAdapter } from "./facebook/adapter.js";
+import { fitbitAdapter } from "./fitbit/adapter.js";
+import { garminAdapter } from "./garmin/adapter.js";
 import { githubAdapter } from "./github/adapter.js";
+import { googleCalendarAdapter } from "./google-calendar/adapter.js";
+import { googlePhotosAdapter } from "./google-photos/adapter.js";
+import { instagramAdapter } from "./instagram/adapter.js";
+import { linkedinAdapter } from "./linkedin/adapter.js";
 import { notionAdapter } from "./notion/adapter.js";
+import { pinterestAdapter } from "./pinterest/adapter.js";
 import { redditAdapter } from "./reddit/adapter.js";
+import { slackAdapter } from "./slack/adapter.js";
 import { spotifyAdapter } from "./spotify/adapter.js";
 import { stravaAdapter } from "./strava/adapter.js";
+import { tiktokAdapter } from "./tiktok/adapter.js";
 import { twitchAdapter } from "./twitch/adapter.js";
+import { xTwitterAdapter } from "./x-twitter/adapter.js";
+import { youtubeAdapter } from "./youtube/adapter.js";
 import type { IntegrationAdapter, IntegrationMetadata } from "./core/types.js";
 
 /** A renderable catalog row — metadata plus tier-specific honesty fields. */
@@ -44,7 +56,32 @@ export const ADAPTERS: readonly IntegrationAdapter[] = [
   dropboxAdapter,
 ];
 
-const byId = new Map(ADAPTERS.map((a) => [a.metadata.id, a]));
+/**
+ * The 12 Tier-B adapters — real OAuth APIs with working fixture-backed
+ * imports, but platform app-review gates any **live** user connect. They are
+ * full {@link IntegrationAdapter}s (so the demo import is real), yet
+ * {@link statusOf} keeps them `"approval-needed"`: even with a client id, the
+ * platform must approve the app before it can touch a real account.
+ */
+export const TIER_B_ADAPTERS: readonly IntegrationAdapter[] = [
+  googleCalendarAdapter,
+  googlePhotosAdapter,
+  youtubeAdapter,
+  fitbitAdapter,
+  garminAdapter,
+  instagramAdapter,
+  facebookAdapter,
+  tiktokAdapter,
+  linkedinAdapter,
+  xTwitterAdapter,
+  slackAdapter,
+  pinterestAdapter,
+];
+
+/** Every adapter the app can run an import for (Tier A live/demo + Tier B demo). */
+export const ALL_ADAPTERS: readonly IntegrationAdapter[] = [...ADAPTERS, ...TIER_B_ADAPTERS];
+
+const byId = new Map(ALL_ADAPTERS.map((a) => [a.metadata.id, a]));
 
 export function adapterById(id: string): IntegrationAdapter | undefined {
   return byId.get(id);
@@ -68,24 +105,6 @@ export function statusOf(entry: CatalogEntry): IntegrationStatus {
   return adapter && isLive(adapter) ? "live" : "demo";
 }
 
-const B = (
-  id: string,
-  name: string,
-  categories: string[],
-  whatYouGet: string,
-  blocker: string,
-): CatalogEntry => ({
-  id,
-  name,
-  tier: "B",
-  authKind: "none",
-  scopes: [],
-  categories,
-  whatYouGet,
-  requirements: [blocker],
-  blocker,
-});
-
 const C = (
   id: string,
   name: string,
@@ -104,21 +123,16 @@ const C = (
   exportFormat,
 });
 
-/** Tier B — real OAuth APIs exist, but platform approval gates any user connect. */
-export const TIER_B: readonly CatalogEntry[] = [
-  B("google-calendar", "Google Calendar", ["calendar"], "Your events and appointments into Calendar.", "Google OAuth verification + restricted-scope review."),
-  B("google-photos", "Google Photos", ["media"], "Your photo library metadata into Media.", "Photos Library API approval."),
-  B("youtube", "YouTube", ["media"], "Subscriptions and playlists into Media.", "YouTube API audit for history scopes."),
-  B("fitbit", "Fitbit", ["health"], "Steps, sleep and heart data into Health.", "Fitbit developer app review for intraday data."),
-  B("garmin", "Garmin", ["health", "mobility"], "Workouts and journeys into Health and Mobility.", "Garmin partner-program (Health/Connect API) approval."),
-  B("instagram", "Instagram", ["media", "social"], "Your posts and profile into Media and Social.", "Meta app review."),
-  B("facebook", "Facebook", ["social"], "Your profile, posts and groups into Social & interests.", "Meta app review."),
-  B("tiktok", "TikTok", ["media", "social"], "Your videos and likes into Media and Social.", "TikTok developer audit."),
-  B("linkedin", "LinkedIn", ["work-education"], "Your positions and education into Work & education.", "LinkedIn Member-data program approval."),
-  B("x-twitter", "X (Twitter)", ["social"], "Your posts and follows into Social & interests.", "Paid API tier + elevated access."),
-  B("slack", "Slack", ["work-education"], "Your workspaces and channels into Work & education.", "Workspace-admin install approval."),
-  B("pinterest", "Pinterest", ["media", "social"], "Your boards and pins into Media and Social.", "Pinterest trial-access review."),
-];
+/**
+ * Tier B — real OAuth APIs exist with working fixture-backed imports, but
+ * platform approval gates any **live** user connect. Derived from the adapters'
+ * own metadata (single source of truth); the `blocker` is the first
+ * requirement, which each adapter states as its specific platform gate.
+ */
+export const TIER_B: readonly CatalogEntry[] = TIER_B_ADAPTERS.map((a) => ({
+  ...a.metadata,
+  blocker: a.metadata.requirements[0],
+}));
 
 /** Tier C — no user-grade API; the platform's official export file instead. */
 export const TIER_C: readonly CatalogEntry[] = [

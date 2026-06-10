@@ -11,11 +11,11 @@ export interface NavItem {
   primary?: boolean;
 }
 
-/** Primary navigation (DESIGN.md §3). Connected apps + Activity are P2/P3 stubs. */
+/** Primary navigation (DESIGN.md §3). Activity is a P3 stub. */
 export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/", label: "Home", icon: Home, primary: true },
   { href: "/my-data", label: "My data", icon: Database, primary: true },
-  { href: "/connected-apps", label: "Connected apps", icon: AppWindow, stub: true, primary: true },
+  { href: "/connected-apps", label: "Connected apps", icon: AppWindow, primary: true },
   { href: "/activity", label: "Activity", icon: Activity, stub: true },
   { href: "/settings", label: "Settings", icon: Settings, primary: true },
 ] as const;

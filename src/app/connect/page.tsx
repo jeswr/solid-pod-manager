@@ -61,8 +61,8 @@ export default function ConnectPage() {
         entries={tierB}
       />
       <CatalogSection
-        title="From an export file"
-        description="No user API exists — but every one of these offers an official data export, and importing those files is on the roadmap."
+        title="Import from a file"
+        description="No live API exists for these — so import the official data export each service lets you download, straight into your pod."
         entries={tierC}
       />
     </div>

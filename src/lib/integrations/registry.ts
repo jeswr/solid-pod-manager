@@ -5,7 +5,7 @@
  * - Tier A + client id (+ proxy where the platform demands one) → **live**
  * - Tier A unconfigured → **demo** (full UX against recorded fixtures)
  * - Tier B → **approval-needed** (platform review gates any user connect)
- * - Tier C → **export-file** (no user-grade API; file import in a later increment)
+ * - Tier C → **export-file** (no user-grade API; imports the user's official export file)
  *
  * The gate is env-only: an adapter goes live iff `NEXT_PUBLIC_<APP>_CLIENT_ID`
  * is present at build time (each adapter references its env var literally so

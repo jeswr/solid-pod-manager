@@ -36,7 +36,12 @@ export function useConnect(adapter: IntegrationAdapter | undefined) {
   const { webId, profile, activeStorage } = useSession();
   const [state, setState] = useState<ConnectState>({ phase: "idle" });
   const cursorRef = useRef<string | undefined>(undefined);
-  const live = adapter ? isLive(adapter) : false;
+  // Tier-B is approval-gated by contract (registry.statusOf never returns "live"
+  // for it): the platform, not a configured client id, gates going live. So even
+  // if a NEXT_PUBLIC_<TIERB>_CLIENT_ID is set at build, never run a live OAuth
+  // import — otherwise the "Import demo data" button would silently pull the
+  // user's REAL account under a "Demo" label (PM review, dark-pattern hazard).
+  const live = adapter ? adapter.metadata.tier !== "B" && isLive(adapter) : false;
 
   const start = useCallback(async () => {
     if (!adapter || !webId) return;

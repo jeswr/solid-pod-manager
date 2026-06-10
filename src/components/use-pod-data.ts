@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchRdf } from "@jeswr/fetch-rdf";
 import { useSession } from "@/components/session-provider";
+import { useResourceNotifications } from "@/components/use-resource-notifications";
 import { discoverRegistrations } from "@/lib/type-index";
 import {
   listCategoryItems,
@@ -106,6 +107,14 @@ export function useCategoryItems(
       cancelled = true;
     };
   }, [summary, status, nonce]);
+
+  // Live updates (progressive enhancement): watch the category's container so an
+  // edit/add/delete elsewhere refreshes this list. Falls back silently to manual
+  // reload when the server has no notifications. Subscribe to the first container
+  // location; a single-`instance` category has no container to watch (topicUrl
+  // undefined → no subscription), which is fine — those are point resources.
+  const topicUrl = summary?.locations.find((l) => l.container)?.container;
+  useResourceNotifications(topicUrl, reload);
 
   return { ...state, reload };
 }

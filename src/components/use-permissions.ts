@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchRdf } from "@jeswr/fetch-rdf";
 import { useSession } from "@/components/session-provider";
+import { useResourceNotifications } from "@/components/use-resource-notifications";
 import type { AsyncState } from "@/components/use-pod-data";
 import { discoverRegistrations } from "@/lib/type-index";
 import { summariseCategories } from "@/lib/pod-data";
@@ -86,6 +87,11 @@ export function useConnectedApps(): ConnectedAppsState {
       cancelled = true;
     };
   }, [webId, activeStorage, status, nonce]);
+
+  // Live "who-can-see-what" (progressive enhancement): watch the pod root so a
+  // grant/revoke made elsewhere refreshes the connected-apps model. Degrades
+  // silently to manual reload when notifications are unavailable.
+  useResourceNotifications(activeStorage, reload);
 
   return { ...state, reload };
 }

@@ -24,7 +24,9 @@ import { categoryIcon } from "@/components/category-icon";
 import { integrationIcon } from "@/components/integration-icon";
 import { StatusChip } from "@/components/integration-status";
 import { EmptyState, ErrorState } from "@/components/states";
+import { TierCImport } from "@/components/tier-c-import";
 import { useConnect } from "@/components/use-connect";
+import { fileAdapterById } from "@/lib/integrations/file-adapters";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -88,14 +90,25 @@ export default function ConnectAppPage({ params }: { params: Promise<{ id: strin
           description={`${entry.blocker ?? "This platform reviews apps before users may connect."} We'll enable this the moment approval lands; nothing about your pod changes in the meantime.`}
         />
       ) : (
-        <EmptyState
-          icon={FileUp}
-          title="Import from an export file"
-          description={`${entry.name} has no user-level API, but you can request your data as ${entry.exportFormat ?? "an official export"}. Importing that file here is on the roadmap.`}
-        />
+        <TierCFlow entry={entry} />
       )}
     </div>
   );
+}
+
+/** Tier C: import the platform's official export file into the pod. */
+function TierCFlow({ entry }: { entry: CatalogEntry }) {
+  const adapter = fileAdapterById(entry.id);
+  if (!adapter) {
+    return (
+      <EmptyState
+        icon={FileUp}
+        title="Import from an export file"
+        description={`${entry.name} has no user-level API, but you can request your data as ${entry.exportFormat ?? "an official export"}. File import for this source is coming soon.`}
+      />
+    );
+  }
+  return <TierCImport entry={entry} adapter={adapter} />;
 }
 
 function CategoryList({ entry }: { entry: CatalogEntry }) {

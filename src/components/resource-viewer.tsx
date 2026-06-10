@@ -1,6 +1,7 @@
 import { Download, ExternalLink, FileQuestion, LinkIcon } from "lucide-react";
 import type { LoadedResource } from "@/components/use-resource";
 import type { PropertyGroup } from "@/lib/resource-view";
+import { safeLinkHref } from "@/lib/pod-scope";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -90,23 +91,29 @@ function RdfViewer({ groups }: { groups: PropertyGroup[] }) {
                     </th>
                     <td className="py-2 align-top">
                       <ul className="flex flex-col gap-1">
-                        {entry.values.map((v, i) => (
-                          <li key={`${v.value}-${i}`} className="break-all">
-                            {v.kind === "named" ? (
-                              <a
-                                href={v.value}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
-                              >
-                                <LinkIcon className="size-3 shrink-0" aria-hidden="true" />
-                                {v.value}
-                              </a>
-                            ) : (
-                              <span>{v.value}</span>
-                            )}
-                          </li>
-                        ))}
+                        {entry.values.map((v, i) => {
+                          // SECURITY (SEC-2): only render an IRI as a link when its
+                          // scheme is safe; `javascript:`/`data:` IRIs from pod data
+                          // render as inert text.
+                          const href = v.kind === "named" ? safeLinkHref(v.value) : undefined;
+                          return (
+                            <li key={`${v.value}-${i}`} className="break-all">
+                              {href ? (
+                                <a
+                                  href={href}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+                                >
+                                  <LinkIcon className="size-3 shrink-0" aria-hidden="true" />
+                                  {v.value}
+                                </a>
+                              ) : (
+                                <span>{v.value}</span>
+                              )}
+                            </li>
+                          );
+                        })}
                       </ul>
                     </td>
                   </tr>

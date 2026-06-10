@@ -90,12 +90,13 @@ function Field({
   return (
     <div className="flex items-start gap-3">
       <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <div className="min-w-0">
+      {/* A single-pair description list — valid dt/dd markup (PM-8). */}
+      <dl className="m-0 min-w-0">
         <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {label}
         </dt>
-        <dd className="mt-0.5">{children}</dd>
-      </div>
+        <dd className="m-0 mt-0.5">{children}</dd>
+      </dl>
     </div>
   );
 }

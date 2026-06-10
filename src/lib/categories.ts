@@ -67,7 +67,7 @@ export const CATEGORIES: readonly DataCategory[] = [
     label: "Identity",
     tier: "common",
     icon: "user-round",
-    assurance: "Your core profile. Your basic identity is public by design on Solid.",
+    assurance: "Your core profile — the basics of who you are. Your name and photo are usually public so apps can recognise you.",
     description: "Your name, photo, and the basics of who you are.",
     classes: [`${FOAF}Person`, `${SCHEMA}Person`, `${SCHEMA_HTTP}Person`, `${VCARD}Individual`],
   },

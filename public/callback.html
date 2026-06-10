@@ -22,9 +22,15 @@
     <!--
       Hands the authorization code back to the app window that opened this popup.
       Required by @solid/reactive-authentication (AGENTS.md §Authentication).
+
+      SECURITY (review SEC-5): the URL carries the OAuth `code`, so target the
+      message at OUR origin only — never broadcast it to "*". callback.html is
+      same-origin as the app, so location.origin is the right target.
     -->
     <script>
-      opener.postMessage(location.href);
+      if (window.opener) {
+        window.opener.postMessage(location.href, location.origin);
+      }
     </script>
   </body>
 </html>

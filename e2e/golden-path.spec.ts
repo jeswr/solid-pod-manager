@@ -13,28 +13,51 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 
-const WEBID = "http://localhost:3099/alice/profile/card#me"; // seeded by global-setup (CSS on :3099)
+// CSS port mirrors E2E_CSS_PORT (see playwright.config.ts / global-setup.ts).
+const CSS_ORIGIN = `http://localhost:${process.env.E2E_CSS_PORT ?? "3099"}`;
+const WEBID = `${CSS_ORIGIN}/alice/profile/card#me`; // seeded by global-setup
 const EMAIL = "alice@example.com";
 const PASSWORD = "test-password-123";
 
+/**
+ * A fresh visitor (no recent accounts) sees the "create a pod" view first; the
+ * pod-address form is one tap behind "Already have a pod? Sign in". Reveal it.
+ */
+async function revealSignInForm(page: Page): Promise<void> {
+  await page.goto("/");
+  const urlInput = page.locator('input[type="url"]');
+  if (!(await urlInput.isVisible().catch(() => false))) {
+    await page.getByRole("button", { name: /^sign in$/i }).first().click();
+  }
+  await urlInput.waitFor({ state: "visible" });
+}
+
 test.describe("Login surface", () => {
-  test("shows WebID-first entry with a get-a-pod affordance", async ({ page }) => {
+  test("leads with the value prop and a create-a-pod path", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: /your data, your rules/i })).toBeVisible();
-    await expect(page.locator('input[type="url"]')).toBeVisible();
-    await expect(page.getByRole("link", { name: /get .*pod/i })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /one home for all your personal data/i }),
+    ).toBeVisible();
+    // New users get provider choices to create a pod, no jargon wall.
+    await expect(page.getByRole("heading", { name: /create your free pod/i })).toBeVisible();
+    await expect(page.getByRole("link", { name: /solidcommunity\.net/i })).toBeVisible();
   });
 
-  test("rejects a malformed WebID without navigating away", async ({ page }) => {
-    await page.goto("/");
+  test("reveals the pod-address sign-in form on request", async ({ page }) => {
+    await revealSignInForm(page);
+    await expect(page.getByLabel(/your pod address/i)).toBeVisible();
+  });
+
+  test("rejects a malformed pod address without navigating away", async ({ page }) => {
+    await revealSignInForm(page);
     await page.fill('input[type="url"]', "not-a-valid-url");
     await page.getByRole("button", { name: /^sign in$/i }).click();
     // Native URL validation or the app's own error — either way we stay put.
     await expect(page.locator('input[type="url"]')).toBeVisible();
   });
 
-  test("surfaces an unreachable / non-Solid WebID with a clear error", async ({ page }) => {
-    await page.goto("/");
+  test("surfaces an unreachable / non-Solid address with a clear error", async ({ page }) => {
+    await revealSignInForm(page);
     await page.fill('input[type="url"]', "https://nonexistent.invalid/profile/card#me");
     await page.getByRole("button", { name: /^sign in$/i }).click();
     // Scope to the form's own error (Next injects its own role="alert" route announcer).
@@ -44,12 +67,12 @@ test.describe("Login surface", () => {
 
 test.describe("Golden path: login → My data", () => {
   test("logs in through the OIDC popup and browses My data", async ({ page, context }) => {
-    await page.goto("/");
+    await revealSignInForm(page);
 
     // Confirm a private resource really is auth-gated, so a pass PROVES the auth
     // upgrade ran. The pod root is world-readable on a fresh CSS pod, but its
     // `.acl` (owner-only Control) is not — that is what login unlocks.
-    const probe = await page.request.get("http://localhost:3099/alice/.acl", {
+    const probe = await page.request.get(`${CSS_ORIGIN}/alice/.acl`, {
       failOnStatusCode: false,
     });
     expect(probe.status()).toBe(401);

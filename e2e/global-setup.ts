@@ -5,8 +5,9 @@
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { randomUUID, createHash } from "node:crypto";
 
-// Keep in sync with CSS_PORT in playwright.config.ts and the WEBID in golden-path.spec.ts.
-const BASE = "http://localhost:3099";
+// CSS port — overridable (E2E_CSS_PORT) so parallel worktrees don't collide.
+// Mirror in playwright.config.ts (CSS_PORT) and golden-path.spec.ts.
+const BASE = `http://localhost:${process.env.E2E_CSS_PORT ?? "3099"}`;
 const ISSUER = `${BASE}/`;
 const TOKEN_ENDPOINT = `${BASE}/.oidc/token`;
 const POD = "alice";
@@ -88,15 +89,25 @@ async function seedProfile(ccId: string, ccSecret: string) {
 }
 
 export default async function globalSetup() {
-  // Guard: make sure :3000 is actually a CSS — a stray dev server (e.g. a `next dev`
-  // with its default port) answers 200 on "/" and poisons everything downstream
-  // with cryptic 308/HTML responses.
-  const probe = await fetch(`${BASE}/.account/`, { headers: { accept: "application/json" } });
-  if (!probe.ok || !(probe.headers.get("content-type") ?? "").includes("json")) {
+  // Wait for CSS to be ready AND confirm it really is a CSS. Playwright starts the
+  // CSS webServer and waits on `/`, but `/.account/` can lag a beat — and a stray
+  // dev server (e.g. `next dev` on a clashing port) answers 200 on `/` while 308-ing
+  // `/.account/`. Retry for readiness; once it answers, validate it's JSON (a CSS).
+  let probe: Response | undefined;
+  for (let i = 0; i < 30; i++) {
+    try {
+      probe = await fetch(`${BASE}/.account/`, { headers: { accept: "application/json" } });
+      if (probe.ok) break;
+    } catch {
+      // connection refused while CSS finishes booting — retry
+    }
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  if (!probe || !probe.ok || !(probe.headers.get("content-type") ?? "").includes("json")) {
     throw new Error(
-      `Whatever is listening on ${BASE} is not a Community Solid Server ` +
-        `(/.account/ -> ${probe.status} ${probe.headers.get("content-type")}). ` +
-        `Check 'lsof -i :3000' — a stray 'next dev' (default port 3000) is the usual culprit.`,
+      `Whatever is listening on ${BASE} is not a ready Community Solid Server ` +
+        `(/.account/ -> ${probe?.status} ${probe?.headers.get("content-type")}). ` +
+        `Check 'lsof -i ${BASE}' for a stray server.`,
     );
   }
   // Idempotent across runs: with `reuseExistingServer` a long-lived local CSS already has

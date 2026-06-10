@@ -6,8 +6,11 @@ import { defineConfig, devices } from "@playwright/test";
 // and of next dev's default :3000. The app runs on :3200 (AGENTS.md §Servers). Keep the
 // CSS port in sync with e2e/global-setup.ts and e2e/golden-path.spec.ts — cross-file
 // imports from global-setup trip Playwright's config transpiler, so it's repeated there.
-const APP_PORT = 3200;
-const CSS_PORT = 3099;
+// Overridable so parallel git worktrees can run their e2e on distinct ports
+// (E2E_APP_PORT / E2E_CSS_PORT). global-setup.ts and golden-path.spec.ts read the
+// SAME env vars (cross-file imports from global-setup trip the config transpiler).
+const APP_PORT = Number(process.env.E2E_APP_PORT ?? 3200);
+const CSS_PORT = Number(process.env.E2E_CSS_PORT ?? 3099);
 
 export default defineConfig({
   testDir: "./e2e",
@@ -29,11 +32,14 @@ export default defineConfig({
   globalSetup: "./e2e/global-setup.ts",
   webServer: [
     {
-      // In-memory WAC CSS, pinned major 7 (AGENTS.md §Servers).
+      // In-memory WAC CSS, pinned major 7 (AGENTS.md §Servers). NEVER reused: the
+      // in-memory account store accumulates half-created state across runs, which
+      // breaks account seeding ("needs at least 1 login method"). A fresh CSS each
+      // run (~5s) is deterministic. Ports are env-overridable to avoid collisions.
       command: `npx -y @solid/community-server@7 -p ${CSS_PORT}`,
       url: `http://localhost:${CSS_PORT}/`,
       timeout: 120_000,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       stdout: "ignore",
       stderr: "pipe",
     },
@@ -43,7 +49,9 @@ export default defineConfig({
       // destroying the in-flight OIDC state — observed and diagnosed, not hypothetical. The
       // prod server has no on-demand compilation, so the flow is deterministic AND we test
       // the real bundle. Never reused: a stale dev server on this port poisons the run.
-      command: `npm run build && npx next start -p ${APP_PORT}`,
+      // `rm -rf .next` so a stale/half-written cache (e.g. from an interrupted dev/build)
+      // can't poison the build with a webpack-runtime error.
+      command: `rm -rf .next && npm run build && npx next start -p ${APP_PORT}`,
       url: `http://localhost:${APP_PORT}`,
       timeout: 240_000,
       reuseExistingServer: false,

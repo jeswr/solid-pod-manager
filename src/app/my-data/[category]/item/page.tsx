@@ -8,6 +8,8 @@ import { categoryById } from "@/lib/categories";
 import { nameFromUrl } from "@/lib/pod-data";
 import { viewerKindLabel } from "@/lib/viewers";
 import { formatBytes } from "@/lib/format";
+import { isInOwnPods } from "@/lib/pod-scope";
+import { useSession } from "@/components/session-provider";
 import { useResource } from "@/components/use-resource";
 import { ResourceViewer } from "@/components/resource-viewer";
 import { ErrorState } from "@/components/states";
@@ -23,11 +25,24 @@ export default function ItemDetailPage({
   const { category: categoryId } = use(params);
   const category = categoryById(categoryId);
   const searchParams = useSearchParams();
+  const { profile } = useSession();
   const url = searchParams.get("url") ?? "";
 
-  if (!isHttpUrl(url)) {
+  // SECURITY (review SEC-1): the auth-patched fetch attaches the user's DPoP token
+  // to whatever URL it requests, so we MUST only open resources inside the user's
+  // own pods. A cross-origin / cross-pod `?url=` is rejected, never fetched.
+  const storages = profile?.storages ?? [];
+  if (!isInOwnPods(url, storages)) {
     return (
-      <ErrorState error={new Error("This item link is missing or invalid.")} />
+      <ErrorState
+        error={
+          new Error(
+            url
+              ? "This link points outside your pod, so it can't be opened here."
+              : "This item link is missing or invalid.",
+          )
+        }
+      />
     );
   }
 
@@ -127,13 +142,4 @@ function ItemDetail({
       </section>
     </div>
   );
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const u = new URL(value);
-    return u.protocol === "https:" || u.protocol === "http:";
-  } catch {
-    return false;
-  }
 }

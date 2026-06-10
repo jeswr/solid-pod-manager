@@ -10,7 +10,7 @@
  * Patterns (test-infra skill): role/placeholder locators, auto-waits (no
  * sleep), and the buffered-popup helpers in e2e/helpers.ts.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { bufferPages, completeCssLogin, waitForLoginPopup } from "./helpers";
 
 // CSS port mirrors E2E_CSS_PORT (see playwright.config.ts / global-setup.ts).

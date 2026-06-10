@@ -5,7 +5,8 @@
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { randomUUID, createHash } from "node:crypto";
 
-const BASE = "http://localhost:3000";
+// Keep in sync with CSS_PORT in playwright.config.ts and the WEBID in golden-path.spec.ts.
+const BASE = "http://localhost:3099";
 const ISSUER = `${BASE}/`;
 const TOKEN_ENDPOINT = `${BASE}/.oidc/token`;
 const POD = "alice";
@@ -98,10 +99,33 @@ export default async function globalSetup() {
         `Check 'lsof -i :3000' — a stray 'next dev' (default port 3000) is the usual culprit.`,
     );
   }
+  // Idempotent across runs: with `reuseExistingServer` a long-lived local CSS already has
+  // alice from a previous run — `password.create` then fails and the half-made account has
+  // no login method ("An account needs at least 1 login method" on pod create). Detect the
+  // already-registered case via password login and skip seeding (pod + profile persist for
+  // the life of the in-memory server).
   const jar: Jar = {};
   await jsonPost(`${BASE}/.account/account/`, {}, jar);
   const c = await controls(jar);
-  await jsonPost(c.password.create, { email: EMAIL, password: PASSWORD }, jar);
+  const pw = await jsonPost(c.password.create, { email: EMAIL, password: PASSWORD }, jar);
+  if (pw.status >= 400) {
+    const loginJar: Jar = {};
+    const loginControls = await controls(loginJar);
+    const login = await jsonPost(
+      loginControls.password.login,
+      { email: EMAIL, password: PASSWORD },
+      loginJar,
+    );
+    if (login.status < 400) {
+      console.log(`[global-setup] reusing already-seeded pod for ${WEBID}`);
+      return;
+    }
+    throw new Error(
+      `account setup failed: password.create -> ${JSON.stringify(pw.json)}; ` +
+        `fallback login also failed -> ${JSON.stringify(login.json)}. ` +
+        `A stale CSS on ${BASE} with different credentials? Kill it and re-run.`,
+    );
+  }
   const pod = await jsonPost(c.account.pod, { name: POD }, jar);
   if (pod.status >= 400) throw new Error(`pod create failed: ${JSON.stringify(pod.json)}`);
   const cc = await jsonPost(c.account.clientCredentials, { name: "seed", webId: WEBID }, jar);

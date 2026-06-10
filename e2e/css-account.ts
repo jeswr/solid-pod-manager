@@ -14,7 +14,7 @@ import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { randomUUID, createHash } from "node:crypto";
 
 export interface CssAccountOptions {
-  base?: string;        // CSS base URL; default http://localhost:3000
+  base?: string;        // CSS base URL; default http://localhost:3099 (the e2e CSS port)
   pod: string;          // pod name — MUST be unique per call (CSS rejects duplicates)
   name?: string;        // foaf:name to seed; default derived from pod
   email?: string;       // default `${pod}@example.com`
@@ -46,7 +46,7 @@ async function jsonPost(url: string, body: unknown, jar: Jar): Promise<Record<st
 }
 
 export async function createCssAccount(options: CssAccountOptions): Promise<CssAccount> {
-  const base = options.base ?? "http://localhost:3000";
+  const base = options.base ?? "http://localhost:3099";
   const pod = options.pod;
   const email = options.email ?? `${pod}@example.com`;
   const password = options.password ?? `${pod}-pass-123`;

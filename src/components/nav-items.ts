@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { Home, Database, AppWindow, Activity, Settings } from "lucide-react";
+import { Home, Database, Plug, AppWindow, Activity, Settings } from "lucide-react";
 
 export interface NavItem {
   href: string;
@@ -15,6 +15,7 @@ export interface NavItem {
 export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/", label: "Home", icon: Home, primary: true },
   { href: "/my-data", label: "My data", icon: Database, primary: true },
+  { href: "/connect", label: "Connect", icon: Plug },
   { href: "/connected-apps", label: "Connected apps", icon: AppWindow, stub: true, primary: true },
   { href: "/activity", label: "Activity", icon: Activity, stub: true },
   { href: "/settings", label: "Settings", icon: Settings, primary: true },

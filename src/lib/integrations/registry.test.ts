@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { categoryById } from "../categories.js";
+import { FILE_ADAPTERS, fileAdapterById } from "./file-adapters.js";
 import {
   ADAPTERS,
   adapterById,
   allCatalogEntries,
   isLive,
   statusOf,
+  TIER_C,
 } from "./registry.js";
 
 describe("integrations registry", () => {
@@ -56,6 +58,23 @@ describe("integrations registry", () => {
       if (entry.tier === "C") expect(status).toBe("export-file");
     }
     for (const a of ADAPTERS) expect(isLive(a)).toBe(false);
+  });
+
+  it("ships a working file-import adapter for every Tier-C catalog entry", () => {
+    expect(FILE_ADAPTERS).toHaveLength(TIER_C.length);
+    for (const entry of TIER_C) {
+      const adapter = fileAdapterById(entry.id);
+      expect(adapter, `missing file adapter for ${entry.id}`).toBeDefined();
+      expect(adapter?.metadata.tier).toBe("C");
+      expect(adapter?.metadata.authKind).toBe("export-file");
+      expect(adapter?.accept.length).toBeGreaterThan(0);
+      expect(adapter?.fileHint.length).toBeGreaterThan(0);
+      // The adapter's categories must match the catalog entry's, and exist.
+      expect([...adapter!.metadata.categories].sort()).toEqual([...entry.categories].sort());
+      for (const cat of adapter!.metadata.categories) {
+        expect(categoryById(cat)).toBeDefined();
+      }
+    }
   });
 
   it("proxy-requiring platforms are honest about it in their requirements", () => {

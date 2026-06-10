@@ -1,11 +1,13 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
-import { ChevronRight, ExternalLink, Eye, ShieldCheck } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { ChevronRight, ExternalLink, Eye, Loader2, ShieldCheck, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { categoryById } from "@/lib/categories";
-import { nameFromUrl } from "@/lib/pod-data";
+import { deleteResource, nameFromUrl } from "@/lib/pod-data";
+import { ResourceDeleteError } from "@/lib/errors";
 import { viewerKindLabel } from "@/lib/viewers";
 import { formatBytes } from "@/lib/format";
 import { isInOwnPods } from "@/lib/pod-scope";
@@ -14,6 +16,7 @@ import { useResource } from "@/components/use-resource";
 import { ResourceViewer } from "@/components/resource-viewer";
 import { ErrorState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -100,15 +103,18 @@ function ItemDetail({
             {data?.size ? <span className="tabular">{formatBytes(data.size)}</span> : null}
           </p>
         </div>
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-        >
-          <ExternalLink className="size-4" aria-hidden="true" />
-          Open original
-        </a>
+        <div className="flex flex-wrap items-center gap-2">
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            <ExternalLink className="size-4" aria-hidden="true" />
+            Open original
+          </a>
+          <DeleteItemButton url={url} name={name} categoryId={categoryId} />
+        </div>
       </header>
 
       {/* Access pointer — honest (no fabricated per-item status; the real
@@ -126,6 +132,10 @@ function ItemDetail({
           </p>
         </CardContent>
       </Card>
+
+      {/* Edit is offered through the first-party apps (Notes/Calendar/Contacts)
+          for the data types they own; arbitrary foreign resources are viewed and
+          can be removed here. */}
 
       {/* The content-type-aware viewer */}
       <section aria-label="Preview" className="flex flex-col gap-3">
@@ -145,5 +155,74 @@ function ItemDetail({
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * Delete a resource from the pod. A destructive, irreversible action, so it asks
+ * for explicit confirmation first (DESIGN §6 — friction before harm) rather than
+ * a one-click delete. On success it returns to the category list; a `404`/`410`
+ * is treated as already-gone (idempotent).
+ */
+function DeleteItemButton({
+  url,
+  name,
+  categoryId,
+}: {
+  url: string;
+  name: string;
+  categoryId: string;
+}) {
+  const router = useRouter();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function doDelete() {
+    setBusy(true);
+    try {
+      await deleteResource(url);
+      toast.success(`Deleted “${name}”.`, {
+        description: "It's been removed from your pod.",
+      });
+      router.push(`/my-data/${categoryId}`);
+    } catch (e) {
+      setBusy(false);
+      setConfirming(false);
+      const msg =
+        e instanceof ResourceDeleteError
+          ? `Couldn't delete this (${e.status}). Nothing was changed.`
+          : "Couldn't delete this. Nothing was changed.";
+      toast.error(msg, { description: "Check your connection and try again." });
+    }
+  }
+
+  if (!confirming) {
+    return (
+      <Button
+        variant="outline"
+        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+        onClick={() => setConfirming(true)}
+      >
+        <Trash2 className="size-4" aria-hidden="true" />
+        Delete
+      </Button>
+    );
+  }
+
+  return (
+    <span
+      className="inline-flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-2 py-1"
+      role="group"
+      aria-label={`Confirm deleting ${name}`}
+    >
+      <span className="text-sm text-muted-foreground">Delete permanently?</span>
+      <Button size="sm" variant="destructive" disabled={busy} onClick={doDelete}>
+        {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+        Yes, delete
+      </Button>
+      <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>
+        Cancel
+      </Button>
+    </span>
   );
 }

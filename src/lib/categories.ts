@@ -26,6 +26,7 @@ export type CategoryIconName =
   | "briefcase"
   | "car-front"
   | "file-text"
+  | "message-circle"
   | "boxes";
 
 /** Which tier a category lives in. */
@@ -92,6 +93,8 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA_HTTP}MedicalEntity`,
       `${SCHEMA}HealthValue`,
       "http://www.w3.org/2006/time#Instant",
+      // Connected sources: workouts (Strava and friends).
+      `${SCHEMA}ExerciseAction`,
     ],
   },
   {
@@ -130,6 +133,10 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA}AudioObject`,
       `${SCHEMA}MediaObject`,
       `${SCHEMA_HTTP}ImageObject`,
+      // Connected sources (integrations catalog): music + watch history.
+      `${SCHEMA}MusicRecording`,
+      `${SCHEMA}MusicPlaylist`,
+      `${SCHEMA}WatchAction`,
     ],
   },
   // ── Other / tail tier ───────────────────────────────────────────────────
@@ -140,7 +147,13 @@ export const CATEGORIES: readonly DataCategory[] = [
     icon: "briefcase",
     assurance: "Only apps you approve can read your work and education data.",
     description: "Roles, organisations, and qualifications.",
-    classes: [`${SCHEMA}Organization`, `${SCHEMA}EducationalOrganization`, `${SCHEMA}JobPosting`],
+    classes: [
+      `${SCHEMA}Organization`,
+      `${SCHEMA}EducationalOrganization`,
+      `${SCHEMA}JobPosting`,
+      // Connected sources: code you work on (GitHub).
+      `${SCHEMA}SoftwareSourceCode`,
+    ],
   },
   {
     id: "mobility",
@@ -163,6 +176,22 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA}DigitalDocument`,
       `${SCHEMA_HTTP}TextDigitalDocument`,
       `${BOOKMARK}Bookmark`,
+      // Connected sources: structured collections (Notion databases).
+      `${SCHEMA}Dataset`,
+    ],
+  },
+  {
+    id: "social",
+    label: "Social & interests",
+    tier: "other",
+    icon: "message-circle",
+    assurance: "Only apps you approve can read your social data.",
+    description: "Posts you saved and the communities you're part of.",
+    classes: [
+      `${SCHEMA}SocialMediaPosting`,
+      `${SCHEMA_HTTP}SocialMediaPosting`,
+      `${FOAF}Group`,
+      `${FOAF}OnlineAccount`,
     ],
   },
 ] as const;

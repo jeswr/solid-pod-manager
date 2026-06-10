@@ -133,10 +133,11 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA}AudioObject`,
       `${SCHEMA}MediaObject`,
       `${SCHEMA_HTTP}ImageObject`,
-      // Connected sources (integrations catalog): music + watch history.
+      // Connected sources (integrations catalog): music + watch history + games.
       `${SCHEMA}MusicRecording`,
       `${SCHEMA}MusicPlaylist`,
       `${SCHEMA}WatchAction`,
+      `${SCHEMA}VideoGame`,
     ],
   },
   // ── Other / tail tier ───────────────────────────────────────────────────
@@ -178,6 +179,8 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${BOOKMARK}Bookmark`,
       // Connected sources: structured collections (Notion databases).
       `${SCHEMA}Dataset`,
+      // File imports: reading libraries (Goodreads).
+      `${SCHEMA}Book`,
     ],
   },
   {
@@ -192,6 +195,8 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA_HTTP}SocialMediaPosting`,
       `${FOAF}Group`,
       `${FOAF}OnlineAccount`,
+      // File imports: chat history (WhatsApp).
+      `${SCHEMA}Message`,
     ],
   },
 ] as const;

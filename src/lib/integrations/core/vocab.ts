@@ -33,6 +33,12 @@ export const CLASSES = {
   Dataset: `${SCHEMA}Dataset`,
   Group: `${FOAF}Group`,
   OnlineAccount: `${FOAF}OnlineAccount`,
+  // Tier-C file imports (export-file integrations).
+  Invoice: `${SCHEMA}Invoice`,
+  Book: `${SCHEMA}Book`,
+  VideoGame: `${SCHEMA}VideoGame`,
+  Message: `${SCHEMA}Message`,
+  Event: `${SCHEMA}Event`,
 } as const;
 
 /** Shared schema.org basics every imported entity may carry. */
@@ -273,6 +279,149 @@ export class DataCollection extends PodThing {
   mark(): this {
     this.types.add(CLASSES.Dataset);
     return this;
+  }
+}
+
+/**
+ * A financial document — order receipts (Amazon), trip fares (Uber) and bank
+ * transactions (statements, ChatGPT-of-money). schema:Invoice lands in the
+ * Finance category. Amounts are stored as human text on schema:totalPaymentDue
+ * (schema allows Text-or-PriceSpecification) plus a structured currency code,
+ * which is faithful without minting a nested MonetaryAmount node per row.
+ */
+export class Invoice extends PodThing {
+  mark(): this {
+    this.types.add(CLASSES.Invoice);
+    return this;
+  }
+  /** Vendor / counterparty as plain text (schema:provider is Org|Person). */
+  get provider(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}provider`, LiteralAs.string);
+  }
+  set provider(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}provider`, v, LiteralFrom.string);
+  }
+  /** Human-readable total ("£42.50", "-$12.00" for a debit). */
+  get totalPaymentDue(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}totalPaymentDue`, LiteralAs.string);
+  }
+  set totalPaymentDue(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}totalPaymentDue`, v, LiteralFrom.string);
+  }
+  /** ISO 4217 currency code, when the export states one. */
+  get priceCurrency(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}priceCurrency`, LiteralAs.string);
+  }
+  set priceCurrency(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}priceCurrency`, v, LiteralFrom.string);
+  }
+  /** Order/payment status text, where the export carries one. */
+  get paymentStatus(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}paymentStatus`, LiteralAs.string);
+  }
+  set paymentStatus(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}paymentStatus`, v, LiteralFrom.string);
+  }
+}
+
+/** A book in a reading library (Goodreads) — schema:Book → Documents. */
+export class Book extends PodThing {
+  mark(): this {
+    this.types.add(CLASSES.Book);
+    return this;
+  }
+  get author(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}author`, LiteralAs.string);
+  }
+  set author(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}author`, v, LiteralFrom.string);
+  }
+  get isbn(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}isbn`, LiteralAs.string);
+  }
+  set isbn(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}isbn`, v, LiteralFrom.string);
+  }
+  /** The reader's own rating, 1–5 (schema:Rating value as a number). */
+  get ratingValue(): number | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}ratingValue`, LiteralAs.number);
+  }
+  set ratingValue(v: number | undefined) {
+    OptionalAs.object(this, `${SCHEMA}ratingValue`, v, LiteralFrom.double);
+  }
+  /** Reading status text ("read", "currently-reading", "to-read"). */
+  get readingStatus(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}actionStatus`, LiteralAs.string);
+  }
+  set readingStatus(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}actionStatus`, v, LiteralFrom.string);
+  }
+}
+
+/** A game in a library (Steam) — schema:VideoGame → Media. */
+export class VideoGame extends PodThing {
+  mark(): this {
+    this.types.add(CLASSES.VideoGame);
+    return this;
+  }
+  /** Total playtime as ISO-8601 duration (schema:timeRequired). */
+  get timeRequired(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}timeRequired`, LiteralAs.string);
+  }
+  set timeRequired(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}timeRequired`, v, LiteralFrom.string);
+  }
+}
+
+/**
+ * A chat message (WhatsApp) — schema:Message → Social & interests. The sender
+ * is stored as plain text on schema:sender (schema allows Audience|Organization
+ * |Person; we keep a literal name from the export, never an invented IRI).
+ */
+export class Message extends PodThing {
+  mark(): this {
+    this.types.add(CLASSES.Message);
+    return this;
+  }
+  get text(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}text`, LiteralAs.string);
+  }
+  set text(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}text`, v, LiteralFrom.string);
+  }
+  get sender(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}sender`, LiteralAs.string);
+  }
+  set sender(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}sender`, v, LiteralFrom.string);
+  }
+}
+
+/** A text document / conversation (ChatGPT, Takeout notes) — schema:TextDigitalDocument. */
+export class TextDocument extends PodThing {
+  mark(): this {
+    this.types.add(CLASSES.TextDigitalDocument);
+    return this;
+  }
+  get text(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}text`, LiteralAs.string);
+  }
+  set text(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}text`, v, LiteralFrom.string);
+  }
+}
+
+/** A calendar event (Google Takeout activity) — schema:Event → Calendar. */
+export class CalendarEvent extends PodThing {
+  mark(): this {
+    this.types.add(CLASSES.Event);
+    return this;
+  }
+  get startDate(): Date | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}startDate`, LiteralAs.date);
+  }
+  set startDate(v: Date | undefined) {
+    OptionalAs.object(this, `${SCHEMA}startDate`, v, LiteralFrom.dateTime);
   }
 }
 

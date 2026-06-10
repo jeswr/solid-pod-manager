@@ -7,6 +7,11 @@
  * type-index bootstrap, idempotent re-import) without any network.
  */
 import { Parser, Store } from "n3";
+import {
+  type FileImportAdapter,
+  type ImportFile,
+  runFileImport,
+} from "./file-import.js";
 import { type ImportReport, runImport } from "./import-runner.js";
 import type { IntegrationAdapter } from "./types.js";
 
@@ -166,6 +171,41 @@ export async function demoImport(
     podRoot: TEST_POD_ROOT,
     mode: "demo",
     cursor: opts?.cursor,
+    podFetch: pod.fetch,
+  });
+  return { pod, report };
+}
+
+/** An in-memory {@link ImportFile} from a string (the parser only reads text). */
+export function memoryFile(
+  name: string,
+  content: string,
+  type = "text/plain",
+): ImportFile {
+  const bytes = new TextEncoder().encode(content);
+  return {
+    name,
+    type,
+    size: bytes.byteLength,
+    text: async () => content,
+  };
+}
+
+/**
+ * The Tier-C contract-test entry: run one file import (uploaded text → memory
+ * pod) and hand back both for assertions. Mirrors {@link demoImport}.
+ */
+export async function fileImport(
+  adapter: FileImportAdapter,
+  file: ImportFile,
+  opts?: { pod?: MemoryPod },
+): Promise<{ pod: MemoryPod; report: ImportReport }> {
+  const pod = opts?.pod ?? createMemoryPod();
+  const report = await runFileImport({
+    adapter,
+    file,
+    webId: TEST_WEBID,
+    podRoot: TEST_POD_ROOT,
     podFetch: pod.fetch,
   });
   return { pod, report };

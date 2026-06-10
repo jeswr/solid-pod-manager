@@ -1,5 +1,15 @@
 import type { LucideIcon } from "lucide-react";
-import { Home, Database, Plug, AppWindow, Activity, Settings } from "lucide-react";
+import {
+  Home,
+  Database,
+  Plug,
+  AppWindow,
+  Activity,
+  Settings,
+  NotebookPen,
+  CalendarDays,
+  Users,
+} from "lucide-react";
 
 export interface NavItem {
   href: string;
@@ -19,4 +29,9 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/connected-apps", label: "Connected apps", icon: AppWindow, primary: true },
   { href: "/activity", label: "Activity", icon: Activity, stub: true },
   { href: "/settings", label: "Settings", icon: Settings, primary: true },
+  // First-party productivity apps — each reads/writes standard RDF to the pod
+  // and is registered in the Type Index, so its data also appears under "My data".
+  { href: "/notes", label: "Notes", icon: NotebookPen },
+  { href: "/calendar", label: "Calendar", icon: CalendarDays },
+  { href: "/contacts", label: "Contacts", icon: Users },
 ] as const;

@@ -9,7 +9,8 @@
  */
 import { fetchRdf } from "@jeswr/fetch-rdf";
 import { ContainerDataset } from "@solid/object";
-import { DataFactory } from "n3";
+import { DataFactory, Writer } from "n3";
+import { ResourceWriteError } from "./errors.js";
 import {
   CATEGORIES,
   UNCATEGORISED,
@@ -157,6 +158,55 @@ function pushUnique(items: PodItem[], seen: Set<string>, item: PodItem): void {
   if (seen.has(item.url)) return;
   seen.add(item.url);
   items.push(item);
+}
+
+/** Serialise an in-memory dataset to Turtle (promisified n3 Writer). */
+export function serializeTurtle(
+  dataset: import("@rdfjs/types").DatasetCore,
+  prefixes?: Record<string, string>,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const writer = new Writer({ format: "text/turtle", prefixes });
+    for (const quad of dataset) writer.addQuad(quad);
+    writer.end((err, result) => (err ? reject(err) : resolve(result)));
+  });
+}
+
+export interface WriteResourceOptions {
+  /** Send `If-Match` so a concurrent edit fails with 412 instead of clobbering. */
+  etag?: string | null;
+  /** Send `If-None-Match: *` — create only, never overwrite (412 if it exists). */
+  createOnly?: boolean;
+  /** Test-only override; **omit in production** so the auth-patched global runs. */
+  fetchImpl?: typeof fetch;
+  /** Optional Turtle prefix map for readable documents. */
+  prefixes?: Record<string, string>;
+}
+
+/**
+ * The minimal pod write path: serialise the dataset and `PUT` it as Turtle.
+ *
+ * Always sends an explicit `Content-Type` (AGENTS.md §Writing data). Servers
+ * that support it create intermediate containers on PUT, so writing
+ * `…/integrations/app/doc.ttl` needs no separate container creation.
+ *
+ * @throws ResourceWriteError on any non-2xx answer (412 = precondition failed:
+ *   either a concurrent edit under `etag` or "already exists" under
+ *   `createOnly` — callers branch on `.status`).
+ */
+export async function writeResource(
+  url: string,
+  dataset: import("@rdfjs/types").DatasetCore,
+  opts: WriteResourceOptions = {},
+): Promise<{ etag: string | null }> {
+  const body = await serializeTurtle(dataset, opts.prefixes);
+  const headers: Record<string, string> = { "content-type": "text/turtle" };
+  if (opts.etag) headers["if-match"] = opts.etag;
+  if (opts.createOnly) headers["if-none-match"] = "*";
+  const init: RequestInit = { method: "PUT", headers, body };
+  const res = opts.fetchImpl ? await opts.fetchImpl(url, init) : await fetch(url, init);
+  if (!res.ok) throw new ResourceWriteError(url, res.status);
+  return { etag: res.headers.get("etag") };
 }
 
 /** Derive a friendly name from a resource URL (last non-empty path segment). */

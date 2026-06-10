@@ -42,3 +42,16 @@ export class NotAuthenticatedError extends PodDataError {
     this.name = "NotAuthenticatedError";
   }
 }
+
+/** A pod write (PUT) was rejected by the server. */
+export class ResourceWriteError extends PodDataError {
+  readonly url: string;
+  /** HTTP status the server answered with (412 = precondition failed). */
+  readonly status: number;
+  constructor(url: string, status: number) {
+    super(`Could not save to your pod (${status}) at ${url}.`);
+    this.name = "ResourceWriteError";
+    this.url = url;
+    this.status = status;
+  }
+}

@@ -118,11 +118,17 @@ export function typeIndexLinks(
   webId: string,
   profile: import("@rdfjs/types").DatasetCore,
 ): TypeIndexLinks {
-  const subject = new TypeIndexLinkReader(webId, profile, DataFactory);
+  const subject = new ProfileTypeIndexAnchor(webId, profile, DataFactory);
   return { publicIndex: subject.publicIndex, privateIndex: subject.privateIndex };
 }
 
-class TypeIndexLinkReader extends TermWrapper {
+/**
+ * The WebID subject's type-index links, readable AND writable — the write side
+ * exists solely so the app can bootstrap a missing index (DESIGN.md §9). This
+ * is the narrowest possible profile mutation: one `solid:privateTypeIndex`
+ * link; the app never takes blanket write access to profile documents.
+ */
+export class ProfileTypeIndexAnchor extends TermWrapper {
   get publicIndex(): string | undefined {
     return OptionalFrom.subjectPredicate(this, `${SOLID}publicTypeIndex`, NamedNodeAs.string);
   }
@@ -132,6 +138,27 @@ class TypeIndexLinkReader extends TermWrapper {
       `${SOLID}privateTypeIndex`,
       NamedNodeAs.string,
     );
+  }
+  set privateIndex(v: string | undefined) {
+    OptionalAs.object(this, `${SOLID}privateTypeIndex`, v, NamedNodeFrom.string);
+  }
+}
+
+/** The type-index document's own subject — used when minting a fresh index. */
+export class TypeIndexDocument extends TermWrapper {
+  /** Live set of `rdf:type` IRIs on the document subject. */
+  get types(): Set<string> {
+    return SetFrom.subjectPredicate(
+      this,
+      `${RDF}type`,
+      NamedNodeAs.string,
+      NamedNodeFrom.string,
+    );
+  }
+  /** Stamp the document as a private (unlisted) type index. */
+  markUnlistedIndex(): void {
+    this.types.add(`${SOLID}TypeIndex`);
+    this.types.add(`${SOLID}UnlistedDocument`);
   }
 }
 

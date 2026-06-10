@@ -58,10 +58,19 @@ export default function HomePage() {
         />
         <StatCard
           icon={ShieldCheck}
-          label="Privacy"
-          value="Private"
-          hint="Only apps you approve can read your data."
+          label="Who can read your data"
+          value={
+            apps.error
+              ? "—"
+              : apps.loading
+                ? undefined
+                : apps.data?.length
+                  ? `You + ${apps.data.length} app${apps.data.length === 1 ? "" : "s"}`
+                  : "Only you"
+          }
+          hint="Apps can only read what you've granted — change that anytime."
           tone="success"
+          href="/connected-apps"
         />
       </section>
 

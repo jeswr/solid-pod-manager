@@ -73,6 +73,20 @@ export async function completeCssLogin(
   await authorize.first().click({ timeout: 20_000 }).catch(() => {});
 }
 
+/**
+ * A fresh visitor (no recent accounts) lands on the "create a pod" view; the
+ * pod-address sign-in form is one tap behind "Already have a pod? Sign in".
+ * Reveal it so the URL input is present.
+ */
+export async function revealSignInForm(page: Page): Promise<void> {
+  await page.goto("/");
+  const urlInput = page.locator('input[type="url"]');
+  if (!(await urlInput.isVisible().catch(() => false))) {
+    await page.getByRole("button", { name: /^sign in$/i }).first().click();
+  }
+  await urlInput.waitFor({ state: "visible" });
+}
+
 /** Full login flow from the app's login screen (assumes `page` is on it). */
 export async function loginThroughPopup(
   page: Page,
@@ -81,6 +95,7 @@ export async function loginThroughPopup(
   email: string,
   password: string,
 ): Promise<void> {
+  await revealSignInForm(page);
   await page.fill('input[type="url"]', webId);
   const nextPage = bufferPages(context);
   await page.getByRole("button", { name: /^sign in$/i }).click();

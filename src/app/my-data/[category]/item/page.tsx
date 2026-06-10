@@ -111,14 +111,18 @@ function ItemDetail({
         </a>
       </header>
 
-      {/* Who can see this — read model arrives in P2 (permission manager). */}
+      {/* Access pointer — honest (no fabricated per-item status; the real
+          per-app access list lives in Connected apps). */}
       <Card className="border-primary/20 bg-accent/20">
         <CardContent className="flex items-start gap-3 py-4 text-sm">
           <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
           <p className="text-muted-foreground">
-            <span className="font-medium text-foreground">Who can see this:</span>{" "}
-            only you, plus any apps you&apos;ve approved. A full access list lands
-            with Connected apps.
+            <span className="font-medium text-foreground">Access:</span>{" "}
+            apps can only read this if you&apos;ve granted them access.{" "}
+            <Link href="/connected-apps" className="font-medium text-primary underline-offset-4 hover:underline">
+              See and manage which apps have access
+            </Link>
+            .
           </p>
         </CardContent>
       </Card>

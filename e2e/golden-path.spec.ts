@@ -10,27 +10,14 @@
  * Patterns (test-infra skill): role/placeholder locators, auto-waits (no
  * sleep), and the buffered-popup helpers in e2e/helpers.ts.
  */
-import { test, expect, type Page } from "@playwright/test";
-import { bufferPages, completeCssLogin, waitForLoginPopup } from "./helpers";
+import { test, expect } from "@playwright/test";
+import { bufferPages, completeCssLogin, revealSignInForm, waitForLoginPopup } from "./helpers";
 
 // CSS port mirrors E2E_CSS_PORT (see playwright.config.ts / global-setup.ts).
 const CSS_ORIGIN = `http://localhost:${process.env.E2E_CSS_PORT ?? "3099"}`;
 const WEBID = `${CSS_ORIGIN}/alice/profile/card#me`; // seeded by global-setup
 const EMAIL = "alice@example.com";
 const PASSWORD = "test-password-123";
-
-/**
- * A fresh visitor (no recent accounts) sees the "create a pod" view first; the
- * pod-address form is one tap behind "Already have a pod? Sign in". Reveal it.
- */
-async function revealSignInForm(page: Page): Promise<void> {
-  await page.goto("/");
-  const urlInput = page.locator('input[type="url"]');
-  if (!(await urlInput.isVisible().catch(() => false))) {
-    await page.getByRole("button", { name: /^sign in$/i }).first().click();
-  }
-  await urlInput.waitFor({ state: "visible" });
-}
 
 test.describe("Login surface", () => {
   test("leads with the value prop and a create-a-pod path", async ({ page }) => {

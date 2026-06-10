@@ -21,7 +21,7 @@ export interface NavItem {
   primary?: boolean;
 }
 
-/** Primary navigation (DESIGN.md §3). Activity is a P3 stub. */
+/** Primary navigation (DESIGN.md §3). */
 export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/", label: "Home", icon: Home, primary: true },
   { href: "/my-data", label: "My data", icon: Database, primary: true },

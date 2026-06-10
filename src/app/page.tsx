@@ -192,7 +192,8 @@ export default function HomePage() {
         ) : (activity.data?.length ?? 0) === 0 ? (
           <ActivityEmpty />
         ) : (
-          <ActivityFeed entries={(activity.data ?? []).slice(0, 5)} />
+          // useRecentActivity(5) already caps the feed at five.
+          <ActivityFeed entries={activity.data ?? []} />
         )}
       </section>
     </div>

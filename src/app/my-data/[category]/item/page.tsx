@@ -135,7 +135,12 @@ function ItemDetail({
 
       {/* Edit is offered through the first-party apps (Notes/Calendar/Contacts)
           for the data types they own; arbitrary foreign resources are viewed and
-          can be removed here. */}
+          can be removed here. A one-line user-facing hint says so (PM NEW-3). */}
+      <p className="text-sm text-muted-foreground">
+        Viewing only. To change this, open it in the app that created it, or use
+        Notes, Calendar or Contacts for those kinds of data. You can remove it
+        here at any time.
+      </p>
 
       {/* The content-type-aware viewer */}
       <section aria-label="Preview" className="flex flex-col gap-3">

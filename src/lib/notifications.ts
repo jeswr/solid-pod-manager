@@ -223,6 +223,11 @@ export async function subscribeToResource(
       debug("no WebSocketChannel2023 subscription service for", topicUrl);
       return noop;
     }
+    // Defence-in-depth: never POST our auth to an off-pod service URL.
+    if (!sameOrigin(serviceUrl, topicUrl)) {
+      debug("subscription service is off-origin, refusing", serviceUrl);
+      return noop;
+    }
 
     const subRes = await doFetch(serviceUrl, {
       method: "POST",
@@ -240,9 +245,16 @@ export async function subscribeToResource(
 
     const channel: unknown = await subRes.json();
     const receiveFrom = readReceiveFrom(channel);
-    const channelId = readChannelId(channel);
+    // Only DELETE a channel id that lives on the same pod (else drop it).
+    const rawChannelId = readChannelId(channel);
+    const channelId = sameOrigin(rawChannelId, topicUrl) ? rawChannelId : undefined;
     if (!receiveFrom) {
       debug("subscription response had no receiveFrom", topicUrl);
+      return noop;
+    }
+    // Defence-in-depth: never open a socket to an off-pod / non-ws endpoint.
+    if (!isSocketForTopic(receiveFrom, topicUrl)) {
+      debug("receiveFrom is off-host or not a ws(s) URL, refusing", receiveFrom);
       return noop;
     }
 
@@ -390,6 +402,41 @@ function splitLinkHeader(header: string): string[] {
 
 function dedupe(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+/**
+ * Confused-deputy guard (defence-in-depth, security review): the subscription
+ * service, `receiveFrom` socket, and channel `id` are all read from a
+ * server-controlled storage description / subscription response, then hit with
+ * the user's auth. Even though the topic is always the user's own pod, a
+ * compromised description could point these at another origin and leak a DPoP
+ * token (the patched fetch signs a proof bound to whatever URL it retries). So
+ * we require every notification endpoint to share the topic's origin — the same
+ * invariant `pod-scope.ts#isWithinPod` enforces for resource reads.
+ */
+function sameOrigin(candidate: string | undefined, base: string): boolean {
+  if (!candidate) return false;
+  try {
+    return new URL(candidate).origin === new URL(base).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A `receiveFrom` URL is only acceptable if it is a `ws:`/`wss:` socket whose
+ * host+port match the topic's (a WebSocket URL has a distinct scheme, so it
+ * can't share `origin` with an https: topic — compare host instead).
+ */
+function isSocketForTopic(receiveFrom: string | undefined, topicUrl: string): boolean {
+  if (!receiveFrom) return false;
+  try {
+    const ws = new URL(receiveFrom);
+    const topic = new URL(topicUrl);
+    return (ws.protocol === "ws:" || ws.protocol === "wss:") && ws.host === topic.host;
+  } catch {
+    return false;
+  }
 }
 
 /** Log a degradation at `console.debug` only — notifications never surface errors. */

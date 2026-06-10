@@ -321,3 +321,100 @@ describe("subscribeToResource — graceful degradation", () => {
     expect(() => unsub()).not.toThrow();
   });
 });
+
+describe("subscribeToResource — origin validation (defence-in-depth)", () => {
+  it("refuses an off-origin subscription service (never POSTs auth off-pod)", async () => {
+    const EVIL_SERVICE = "https://evil.example/collect";
+    const description = `
+@prefix notify: <http://www.w3.org/ns/solid/notifications#> .
+<${DESCRIPTION_URL}>
+  notify:subscription <${EVIL_SERVICE}> ;
+  notify:channelType <${WEBSOCKET_CHANNEL_2023}> .`;
+    const posted: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "POST") posted.push(url);
+      if (method === "HEAD" && url === TOPIC) {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            link: `<${DESCRIPTION_URL}>; rel="http://www.w3.org/ns/solid/terms#storageDescription"`,
+          },
+        });
+      }
+      if (method === "GET" && url === DESCRIPTION_URL) return ttlResponse(description);
+      return new Response("", { status: 404 });
+    };
+    const unsub = await subscribeToResource(TOPIC, () => {}, {
+      fetchImpl,
+      webSocketImpl: MockWebSocket as unknown as typeof WebSocket,
+    });
+    expect(posted).toHaveLength(0); // never POSTed to the evil origin
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(() => unsub()).not.toThrow();
+  });
+
+  it("refuses an off-host receiveFrom (never opens a socket off-pod)", async () => {
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "HEAD" && url === TOPIC) {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            link: `<${DESCRIPTION_URL}>; rel="http://www.w3.org/ns/solid/terms#storageDescription"`,
+          },
+        });
+      }
+      if (method === "GET" && url === DESCRIPTION_URL) return ttlResponse(STORAGE_DESCRIPTION_TTL);
+      if (method === "POST") {
+        return new Response(
+          JSON.stringify({ id: CHANNEL_ID, receiveFrom: "wss://evil.example/socket" }),
+          { status: 200, headers: { "content-type": "application/ld+json" } },
+        );
+      }
+      return new Response("", { status: 404 });
+    };
+    const unsub = await subscribeToResource(TOPIC, () => {}, {
+      fetchImpl,
+      webSocketImpl: MockWebSocket as unknown as typeof WebSocket,
+    });
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(() => unsub()).not.toThrow();
+  });
+
+  it("does not DELETE an off-origin channel id on unsubscribe", async () => {
+    const deletes: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "DELETE") deletes.push(url);
+      if (method === "HEAD" && url === TOPIC) {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            link: `<${DESCRIPTION_URL}>; rel="http://www.w3.org/ns/solid/terms#storageDescription"`,
+          },
+        });
+      }
+      if (method === "GET" && url === DESCRIPTION_URL) return ttlResponse(STORAGE_DESCRIPTION_TTL);
+      if (method === "POST") {
+        // Same-origin receiveFrom (so the socket opens) but an evil channel id.
+        return new Response(
+          JSON.stringify({ id: "https://evil.example/chan", receiveFrom: RECEIVE_FROM }),
+          { status: 200, headers: { "content-type": "application/ld+json" } },
+        );
+      }
+      return new Response("", { status: 404 });
+    };
+    const unsub = await subscribeToResource(TOPIC, () => {}, {
+      fetchImpl,
+      webSocketImpl: MockWebSocket as unknown as typeof WebSocket,
+    });
+    expect(MockWebSocket.instances).toHaveLength(1); // socket DID open (receiveFrom ok)
+    unsub();
+    await Promise.resolve();
+    expect(deletes).toHaveLength(0); // but the off-origin channel id was never DELETEd
+  });
+});

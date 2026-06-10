@@ -42,3 +42,40 @@ export class NotAuthenticatedError extends PodDataError {
     this.name = "NotAuthenticatedError";
   }
 }
+
+/**
+ * A resource's access-control document could not be located (no
+ * `Link: rel="acl"` header, or the resource itself was unreachable).
+ */
+export class AclDiscoveryError extends PodDataError {
+  readonly resourceUrl: string;
+  constructor(resourceUrl: string, options?: { cause?: unknown }) {
+    super(`Could not locate the access settings for ${resourceUrl}.`, options);
+    this.name = "AclDiscoveryError";
+    this.resourceUrl = resourceUrl;
+  }
+}
+
+/** An ACL document exists but could not be read or parsed. */
+export class AclReadError extends PodDataError {
+  readonly aclUrl: string;
+  constructor(aclUrl: string, options?: { cause?: unknown }) {
+    super(`Could not read the access settings at ${aclUrl}.`, options);
+    this.name = "AclReadError";
+    this.aclUrl = aclUrl;
+  }
+}
+
+/**
+ * An ACL update failed. Fail-closed: when this is thrown the document on the
+ * server is either unchanged or in its previous state — callers must treat the
+ * mutation as NOT applied and re-read before retrying.
+ */
+export class AclWriteError extends PodDataError {
+  readonly aclUrl: string;
+  constructor(aclUrl: string, message?: string, options?: { cause?: unknown }) {
+    super(message ?? `Could not update the access settings at ${aclUrl}.`, options);
+    this.name = "AclWriteError";
+    this.aclUrl = aclUrl;
+  }
+}

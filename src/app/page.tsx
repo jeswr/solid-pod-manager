@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useSession } from "@/components/session-provider";
 import { useCategorySummaries } from "@/components/use-pod-data";
+import { useConnectedApps } from "@/components/use-permissions";
 import { categoriesWithDataCount } from "@/lib/pod-data";
 import { categoryIcon } from "@/components/category-icon";
 import { ErrorState } from "@/components/states";
@@ -21,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 export default function HomePage() {
   const { profile } = useSession();
   const { data: summaries, loading, error } = useCategorySummaries();
+  const apps = useConnectedApps();
 
   const firstName = profile?.displayName?.split(/\s+/)[0];
   const withData = summaries ? categoriesWithDataCount(summaries) : undefined;
@@ -42,9 +44,10 @@ export default function HomePage() {
         <StatCard
           icon={AppWindow}
           label="Apps with access"
-          value="0"
-          hint="Connected apps arrive soon — you'll manage every grant here."
+          value={apps.error ? "—" : apps.loading ? undefined : String(apps.data?.length ?? 0)}
+          hint="Every grant is yours to review and revoke in Connected apps."
           tone="primary"
+          href="/connected-apps"
         />
         <StatCard
           icon={Database}

@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "next build",
-    "start": "next start -p 3200",
+    "build:prod": "NEXT_PUBLIC_APP_ORIGIN=https://app.solid-test.jeswr.org next build",
+    "start": "node scripts/serve-static.mjs out 3200",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

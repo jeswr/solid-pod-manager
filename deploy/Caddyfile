@@ -1,0 +1,43 @@
+# Static hosting for the Pod Manager export (see Dockerfile).
+#
+# TLS terminates upstream (the box's edge proxy serves
+# https://app.solid-test.jeswr.org and forwards here), so this listens on
+# plain :8080.
+#
+# Routing: the app is a Next.js `output: "export"` build with
+# trailingSlash=false, so every route is a flat `<route>.html` file
+# (e.g. /notes/edit → notes/edit.html). Deep-link state travels in query
+# strings (?webid=, ?id=, ?url=), which static file resolution ignores.
+# The /index.html fallback keeps unknown paths inside the app shell for
+# client routing (a truly unknown URL renders the app, not a bare 404 page).
+#
+# Security headers: moved here verbatim from the deleted src/middleware.ts
+# (middleware cannot run on a static export; `next dev` therefore no longer
+# sets them — they are deploy-time concerns). Rationale lives with the values
+# below; the primary XSS controls are app-layer (pod-scope fetch guard, href
+# scheme allowlist) — this CSP is defence-in-depth, hence
+# script-src 'unsafe-inline' (static HTML cannot carry per-request nonces).
+:8080 {
+	root * /srv
+	encode zstd gzip
+
+	header {
+		# A Solid client necessarily talks to the user's chosen pod + IdP on
+		# ANY https origin, so connect/img/media allow https: (+ loopback for
+		# pointing the deployed app at a local CSS while testing).
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; font-src 'self' data:; connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; frame-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
+		-Server
+	}
+
+	# The Solid Client Identifier Document must be served as JSON-LD —
+	# IdPs dereference it and content-sniff nothing (solid-client-id skill).
+	# Go's MIME table has no .jsonld entry, so set it explicitly.
+	header /clientid.jsonld Content-Type "application/ld+json"
+
+	try_files {path} {path}.html /index.html
+	file_server
+}

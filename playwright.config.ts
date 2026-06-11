@@ -47,11 +47,12 @@ export default defineConfig({
       // e2e runs against the PRODUCTION build: `next dev` compiles routes on demand and a
       // mid-login rebuild (CSS dereferencing /clientid.jsonld) Fast-Refresh-reloads the page,
       // destroying the in-flight OIDC state — observed and diagnosed, not hypothetical. The
-      // prod server has no on-demand compilation, so the flow is deterministic AND we test
-      // the real bundle. Never reused: a stale dev server on this port poisons the run.
-      // `rm -rf .next` so a stale/half-written cache (e.g. from an interrupted dev/build)
-      // can't poison the build with a webpack-runtime error.
-      command: `rm -rf .next && npm run build && npx next start -p ${APP_PORT}`,
+      // build is a static export (`output: "export"` → `out/`), which `next start` cannot
+      // serve — scripts/serve-static.mjs serves it with the production Caddyfile's exact
+      // try_files rule, so e2e exercises the deployed routing behaviour AND the real bundle.
+      // Never reused: a stale server on this port poisons the run. `rm -rf .next out` so a
+      // stale/half-written cache or export can't poison the build.
+      command: `rm -rf .next out && npm run build && node scripts/serve-static.mjs out ${APP_PORT}`,
       url: `http://localhost:${APP_PORT}`,
       timeout: 240_000,
       reuseExistingServer: false,

@@ -1,6 +1,19 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // The app is a pure client-side Solid consumer — every page is a
+  // prerenderable shell + client data fetching against the user's pod.
+  // `next build` therefore emits a fully static site in `out/`, served by any
+  // static host (deploy/Caddyfile + Dockerfile). Consequences handled
+  // elsewhere:
+  // - no middleware → security headers moved to deploy/Caddyfile;
+  // - /clientid.jsonld is a force-static route handler (origin baked from
+  //   NEXT_PUBLIC_APP_ORIGIN at build time);
+  // - dynamic segments either enumerate their params at build time
+  //   (generateStaticParams) or were converted to query parameters.
+  // trailingSlash stays false: routes export as `<route>.html`, matching the
+  // Caddyfile's `try_files {path} {path}.html /index.html`.
+  output: "export",
   webpack(config) {
     // The data layer (`src/lib/`) uses explicit `.js` extensions on relative
     // imports — correct for Node's ESM resolver (and what tsc/vitest expect),

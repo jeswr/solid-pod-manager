@@ -1,0 +1,4 @@
+# The image copies only out/ and deploy/Caddyfile — keep the context tiny.
+*
+!out
+!deploy/Caddyfile

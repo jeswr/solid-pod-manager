@@ -1,13 +1,15 @@
 "use client";
 
 /**
- * Event editor — create (`id === "new"`) or edit/delete an existing event
- * (`id` = URL-encoded resource URL). A start time is required; the rest are
- * optional. Conditional writes use the read ETag (412 → reopen).
+ * Event editor — create (no `?id=`) or edit/delete an existing event
+ * (`?id=` = the event's resource URL). A query parameter rather than a path
+ * segment so the page prerenders under `output: "export"`. A start time is
+ * required; the rest are optional. Conditional writes use the read ETag
+ * (412 → reopen).
  */
-import { use, useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronRight, Loader2, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { calendarStore, type CalendarEvent } from "@/lib/calendar";
@@ -29,10 +31,19 @@ function nextHour(): Date {
   return d;
 }
 
-export default function EventEditorPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
-  const isNew = id === "new";
-  const url = isNew ? undefined : decodeURIComponent(id);
+export default function EventEditorPage() {
+  // useSearchParams requires a Suspense boundary in a prerendered page.
+  return (
+    <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+      <EventEditor />
+    </Suspense>
+  );
+}
+
+function EventEditor() {
+  // `?id=` is the event's resource URL (URLSearchParams decodes it); absent → new.
+  const url = useSearchParams().get("id") ?? undefined;
+  const isNew = !url;
 
   const router = useRouter();
   const store = useStore<CalendarEvent>(calendarStore);
@@ -80,7 +91,7 @@ export default function EventEditorPage({ params }: { params: Promise<{ id: stri
       if (isNew) {
         const { url: created } = await store.create(event, name);
         toast.success("Event created");
-        router.replace(`/calendar/${encodeURIComponent(created)}`);
+        router.replace(`/calendar/edit?id=${encodeURIComponent(created)}`);
       } else if (url) {
         await store.update(url, event, etag);
         toast.success("Event saved");

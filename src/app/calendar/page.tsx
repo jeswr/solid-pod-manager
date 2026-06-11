@@ -58,7 +58,7 @@ export default function CalendarPage() {
           </div>
         </div>
         <Button asChild>
-          <Link href="/calendar/new">
+          <Link href="/calendar/edit">
             <Plus aria-hidden="true" />
             New event
           </Link>
@@ -104,7 +104,7 @@ export default function CalendarPage() {
           description="Add your first event. It is saved privately to your pod."
           action={
             <Button asChild>
-              <Link href="/calendar/new">
+              <Link href="/calendar/edit">
                 <Plus aria-hidden="true" />
                 New event
               </Link>
@@ -154,7 +154,7 @@ function AgendaView({ events }: { events: StoredItem<CalendarEvent>[] }) {
 
 function EventRow({ event }: { event: StoredItem<CalendarEvent> }) {
   const e = event.data;
-  const href = `/calendar/${encodeURIComponent(event.url)}`;
+  const href = `/calendar/edit?id=${encodeURIComponent(event.url)}`;
   return (
     <Link
       href={href}
@@ -255,7 +255,7 @@ function MonthView({
                 {cell.events.slice(0, 3).map((ev) => (
                   <li key={ev.url}>
                     <Link
-                      href={`/calendar/${encodeURIComponent(ev.url)}`}
+                      href={`/calendar/edit?id=${encodeURIComponent(ev.url)}`}
                       className="block truncate rounded bg-accent px-1 py-0.5 text-[11px] text-accent-foreground hover:bg-accent/70 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
                       title={ev.data.name}
                     >

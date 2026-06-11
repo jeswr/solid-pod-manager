@@ -182,7 +182,7 @@ function GrantScreen() {
           <p className="mt-2 text-sm text-muted-foreground">
             {appName} already has some access —{" "}
             <Link
-              href={`/connected-apps/${encodeURIComponent(clientId)}`}
+              href={`/connected-apps/app?id=${encodeURIComponent(clientId)}`}
               className="underline underline-offset-4 hover:text-foreground"
             >
               review it here

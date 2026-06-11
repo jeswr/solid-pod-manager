@@ -1,13 +1,15 @@
 "use client";
 
 /**
- * Contact editor — create (`id === "new"`) or edit/delete an existing contact
- * (`id` = URL-encoded resource URL). A name is required; email / phone / note
- * are optional. Conditional writes use the read ETag (412 → reopen).
+ * Contact editor — create (no `?id=`) or edit/delete an existing contact
+ * (`?id=` = the contact's resource URL). A query parameter rather than a path
+ * segment so the page prerenders under `output: "export"`. A name is required;
+ * email / phone / note are optional. Conditional writes use the read ETag
+ * (412 → reopen).
  */
-import { use, useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronRight, Loader2, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { contactsStore, type Contact } from "@/lib/contacts";
@@ -20,10 +22,19 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 
-export default function ContactEditorPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
-  const isNew = id === "new";
-  const url = isNew ? undefined : decodeURIComponent(id);
+export default function ContactEditorPage() {
+  // useSearchParams requires a Suspense boundary in a prerendered page.
+  return (
+    <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+      <ContactEditor />
+    </Suspense>
+  );
+}
+
+function ContactEditor() {
+  // `?id=` is the contact's resource URL (URLSearchParams decodes it); absent → new.
+  const url = useSearchParams().get("id") ?? undefined;
+  const isNew = !url;
 
   const router = useRouter();
   const store = useStore<Contact>(contactsStore);
@@ -67,7 +78,7 @@ export default function ContactEditorPage({ params }: { params: Promise<{ id: st
       if (isNew) {
         const { url: created } = await store.create(contact, fn);
         toast.success("Contact added");
-        router.replace(`/contacts/${encodeURIComponent(created)}`);
+        router.replace(`/contacts/edit?id=${encodeURIComponent(created)}`);
       } else if (url) {
         await store.update(url, contact, etag);
         toast.success("Contact saved");

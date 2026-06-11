@@ -97,7 +97,7 @@ export default function ConnectedAppsPage() {
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <Link
-                    href={`/connected-apps/${encodeURIComponent(app.agentId)}`}
+                    href={`/connected-apps/app?id=${encodeURIComponent(app.agentId)}`}
                     className="inline-flex items-center gap-1 font-medium underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                   >
                     {app.name}

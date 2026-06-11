@@ -1,13 +1,15 @@
 "use client";
 
 /**
- * Note editor — create (`id === "new"`) or edit/delete an existing note
- * (`id` = the URL-encoded resource URL). Conditional writes use the read ETag
- * so a concurrent edit fails loudly (412) instead of clobbering.
+ * Note editor — create (no `?id=`) or edit/delete an existing note
+ * (`?id=` = the note's resource URL). A query parameter rather than a path
+ * segment so the page prerenders under `output: "export"` — resource URLs are
+ * unknowable at build time. Conditional writes use the read ETag so a
+ * concurrent edit fails loudly (412) instead of clobbering.
  */
-import { use, useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronRight, Eye, Loader2, Pencil, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { notesStore, type Note } from "@/lib/notes";
@@ -21,10 +23,19 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 
-export default function NoteEditorPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
-  const isNew = id === "new";
-  const url = isNew ? undefined : decodeURIComponent(id);
+export default function NoteEditorPage() {
+  // useSearchParams requires a Suspense boundary in a prerendered page.
+  return (
+    <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+      <NoteEditor />
+    </Suspense>
+  );
+}
+
+function NoteEditor() {
+  // `?id=` is the note's resource URL (URLSearchParams decodes it); absent → new.
+  const url = useSearchParams().get("id") ?? undefined;
+  const isNew = !url;
 
   const router = useRouter();
   const store = useStore<Note>(notesStore);
@@ -57,7 +68,7 @@ export default function NoteEditorPage({ params }: { params: Promise<{ id: strin
       if (isNew) {
         const { url: created } = await store.create(note, title);
         toast.success("Note created");
-        router.replace(`/notes/${encodeURIComponent(created)}`);
+        router.replace(`/notes/edit?id=${encodeURIComponent(created)}`);
       } else if (url) {
         await store.update(url, note, etag);
         toast.success("Note saved");

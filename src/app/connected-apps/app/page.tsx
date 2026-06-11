@@ -5,10 +5,14 @@
  * danger-zone "Remove all access" (DESIGN.md §4 screen 6, R4). Revokes are
  * optimistic with rollback; confirmations reassure, not scare (§6), and
  * per-category revokes offer an Undo (re-grant with the same modes).
+ *
+ * Addressed as `/connected-apps/app?id=<agent id URL>` — a query parameter
+ * rather than a path segment so the page prerenders under `output: "export"`
+ * (agent ids are arbitrary URLs, unknowable at build time).
  */
-import { use, useState } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AppWindow, ChevronRight, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { categoryIcon } from "@/components/category-icon";
@@ -27,13 +31,19 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
-export default function ConnectedAppPage({
-  params,
-}: {
-  params: Promise<{ app: string }>;
-}) {
-  const { app: encoded } = use(params);
-  const agentId = decodeURIComponent(encoded);
+export default function ConnectedAppPage() {
+  // useSearchParams requires a Suspense boundary in a prerendered page.
+  return (
+    <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+      <ConnectedAppDetail />
+    </Suspense>
+  );
+}
+
+function ConnectedAppDetail() {
+  // `?id=` is the app's agent id URL (URLSearchParams decodes it). A missing
+  // id falls through to the "no access" empty state below.
+  const agentId = useSearchParams().get("id") ?? "";
   const { app, ctx, loading, error, reload } = useConnectedApp(agentId);
   const router = useRouter();
 

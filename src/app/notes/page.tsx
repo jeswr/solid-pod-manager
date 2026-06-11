@@ -47,7 +47,7 @@ export default function NotesPage() {
           </div>
         </div>
         <Button asChild>
-          <Link href="/notes/new">
+          <Link href="/notes/edit">
             <Plus aria-hidden="true" />
             New note
           </Link>
@@ -69,7 +69,7 @@ export default function NotesPage() {
           description="Capture a thought, a list, or a draft. It is saved privately to your pod."
           action={
             <Button asChild>
-              <Link href="/notes/new">
+              <Link href="/notes/edit">
                 <Plus aria-hidden="true" />
                 New note
               </Link>
@@ -90,7 +90,7 @@ export default function NotesPage() {
 }
 
 function NoteRow({ note }: { note: StoredItem<Note> }) {
-  const href = `/notes/${encodeURIComponent(note.url)}`;
+  const href = `/notes/edit?id=${encodeURIComponent(note.url)}`;
   const title = note.data.title.trim() || "Untitled note";
   const preview = note.data.text.trim().replace(/\s+/g, " ").slice(0, 120);
   const modified = formatModified(note.data.modified?.toISOString());

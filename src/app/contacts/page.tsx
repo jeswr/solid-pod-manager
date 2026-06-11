@@ -45,7 +45,7 @@ export default function ContactsPage() {
           </div>
         </div>
         <Button asChild>
-          <Link href="/contacts/new">
+          <Link href="/contacts/edit">
             <Plus aria-hidden="true" />
             New contact
           </Link>
@@ -67,7 +67,7 @@ export default function ContactsPage() {
           description="Add the people you keep in touch with. Their details stay in your pod."
           action={
             <Button asChild>
-              <Link href="/contacts/new">
+              <Link href="/contacts/edit">
                 <Plus aria-hidden="true" />
                 New contact
               </Link>
@@ -95,7 +95,7 @@ function initials(name: string): string {
 
 function ContactRow({ contact }: { contact: StoredItem<Contact> }) {
   const c = contact.data;
-  const href = `/contacts/${encodeURIComponent(contact.url)}`;
+  const href = `/contacts/edit?id=${encodeURIComponent(contact.url)}`;
   const name = c.fn.trim() || "Unnamed contact";
   const detail = c.email || c.phone;
 

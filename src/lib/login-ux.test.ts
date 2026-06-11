@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { parseRdf } from "@jeswr/fetch-rdf";
 import {
-  validateWebId, resolveIssuers, RecentAccounts,
+  validateWebId, resolveIssuers, RecentAccounts, webIdFromSearch,
   NoSolidIssuerError, InvalidWebIdError,
   type KeyValueStorage, type RecentAccount,
 } from "./login-ux.js";
@@ -22,6 +22,30 @@ describe("validateWebId", () => {
   it("rejects non-URLs and non-http(s) schemes", () => {
     expect(() => validateWebId("not a url")).toThrow(InvalidWebIdError);
     expect(() => validateWebId("ftp://alice.example/card#me")).toThrow(InvalidWebIdError);
+  });
+});
+
+// The Solid server's profile page deep-links `/?webid=<URL-encoded WebID>`;
+// landing with it must prefill login for that WebID (see login-screen.tsx).
+describe("webIdFromSearch", () => {
+  it("extracts a URL-encoded WebID from the deep-link query string", () => {
+    expect(webIdFromSearch(`?webid=${encodeURIComponent(WEBID)}`)).toBe(WEBID);
+  });
+  it("works with extra parameters and a hash-bearing WebID", () => {
+    expect(webIdFromSearch(`?utm=x&webid=${encodeURIComponent(WEBID)}&y=1`)).toBe(WEBID);
+  });
+  it("trims surrounding whitespace and normalises like validateWebId", () => {
+    expect(webIdFromSearch(`?webid=${encodeURIComponent(`  ${WEBID} `)}`)).toBe(WEBID);
+  });
+  it("returns undefined when the parameter is absent or empty", () => {
+    expect(webIdFromSearch("")).toBeUndefined();
+    expect(webIdFromSearch("?other=1")).toBeUndefined();
+    expect(webIdFromSearch("?webid=")).toBeUndefined();
+  });
+  it("returns undefined (never throws) on invalid or non-http(s) values", () => {
+    expect(webIdFromSearch("?webid=not%20a%20url")).toBeUndefined();
+    expect(webIdFromSearch(`?webid=${encodeURIComponent("javascript:alert(1)")}`)).toBeUndefined();
+    expect(webIdFromSearch(`?webid=${encodeURIComponent("ftp://alice.example/card#me")}`)).toBeUndefined();
   });
 });
 

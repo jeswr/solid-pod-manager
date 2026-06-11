@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   ExternalLink,
@@ -21,6 +21,7 @@ import { initials } from "@/components/account-menu";
 import {
   InvalidWebIdError,
   NoSolidIssuerError,
+  webIdFromSearch,
 } from "@/lib/login-ux";
 
 /**
@@ -61,6 +62,21 @@ export function LoginScreen() {
   const [showSignIn, setShowSignIn] = useState(false);
   const busy = status === "authenticating";
   const returning = recentAccounts.length > 0;
+
+  // WebID deep-link contract: the Solid server's profile page links to
+  // `/?webid=<URL-encoded WebID>` — landing with it prefills the sign-in form
+  // for that WebID and surfaces it immediately. Login is NOT auto-submitted:
+  // the OIDC flow opens a popup, and popups not triggered by a user gesture
+  // are blocked — so the user confirms with one click on "Sign in".
+  // Read from window.location in an effect (not useSearchParams) so the
+  // prerendered shell needs no Suspense boundary and hydration stays clean.
+  useEffect(() => {
+    const fromLink = webIdFromSearch(window.location.search);
+    if (fromLink) {
+      setWebId(fromLink);
+      setShowSignIn(true);
+    }
+  }, []);
 
   async function attempt(id: string) {
     setError(null);

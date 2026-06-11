@@ -54,6 +54,24 @@ export function validateWebId(input: string): string {
 }
 
 /**
+ * The WebID deep-link contract: a Solid server's profile page links to
+ * `<pod-manager-url>/?webid=<URL-encoded WebID>` and landing there must
+ * prefill login for that WebID. Extracts and validates the `webid` query
+ * parameter from a `location.search` string; returns `undefined` (never
+ * throws) when the parameter is absent, empty, or not a valid http(s) WebID —
+ * a malformed deep link must degrade to the normal login screen, not break it.
+ */
+export function webIdFromSearch(search: string): string | undefined {
+  const raw = new URLSearchParams(search).get("webid")?.trim();
+  if (!raw) return undefined;
+  try {
+    return validateWebId(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Pure resolution from an already-fetched profile dataset: every
  * solid:oidcIssuer on the WebID subject. Throws NoSolidIssuerError when none.
  * One issuer → log straight in; several → present the list, the user picks.

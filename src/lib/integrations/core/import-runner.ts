@@ -9,8 +9,9 @@
  * Documents land at `<podRoot>integrations/<adapterId>/<slug>` — deterministic
  * URLs, so a re-import overwrites in place (idempotent).
  */
-import { fetchRdf, RdfFetchError } from "@jeswr/fetch-rdf";
+import { RdfFetchError } from "@jeswr/fetch-rdf";
 import { writeResource } from "../../pod-data.js";
+import { freshRdf } from "../../rdf-read.js";
 import {
   type DesiredRegistration,
   ensureTypeRegistrations,
@@ -80,10 +81,7 @@ export async function runImport(opts: RunImportOptions): Promise<ImportReport> {
     read: async (slug) => {
       const url = new URL(slug, root).toString();
       try {
-        const { dataset } = await fetchRdf(
-          url,
-          opts.podFetch ? { fetch: opts.podFetch } : undefined,
-        );
+        const { dataset } = await freshRdf(url, opts.podFetch);
         return dataset;
       } catch (e) {
         if (e instanceof RdfFetchError && e.status === 404) return undefined;

@@ -18,8 +18,9 @@ import {
   NamedNodeAs,
   NamedNodeFrom,
 } from "@rdfjs/wrapper";
-import { fetchRdf, RdfFetchError } from "@jeswr/fetch-rdf";
+import { RdfFetchError } from "@jeswr/fetch-rdf";
 import { WebIdDataset } from "@solid/object";
+import { freshRdf } from "./rdf-read.js";
 import { DataFactory } from "n3";
 
 const SOLID = "http://www.w3.org/ns/solid/terms#";
@@ -176,10 +177,7 @@ export async function readTypeIndex(
   fetchImpl?: typeof fetch,
 ): Promise<TypeIndexDataset | undefined> {
   try {
-    const { dataset } = await fetchRdf(
-      indexUrl,
-      fetchImpl ? { fetch: fetchImpl } : undefined,
-    );
+    const { dataset } = await freshRdf(indexUrl, fetchImpl);
     return new TypeIndexDataset(dataset, DataFactory);
   } catch (e) {
     if (e instanceof RdfFetchError && (e.status === 404 || e.status === 403)) {

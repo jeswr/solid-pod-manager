@@ -7,7 +7,7 @@
  * auth-patched global runs (AGENTS.md §Reading data).
  */
 import { useCallback, useEffect, useState } from "react";
-import { fetchRdf } from "@jeswr/fetch-rdf";
+import { freshRdf } from "@/lib/rdf-read";
 import { useSession } from "@/components/session-provider";
 import { useResourceNotifications } from "@/components/use-resource-notifications";
 import type { AsyncState } from "@/components/use-pod-data";
@@ -57,7 +57,7 @@ export function useConnectedApps(): ConnectedAppsState {
     setState({ loading: true });
 
     (async () => {
-      const { dataset } = await fetchRdf(webId);
+      const { dataset } = await freshRdf(webId);
       const { locations } = await discoverRegistrations(webId, dataset);
       const ctx: PermissionsContext = {
         ownerWebId: webId,

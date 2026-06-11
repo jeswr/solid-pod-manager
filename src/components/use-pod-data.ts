@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { fetchRdf } from "@jeswr/fetch-rdf";
+import { freshRdf } from "@/lib/rdf-read";
 import { useSession } from "@/components/session-provider";
 import { useResourceNotifications } from "@/components/use-resource-notifications";
 import { discoverRegistrations } from "@/lib/type-index";
@@ -35,8 +35,9 @@ export function useCategorySummaries(): AsyncState<CategorySummary[]> {
     setState({ loading: true });
 
     (async () => {
-      // The profile carries the type-index links — fetch it (public read).
-      const { dataset } = await fetchRdf(webId);
+      // The profile carries the type-index links — fetch it (public read,
+      // revalidated: a just-bootstrapped index link must not be cache-hidden).
+      const { dataset } = await freshRdf(webId);
       const { locations } = await discoverRegistrations(webId, dataset);
       if (cancelled) return;
       setState({ loading: false, data: summariseCategories(locations) });

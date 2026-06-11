@@ -20,7 +20,7 @@
 import * as oauth from "oauth4webapi";
 import * as DPoP from "dpop";
 import type { GetCodeCallback } from "@solid/reactive-authentication";
-import { fetchRdf } from "@jeswr/fetch-rdf";
+import { freshRdf } from "./rdf-read.js";
 import { resolveIssuers, validateWebId } from "./login-ux.js";
 
 /**
@@ -191,7 +191,7 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   async #resolveIssuer(signal: AbortSignal): Promise<URL> {
     const webId = validateWebId(await this.#getWebId());
     signal.throwIfAborted();
-    const { dataset } = await fetchRdf(webId, { fetch: this.#profileFetch });
+    const { dataset } = await freshRdf(webId, this.#profileFetch);
     const issuers = resolveIssuers(webId, dataset);
     const choose = this.#chooseIssuer ?? defaultChooseIssuer(webId);
     const chosen = await choose(issuers);

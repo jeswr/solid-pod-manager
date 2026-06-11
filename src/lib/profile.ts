@@ -4,9 +4,9 @@
  * §Layering). Built on `@solid/object`'s `WebIdDataset` + the `ProfileAgent`
  * rendering fallback chains.
  */
-import { fetchRdf } from "@jeswr/fetch-rdf";
 import { WebIdDataset } from "@solid/object";
 import { DataFactory } from "n3";
+import { freshRdf } from "./rdf-read.js";
 import { ProfileAgent } from "./profile-agent.js";
 import { NoStorageError } from "./errors.js";
 
@@ -56,7 +56,7 @@ export async function fetchProfile(
   webId: string,
   fetchImpl?: typeof fetch,
 ): Promise<PodProfile> {
-  const { dataset } = await fetchRdf(webId, fetchImpl ? { fetch: fetchImpl } : undefined);
+  const { dataset } = await freshRdf(webId, fetchImpl);
   return readProfile(webId, dataset);
 }
 

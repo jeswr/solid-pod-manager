@@ -14,8 +14,8 @@
  * when the configurable issuer callback ships. Tested with vitest against
  * the published packages (see login-ux.test.ts).
  */
-import { fetchRdf } from "@jeswr/fetch-rdf";
 import { WebIdDataset, Agent } from "@solid/object";
+import { freshRdf } from "./rdf-read.js";
 import { DataFactory } from "n3";
 import type { DatasetCore } from "@rdfjs/types";
 
@@ -97,7 +97,7 @@ export interface LoginCandidate {
  */
 export async function fetchLoginCandidate(input: string): Promise<LoginCandidate> {
   const webId = validateWebId(input);
-  const { dataset } = await fetchRdf(webId);
+  const { dataset } = await freshRdf(webId);
   const issuers = resolveIssuers(webId, dataset);
   const me = new WebIdDataset(dataset, DataFactory).mainSubject;
   return {

@@ -7,8 +7,8 @@
  * All RDF goes through the typed wrappers in `type-index.ts` — never inline
  * quads (house rule).
  */
-import { fetchRdf } from "@jeswr/fetch-rdf";
 import { DataFactory, Store } from "n3";
+import { freshRdf } from "./rdf-read.js";
 import { ResourceWriteError } from "./errors.js";
 import { writeResource } from "./pod-data.js";
 import {
@@ -54,9 +54,10 @@ export async function ensureTypeRegistrations(opts: {
   fetchImpl?: typeof fetch;
 }): Promise<EnsureRegistrationsResult> {
   const { webId, podRoot, registrations, fetchImpl } = opts;
-  const fetchOpt = fetchImpl ? { fetch: fetchImpl } : undefined;
 
-  const { dataset: profileDs, etag: profileEtag } = await fetchRdf(webId, fetchOpt);
+  // Read-modify-write: both reads MUST revalidate — a heuristically cached
+  // copy would carry a stale ETag into If-Match (spurious 412 on the write).
+  const { dataset: profileDs, etag: profileEtag } = await freshRdf(webId, fetchImpl);
   const links = typeIndexLinks(webId, profileDs);
   let indexUrl = links.privateIndex ?? links.publicIndex;
   let bootstrapped = false;
@@ -74,7 +75,7 @@ export async function ensureTypeRegistrations(opts: {
     bootstrapped = true;
   }
 
-  const { dataset: indexDs, etag: indexEtag } = await fetchRdf(indexUrl, fetchOpt);
+  const { dataset: indexDs, etag: indexEtag } = await freshRdf(indexUrl, fetchImpl);
   const index = new TypeIndexDataset(indexDs, DataFactory);
 
   let added = 0;

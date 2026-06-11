@@ -7,9 +7,9 @@
  * Pure functions (grouping, summarising) are separated from the I/O functions
  * (listing a container) so the grouping logic is unit-testable without a pod.
  */
-import { fetchRdf } from "@jeswr/fetch-rdf";
 import { ContainerDataset } from "@solid/object";
 import { DataFactory, Writer } from "n3";
+import { freshRdf } from "./rdf-read.js";
 import { ResourceDeleteError, ResourceWriteError } from "./errors.js";
 import {
   CATEGORIES,
@@ -132,7 +132,7 @@ export async function listContainer(
   fetchImpl?: typeof fetch,
 ): Promise<PodItem[]> {
   const url = containerUrl.endsWith("/") ? containerUrl : `${containerUrl}/`;
-  const { dataset } = await fetchRdf(url, fetchImpl ? { fetch: fetchImpl } : undefined);
+  const { dataset } = await freshRdf(url, fetchImpl);
   const container = new ContainerDataset(dataset, DataFactory).container;
   const out: PodItem[] = [];
   for (const r of container?.contains ?? []) {
@@ -211,7 +211,7 @@ export async function writeResource(
 
 /**
  * Read a single RDF resource and keep its ETag for a later conditional write.
- * A thin pass-through over `fetchRdf` so app modules never import it directly.
+ * A thin pass-through over `freshRdf` so app modules never import it directly.
  *
  * @param fetchImpl - test-only override; **omit in production** so the
  *   auth-patched global runs (AGENTS.md §Reading data). Errors propagate as
@@ -221,7 +221,7 @@ export async function readResource(
   url: string,
   fetchImpl?: typeof fetch,
 ): Promise<{ dataset: import("@rdfjs/types").DatasetCore; etag: string | null }> {
-  return fetchRdf(url, fetchImpl ? { fetch: fetchImpl } : undefined);
+  return freshRdf(url, fetchImpl);
 }
 
 /**

@@ -18,8 +18,9 @@
  * ACL documents are *discovered* from the `Link: rel="acl"` response header,
  * never derived from the resource URL.
  */
-import { fetchRdf, parseRdf, RdfFetchError } from "@jeswr/fetch-rdf";
+import { parseRdf, RdfFetchError } from "@jeswr/fetch-rdf";
 import { AclResource, Authorization } from "@solid/object";
+import { freshRdf } from "./rdf-read.js";
 import { DataFactory, Store, Writer } from "n3";
 import type { DatasetCore, Term } from "@rdfjs/types";
 import { CATEGORIES, UNCATEGORISED, type DataCategory } from "./categories.js";
@@ -285,10 +286,9 @@ export class WacPermissionsBackend implements PermissionsBackend {
     aclUrl: string,
   ): Promise<{ dataset: DatasetCore; etag: string | null } | undefined> {
     try {
-      const { dataset, etag } = await fetchRdf(
-        aclUrl,
-        this.fetchImpl ? { fetch: this.fetchImpl } : undefined,
-      );
+      // Revalidate: ACL reads feed If-Match writes (stale ETag = spurious 412)
+      // and the Connected-apps list must reflect a grant made seconds ago.
+      const { dataset, etag } = await freshRdf(aclUrl, this.fetchImpl);
       return { dataset, etag };
     } catch (e) {
       if (e instanceof RdfFetchError && e.status === 404) return undefined;

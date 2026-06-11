@@ -20,13 +20,14 @@ test.describe("Connect sources", () => {
     // All 30 catalog entries render as cards.
     await expect(page.locator('a[href^="/connect/"]')).toHaveCount(30);
 
-    // Tier-honest chips: A unconfigured → Demo; B → approval; C → export file.
+    // Tier-honest chips: A unconfigured → Demo; B → approval; C → file import.
+    // Copy must match STATUS_COPY in src/components/integration-status.tsx.
     const spotifyCard = page.locator('a[href="/connect/spotify"]');
     await expect(spotifyCard.getByText(/^demo$/i)).toBeVisible();
     const calendarCard = page.locator('a[href="/connect/google-calendar"]');
     await expect(calendarCard.getByText(/needs platform approval/i)).toBeVisible();
     const netflixCard = page.locator('a[href="/connect/netflix"]');
-    await expect(netflixCard.getByText(/import from export file/i)).toBeVisible();
+    await expect(netflixCard.getByText(/import a file/i)).toBeVisible();
   });
 
   test("demo-mode Spotify connect imports fixture data that appears under My data", async ({

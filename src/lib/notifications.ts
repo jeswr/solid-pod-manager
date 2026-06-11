@@ -26,8 +26,9 @@
  * pod RDF**, so they are exempt from the typed-wrapper rule and use plain
  * `JSON` (solid-notifications skill). Only the storage *description* is RDF.
  */
-import { fetchRdf, RdfFetchError } from "@jeswr/fetch-rdf";
+import { RdfFetchError } from "@jeswr/fetch-rdf";
 import { DatasetWrapper, TermWrapper, SetFrom, NamedNodeAs, NamedNodeFrom } from "@rdfjs/wrapper";
+import { freshRdf } from "./rdf-read.js";
 import { DataFactory } from "n3";
 
 /** The Solid notifications ontology namespace. */
@@ -181,10 +182,7 @@ async function readSubscriptionService(
   fetchImpl?: typeof fetch,
 ): Promise<string | undefined> {
   try {
-    const { dataset } = await fetchRdf(
-      descriptionUrl,
-      fetchImpl ? { fetch: fetchImpl } : undefined,
-    );
+    const { dataset } = await freshRdf(descriptionUrl, fetchImpl);
     const services = new StorageDescriptionDataset(dataset, DataFactory).subscriptionServicesFor(
       WEBSOCKET_CHANNEL_2023,
     );

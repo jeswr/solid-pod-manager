@@ -72,11 +72,18 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
     let cancelled = false;
     (async () => {
-      const [{ ReactiveFetchManager }, { WebIdDPoPTokenProvider }] = await Promise.all([
-        import("@solid/reactive-authentication"),
-        import("@/lib/webid-token-provider"),
-      ]);
+      const [{ ReactiveFetchManager, AuthorizationCodeFlow }, { WebIdDPoPTokenProvider }] =
+        await Promise.all([
+          import("@solid/reactive-authentication"),
+          import("@/lib/webid-token-provider"),
+        ]);
       if (cancelled) return;
+
+      // Since reactive-authentication PR #9 ("Isolate side-effects") importing
+      // the module no longer defines the custom elements; define the one we use.
+      if (!customElements.get("authorization-code-flow")) {
+        customElements.define("authorization-code-flow", AuthorizationCodeFlow);
+      }
 
       const callbackUri = new URL("/callback.html", location.href).toString();
       const ui = flowRef.current as unknown as {

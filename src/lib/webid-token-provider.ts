@@ -34,6 +34,12 @@ import { resolveIssuers, validateWebId } from "./login-ux.js";
 export interface TokenProvider {
   matches(request: Request): Promise<boolean>;
   upgrade(request: Request): Promise<Request>;
+  /**
+   * Optional (upstream PR #14): called by `ReactiveFetchManager` when a request
+   * this provider upgraded was STILL rejected with 401, so cached credentials
+   * can be marked stale before the manager's single retry.
+   */
+  invalidate?(request: Request): Promise<void>;
 }
 
 /** Ask the user for their WebID. Resolves to the WebID string, or rejects/cancels. */
@@ -115,7 +121,41 @@ interface IssuerSession {
   authorizationServer: oauth.AuthorizationServer;
   clientRegistration: oauth.Client;
   dpopKey: CryptoKeyPair;
+  /**
+   * The oauth4webapi DPoP handle for token-endpoint requests. Reused for the
+   * refresh grant so refreshed access tokens stay bound to the same key
+   * (RFC 9449 §4.3) and server-provided DPoP nonces are remembered.
+   */
+  dpopHandle: oauth.DPoPHandle;
   accessToken: string;
+  /**
+   * The refresh token (RFC 6749 §6), when the server issued one. Replaced in
+   * the renewed session whenever the server rotates it (RFC 9700 §4.14.2).
+   */
+  refreshToken: string | undefined;
+  /**
+   * Epoch ms after which the access token counts as expired (server-reported
+   * `expires_in` minus a skew allowance), or undefined when none was reported.
+   *
+   * MIRRORS upstream reactive-authentication PR #11/#12 (session cache +
+   * refresh tokens in `DPoPTokenProvider`) — delete this port when a release
+   * containing them is published and this app moves back to the upstream
+   * provider plus a `GetIssuerCallback`.
+   */
+  expiresAt: number | undefined;
+}
+
+/** Refresh this much before the reported expiry to absorb clock skew. */
+const EXPIRY_SKEW_MS = 30_000;
+
+function expiresAt(token: oauth.TokenEndpointResponse): number | undefined {
+  return token.expires_in === undefined
+    ? undefined
+    : Date.now() + token.expires_in * 1000 - EXPIRY_SKEW_MS;
+}
+
+function hasExpired(session: IssuerSession): boolean {
+  return session.expiresAt !== undefined && Date.now() >= session.expiresAt;
 }
 
 const isLoopback = (host: string): boolean =>
@@ -224,16 +264,137 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     return new Request(request, { headers });
   }
 
-  /** Reuse the (possibly in-flight) session for the issuer, else run the code flow once. */
+  /**
+   * Marks the cached session stale when the access token attached to the
+   * request was rejected by the resource server (still 401 after an upgrade):
+   * revoked, invalidated early, or expired without a server-reported lifetime.
+   * The next upgrade then renews the session — refresh grant first, popup flow
+   * as fallback — instead of replaying the rejected token.
+   *
+   * MIRRORS upstream reactive-authentication PR #14 (`TokenProvider.invalidate`
+   * + the manager's 401-once retry) — delete with the rest of this port when a
+   * release containing it is published.
+   */
+  async invalidate(request: Request): Promise<void> {
+    const issuer = await this.#issuer?.catch(() => undefined);
+    if (issuer === undefined) return;
+    const pending = this.#sessions.get(issuer.href);
+    if (pending === undefined) return;
+
+    const session = await pending.catch(() => undefined);
+
+    // Only when the rejected token is still the cached one — a concurrent
+    // renewal may already have replaced it.
+    if (
+      session !== undefined &&
+      request.headers.get("Authorization") === `DPoP ${session.accessToken}`
+    ) {
+      session.expiresAt = 0;
+    }
+  }
+
+  /**
+   * Reuse the (possibly in-flight) session for the issuer; renew an expired one
+   * (transparently via the refresh-token grant where possible); else run the
+   * code flow once.
+   */
   async #getSession(issuer: URL, signal: AbortSignal): Promise<IssuerSession> {
     const cached = this.#sessions.get(issuer.href);
-    if (cached) return cached;
-    const pending = this.#authenticate(issuer, signal).catch((e) => {
-      this.#sessions.delete(issuer.href); // failed login is retryable
+    if (cached === undefined) {
+      return this.#begin(issuer, this.#authenticate(issuer, signal));
+    }
+
+    const session = await cached;
+    if (!hasExpired(session)) return session;
+
+    // Renew, unless a concurrent caller already replaced the expired session.
+    if (this.#sessions.get(issuer.href) === cached) {
+      this.#sessions.delete(issuer.href);
+      return this.#begin(issuer, this.#renew(issuer, session, signal));
+    }
+    return this.#getSession(issuer, signal);
+  }
+
+  /** Cache the in-flight work; evict on failure so the next request can retry. */
+  async #begin(issuer: URL, work: Promise<IssuerSession>): Promise<IssuerSession> {
+    this.#sessions.set(issuer.href, work);
+    try {
+      return await work;
+    } catch (e) {
+      if (this.#sessions.get(issuer.href) === work) {
+        this.#sessions.delete(issuer.href);
+      }
       throw e;
-    });
-    this.#sessions.set(issuer.href, pending);
-    return pending;
+    }
+  }
+
+  /**
+   * Prefer a transparent refresh-token grant; fall back to a new
+   * authorization-code flow when there is no refresh token or the grant fails
+   * (refresh-token expiry, revocation, rotation-reuse detection, …).
+   */
+  async #renew(
+    issuer: URL,
+    expired: IssuerSession,
+    signal: AbortSignal,
+  ): Promise<IssuerSession> {
+    if (expired.refreshToken === undefined) {
+      return this.#authenticate(issuer, signal);
+    }
+    try {
+      return await this.#refresh(issuer, expired, expired.refreshToken);
+    } catch {
+      // The fallback stays silent while the IdP cookie lives (prompt=none first).
+      return this.#authenticate(issuer, signal);
+    }
+  }
+
+  /**
+   * The refresh-token grant (RFC 6749 §6), DPoP-bound with the session's
+   * existing key/handle, adopting the rotated refresh token when the server
+   * issues one. One retry on a server-required DPoP nonce.
+   */
+  async #refresh(
+    issuer: URL,
+    session: IssuerSession,
+    refreshToken: string,
+  ): Promise<IssuerSession> {
+    const { authorizationServer, clientRegistration, dpopHandle } = session;
+    const clientAuth = this.#clientAuth(authorizationServer.issuer, clientRegistration);
+    const http = this.#httpOptions(issuer, this.#authSignal);
+
+    const grant = () =>
+      oauth.refreshTokenGrantRequest(
+        authorizationServer,
+        clientRegistration,
+        clientAuth,
+        refreshToken,
+        { DPoP: dpopHandle, ...http },
+      );
+
+    let tokenResult: oauth.TokenEndpointResponse;
+    try {
+      tokenResult = await oauth.processRefreshTokenResponse(
+        authorizationServer,
+        clientRegistration,
+        await grant(),
+      );
+    } catch (e) {
+      if (!oauth.isDPoPNonceError(e)) throw e;
+      // The handle captured the server's DPoP nonce from the error; retry once.
+      tokenResult = await oauth.processRefreshTokenResponse(
+        authorizationServer,
+        clientRegistration,
+        await grant(),
+      );
+    }
+
+    return {
+      ...session,
+      accessToken: tokenResult.access_token,
+      refreshToken: tokenResult.refresh_token ?? refreshToken,
+      expiresAt: expiresAt(tokenResult),
+    };
   }
 
   /**
@@ -271,13 +432,29 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     const nonce = oauth.generateRandomNonce();
     const state = oauth.generateRandomState();
 
+    // Opt in to refresh tokens where the server supports them (OIDC Core §11).
+    // The static Client Identifier Document already declares offline_access +
+    // the refresh_token grant; servers without support see the old request.
+    const useOfflineAccess =
+      authorizationServer.scopes_supported?.includes("offline_access") ?? false;
+
     const buildAuthorizationUrl = (withPrompt: boolean): URL => {
       const url = new URL(authorizationServer.authorization_endpoint as string);
       url.searchParams.set("client_id", clientRegistration.client_id);
       url.searchParams.set("redirect_uri", registeredRedirectUri);
       url.searchParams.set("response_type", registeredResponseType);
-      url.searchParams.set("scope", "openid webid");
-      if (withPrompt) url.searchParams.set("prompt", "none");
+      url.searchParams.set(
+        "scope",
+        useOfflineAccess ? "openid webid offline_access" : "openid webid",
+      );
+      if (withPrompt) {
+        url.searchParams.set("prompt", "none");
+      } else if (useOfflineAccess) {
+        // The interactive attempt must carry `prompt=consent` for the server to
+        // honour `offline_access`: OIDC Core §11 says the AS MUST ignore the
+        // scope otherwise, and oidc-provider (CSS, this broker) enforces that.
+        url.searchParams.set("prompt", "consent");
+      }
       url.searchParams.set("state", state);
       url.searchParams.set("nonce", nonce);
       if (authorizationServer.code_challenge_methods_supported !== undefined) {
@@ -359,7 +536,10 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       authorizationServer,
       clientRegistration,
       dpopKey,
+      dpopHandle: dpop,
       accessToken: tokenResult.access_token,
+      refreshToken: tokenResult.refresh_token,
+      expiresAt: expiresAt(tokenResult),
     };
   }
 
@@ -394,7 +574,14 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     }
     const registrationResponse = await oauth.dynamicClientRegistrationRequest(
       authorizationServer,
-      { redirect_uris: [this.#callbackUri] },
+      {
+        redirect_uris: [this.#callbackUri],
+        // Register for refresh tokens where supported (mirrors the static
+        // Client Identifier Document, which declares both grants).
+        ...(authorizationServer.grant_types_supported?.includes("refresh_token")
+          ? { grant_types: ["authorization_code", "refresh_token"] }
+          : {}),
+      },
       http,
     );
     return oauth.processDynamicClientRegistrationResponse(registrationResponse);

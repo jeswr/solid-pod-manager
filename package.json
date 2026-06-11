@@ -17,7 +17,7 @@
     "@jeswr/fetch-rdf": "^0.1.0",
     "@rdfjs/wrapper": "^0.34.0",
     "@solid/object": "^0.6.0",
-    "@solid/reactive-authentication": "^0.1.3",
+    "@solid/reactive-authentication": "file:vendor/solid-reactive-authentication-0.1.3-pr11-14.tgz",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.17.0",

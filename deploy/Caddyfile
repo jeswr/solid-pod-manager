@@ -10,6 +10,9 @@
 # strings (?webid=, ?id=, ?url=), which static file resolution ignores.
 # The /index.html fallback keeps unknown paths inside the app shell for
 # client routing (a truly unknown URL renders the app, not a bare 404 page).
+# Consequence (accepted): unknown paths AND trailing-slash variants of real
+# routes (/notes/edit/) answer 200 with the shell rather than 404/the page —
+# in-app links never emit trailing slashes, so only hand-typed URLs hit this.
 #
 # Security headers: moved here verbatim from the deleted src/middleware.ts
 # (middleware cannot run on a static export; `next dev` therefore no longer

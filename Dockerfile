@@ -16,6 +16,12 @@
 # TLS terminates at the box's edge proxy; this serves plain HTTP on :8080.
 FROM caddy:2-alpine
 
+# Strip the file capability the base image sets on the caddy binary
+# (cap_net_bind_service=ep). We listen on :8080 so it is unneeded, and its
+# *effective* bit makes exec fail with EPERM under the hardened compose
+# posture (cap_drop: ALL + no-new-privileges) the server stack runs us with.
+RUN apk add --no-cache libcap && setcap -r /usr/bin/caddy
+
 # The origin the export must have been built for. Override with
 # `--build-arg APP_ORIGIN=...` when building for a different deployment.
 ARG APP_ORIGIN=https://app.solid-test.jeswr.org

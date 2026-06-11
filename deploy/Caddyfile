@@ -41,6 +41,16 @@
 	# Go's MIME table has no .jsonld entry, so set it explicitly.
 	header /clientid.jsonld Content-Type "application/ld+json"
 
+	# Caching: Next's hashed build assets are content-addressed → cache forever.
+	# Everything else (the HTML shell/routes, clientid.jsonld) must REVALIDATE:
+	# a deploy swaps these in place under unchanged URLs, and with no explicit
+	# policy browsers heuristically cache them — the deploy-layer twin of the
+	# read-your-writes bug fixed for pod reads (43c9224). no-cache still allows
+	# storing; file_server's ETag/Last-Modified make revalidation a cheap 304.
+	header /_next/static/* Cache-Control "public, max-age=31536000, immutable"
+	@revalidate not path /_next/static/*
+	header @revalidate Cache-Control "no-cache"
+
 	try_files {path} {path}.html /index.html
 	file_server
 }

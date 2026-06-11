@@ -48,7 +48,18 @@ async function fileAt(path) {
 }
 
 const server = createServer(async (req, res) => {
-  const pathname = decodeURIComponent(new URL(req.url ?? "/", "http://localhost").pathname);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(new URL(req.url ?? "/", "http://localhost").pathname);
+  } catch {
+    // Malformed request target (e.g. an invalid percent sequence like /%zz):
+    // decodeURIComponent throws URIError, and an uncaught throw in this async
+    // handler would kill the whole process. Caddy answers 400 and stays up —
+    // match that.
+    res.writeHead(400, { "content-type": "text/plain" });
+    res.end("Bad request");
+    return;
+  }
   // Traversal guard: never resolve outside the export directory.
   const safe = normalize(join(dir, pathname));
   if (safe !== dir && !safe.startsWith(dir + sep)) {
@@ -72,5 +83,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, () => {
-  console.log(`Serving ${dir} at http://localhost:${port} (try_files {path} {path}.html /index.html)`);
+  // Report the BOUND port (`port` may be 0 = "any free port", used by tests).
+  const bound = server.address().port;
+  console.log(`Serving ${dir} at http://localhost:${bound} (try_files {path} {path}.html /index.html)`);
 });

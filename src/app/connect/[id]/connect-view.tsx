@@ -112,18 +112,26 @@ function TierCFlow({ entry }: { entry: CatalogEntry }) {
  * review gates any *live* connect. We let the user run the **demo** import
  * (clearly-labelled sample data, the full real UX) while stating honestly that
  * connecting their real account needs platform approval + credentials.
+ *
+ * Hybrid (Garmin): when the platform also has a self-serve data export with a
+ * shipped file adapter, the real-data file import renders alongside the
+ * approval-gated OAuth path — the user need not wait for the platform.
  */
 function TierBFlow({ entry }: { entry: CatalogEntry }) {
   const adapter = adapterById(entry.id);
+  const fileAdapter = fileAdapterById(entry.id);
   const { state, start, reset } = useConnect(adapter);
 
   if (!adapter) {
     return (
-      <EmptyState
-        icon={Clock}
-        title="Coming soon — needs platform approval"
-        description={`${entry.blocker ?? "This platform reviews apps before users may connect."} We'll enable this the moment approval lands; nothing about your pod changes in the meantime.`}
-      />
+      <>
+        <EmptyState
+          icon={Clock}
+          title="Coming soon — needs platform approval"
+          description={`${entry.blocker ?? "This platform reviews apps before users may connect."} We'll enable this the moment approval lands; nothing about your pod changes in the meantime.`}
+        />
+        {fileAdapter ? <TierCImport entry={entry} adapter={fileAdapter} /> : null}
+      </>
     );
   }
 
@@ -190,6 +198,10 @@ function TierBFlow({ entry }: { entry: CatalogEntry }) {
           </span>
         ) : null}
       </div>
+
+      {/* Hybrid: the platform's self-serve export imports real data today,
+          while the OAuth path above waits for platform approval. */}
+      {fileAdapter ? <TierCImport entry={entry} adapter={fileAdapter} /> : null}
     </section>
   );
 }

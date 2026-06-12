@@ -30,8 +30,8 @@ re-import overwrites in place, never duplicates.
   maintainer deploys. Until both are set, those adapters stay demo.
 - **Tier B** apps require platform partnership/app-review before any user can connect →
   shown as "Coming soon — needs platform approval".
-- **Tier C** apps have no user-grade API → shown as "Import from export file" (a later
-  increment parses their official data-export archives).
+- **Tier C** apps have no user-grade API → shown as "Import from export file"; each has
+  a shipped parser for its official data export (`src/lib/integrations/file-adapters.ts`).
 
 ## Tier A — end-user OAuth, adapters shipped (this increment)
 
@@ -57,7 +57,7 @@ Go-live checklist per app (the honest list) lives in each adapter's
 | Google Photos | `google-photos` | Media | Photos Library API approval |
 | YouTube | `youtube` | Media | API audit for watch/like history scopes |
 | Fitbit | `fitbit` | Health | Developer app review for intraday data |
-| Garmin | `garmin` | Health, Mobility | Partner-program (Health/Connect API) approval |
+| Garmin | `garmin` | Health, Mobility | Partner-program (Health/Connect API) approval. **Hybrid**: a file import of the user's own Garmin Connect export ships today (see Tier C); the partner application draft is `docs/garmin-partner-application.md` |
 | Instagram | `instagram` | Media, Social & interests | Meta app review |
 | Facebook | `facebook` | Social & interests | Meta app review |
 | TikTok | `tiktok` | Media, Social & interests | TikTok developer audit |
@@ -66,7 +66,7 @@ Go-live checklist per app (the honest list) lives in each adapter's
 | Slack | `slack` | Work & education | Workspace-admin install approval model |
 | Pinterest | `pinterest` | Media, Social & interests | Trial-access review |
 
-## Tier C — no user-grade API: import from export file (visible, file-import later)
+## Tier C — no user-grade API: import from export file (file imports shipped)
 
 | App | id | Categories | Export format |
 |---|---|---|---|
@@ -80,6 +80,10 @@ Go-live checklist per app (the honest list) lives in each adapter's
 | ChatGPT | `chatgpt` | Documents | Conversations export (JSON) |
 | Bank statements | `bank-statements` | Finance | CSV / OFX statements |
 | Google Takeout | `google-takeout` | Documents, Media, Calendar | Takeout archive |
+| Garmin *(Tier-B hybrid)* | `garmin` | Health, Mobility | `Activities.csv` ("Export CSV" on the activities list — Garmin only exports the rows loaded, so scroll first) or a single per-activity GPX/TCX file. The full archive ("Export Your Data", `DI_CONNECT/…/summarizedActivities.json`) is a large ZIP we deliberately don't parse — the CSV carries the same summaries without a ZIP reader. |
+
+A Tier-B app may also appear here when its self-serve export already works (Garmin):
+the connect page then shows the approval-gated OAuth path **and** the file import.
 
 ## Vocabulary map (normalisation targets)
 
@@ -89,6 +93,8 @@ Go-live checklist per app (the honest list) lives in each adapter's
 | GitHub repo / profile | `schema:SoftwareSourceCode` / `foaf:OnlineAccount` | Work & education |
 | Strava run/workout | `schema:ExerciseAction` | Health |
 | Strava ride/commute | `schema:TravelAction` | Mobility |
+| Garmin run/workout (CSV/GPX/TCX) | `schema:ExerciseAction` | Health |
+| Garmin ride/commute (CSV/GPX/TCX) | `schema:TravelAction` | Mobility |
 | Reddit saved post / subreddit | `schema:SocialMediaPosting` / `foaf:Group` | Social & interests |
 | Discord profile / guild | `foaf:OnlineAccount` / `foaf:Group` | Social & interests |
 | Twitch followed channel | `schema:WatchAction` | Media |

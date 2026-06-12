@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decodeXmlEntities, extractElements } from "./mini-xml.js";
+import { decodeXmlEntities, extractBlocks, extractElements, firstTagText } from "./mini-xml.js";
 
 describe("decodeXmlEntities", () => {
   it("decodes the five predefined entities", () => {
@@ -43,5 +43,53 @@ describe("extractElements", () => {
   it("decodes entity-escaped attribute values", () => {
     const x = `<E note="Tom &amp; Jerry"/>`;
     expect([...extractElements(x, "E")][0].note).toBe("Tom & Jerry");
+  });
+});
+
+describe("extractBlocks", () => {
+  const gpx = `<gpx><trk><name>Morning Run</name><type>running</type>
+    <trkseg>
+      <trkpt lat="51.50" lon="-0.12"><time>2026-06-08T06:30:00Z</time></trkpt>
+      <trkpt lat="51.51" lon="-0.13"/>
+    </trkseg></trk></gpx>`;
+
+  it("returns attrs + raw inner markup for open elements", () => {
+    const trks = [...extractBlocks(gpx, "trk")];
+    expect(trks).toHaveLength(1);
+    expect(trks[0].inner).toContain("<name>Morning Run</name>");
+  });
+
+  it("handles self-closing elements (empty inner) and attributes", () => {
+    const pts = [...extractBlocks(gpx, "trkpt")];
+    expect(pts).toHaveLength(2);
+    expect(pts[0].attrs.lat).toBe("51.50");
+    expect(pts[0].inner).toContain("<time>");
+    expect(pts[1].attrs.lon).toBe("-0.13");
+    expect(pts[1].inner).toBe("");
+  });
+
+  it("does not confuse a tag with a longer-named tag (trk vs trkpt/trkseg)", () => {
+    expect([...extractBlocks(gpx, "trk")]).toHaveLength(1);
+  });
+
+  it("respects the limit and survives a truncated close tag", () => {
+    expect([...extractBlocks(gpx, "trkpt", 1)]).toHaveLength(1);
+    const truncated = `<a><b>one</b><b>two`;
+    const bs = [...extractBlocks(truncated, "b")];
+    expect(bs).toHaveLength(2);
+    expect(bs[1].inner).toBe("two");
+  });
+});
+
+describe("firstTagText", () => {
+  it("returns the decoded, trimmed text of the first leaf element", () => {
+    expect(firstTagText(`<x><name> Tom &amp; Jerry </name><name>second</name></x>`, "name")).toBe(
+      "Tom & Jerry",
+    );
+  });
+  it("returns undefined for absent tags, empty text, or nested markup", () => {
+    expect(firstTagText(`<x/>`, "name")).toBeUndefined();
+    expect(firstTagText(`<x><name>  </name></x>`, "name")).toBeUndefined();
+    expect(firstTagText(`<x><name><b>no</b></name></x>`, "name")).toBeUndefined();
   });
 });

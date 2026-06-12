@@ -111,7 +111,8 @@ describe("integrations registry", () => {
   });
 
   it("ships a working file-import adapter for every Tier-C catalog entry", () => {
-    expect(FILE_ADAPTERS).toHaveLength(TIER_C.length);
+    // All 10 Tier-C entries plus the Tier-B hybrid (Garmin, asserted below).
+    expect(FILE_ADAPTERS).toHaveLength(TIER_C.length + 1);
     for (const entry of TIER_C) {
       const adapter = fileAdapterById(entry.id);
       expect(adapter, `missing file adapter for ${entry.id}`).toBeDefined();
@@ -127,6 +128,28 @@ describe("integrations registry", () => {
     }
   });
 
+  it("Garmin is a Tier-B hybrid: approval-gated OAuth plus a working file import", () => {
+    // The OAuth adapter stays approval-gated…
+    const oauth = adapterById("garmin");
+    expect(oauth?.metadata.tier).toBe("B");
+    expect(statusOf({ ...oauth!.metadata })).toBe("approval-needed");
+    // …while the file adapter imports the user's own export today.
+    const file = fileAdapterById("garmin");
+    expect(file).toBeDefined();
+    expect(file?.metadata.authKind).toBe("export-file");
+    expect(file?.accept).toContain(".csv");
+    expect(file?.accept).toContain(".gpx");
+    expect(file?.accept).toContain(".tcx");
+    // Honest guidance: both export options plus the full-archive alternative.
+    expect(file?.fileHint).toMatch(/Export CSV/);
+    expect(file?.fileHint).toMatch(/GPX or TCX/);
+    expect(file?.fileHint).toMatch(/Export Your Data/);
+    // Same id, same categories — the data lands in the same pod container.
+    expect([...file!.metadata.categories].sort()).toEqual(
+      [...oauth!.metadata.categories].sort(),
+    );
+  });
+
   it("Tier-C export links: a real https URL where the platform has one, absent otherwise", () => {
     // Platforms with a single web page where the user requests/downloads the export.
     const EXPORT_URLS: Record<string, string> = {
@@ -137,6 +160,7 @@ describe("integrations registry", () => {
       goodreads: "https://www.goodreads.com/review/import",
       steam: "https://help.steampowered.com/en/accountdata",
       chatgpt: "https://chatgpt.com",
+      garmin: "https://connect.garmin.com/modern/activities",
     };
     // In-app or institution-specific exports: no URL to send the user to —
     // the field must be ABSENT (the UI renders no link).

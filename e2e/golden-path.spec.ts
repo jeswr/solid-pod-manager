@@ -20,19 +20,30 @@ const EMAIL = "alice@example.com";
 const PASSWORD = "test-password-123";
 
 test.describe("Login surface", () => {
-  test("leads with the value prop and a create-a-pod path", async ({ page }) => {
+  test("leads with the value prop and a create-a-pod path — THIS server first", async ({ page }) => {
     await page.goto("/");
     await expect(
       page.getByRole("heading", { name: /one home for all your personal data/i }),
     ).toBeVisible();
     // New users get provider choices to create a pod, no jargon wall.
     await expect(page.getByRole("heading", { name: /create your free pod/i })).toBeVisible();
+    // The HOME provider (this server) leads the list, before external hosts.
+    const createList = page.getByRole("list").filter({
+      has: page.getByRole("link", { name: /solidcommunity\.net/i }),
+    });
+    await expect(createList.getByText(/this server/i)).toBeVisible();
+    const first = createList.getByRole("listitem").first();
+    await expect(first.getByText(/this server/i)).toBeVisible();
     await expect(page.getByRole("link", { name: /solidcommunity\.net/i })).toBeVisible();
   });
 
-  test("reveals the pod-address sign-in form on request", async ({ page }) => {
+  test("reveals the sign-in surface on request: provider picker + smart input", async ({ page }) => {
     await revealSignInForm(page);
     await expect(page.getByLabel(/your pod address/i)).toBeVisible();
+    // First-party provider picker, home provider leading.
+    const picker = page.getByRole("list", { name: /pod providers/i });
+    await expect(picker.getByRole("listitem").first().getByText(/this server/i)).toBeVisible();
+    await expect(picker.getByRole("button", { name: /solidcommunity\.net/i })).toBeVisible();
   });
 
   test("rejects a malformed pod address without navigating away", async ({ page }) => {
@@ -49,6 +60,27 @@ test.describe("Login surface", () => {
     await page.getByRole("button", { name: /^sign in$/i }).click();
     // Scope to the form's own error (Next injects its own role="alert" route announcer).
     await expect(page.locator("#webid-error")).toBeVisible({ timeout: 20_000 });
+  });
+});
+
+test.describe("Login with a bare issuer (no WebID)", () => {
+  test("signs in with just the provider URL — the fresh-human path", async ({ page, context }) => {
+    await revealSignInForm(page);
+
+    // A brand-new user has no WebID to type: the provider's address alone
+    // must work (the WebID comes back in the ID token's webid claim).
+    await page.fill('input[type="url"]', CSS_ORIGIN);
+
+    const nextPage = bufferPages(context);
+    await page.getByRole("button", { name: /^sign in$/i }).click();
+
+    const popup = await waitForLoginPopup(nextPage);
+    await completeCssLogin(popup, EMAIL, PASSWORD);
+
+    // Landed authenticated on Home — identity learned from the token.
+    await expect(page.getByRole("heading", { name: /welcome back/i })).toBeVisible({
+      timeout: 30_000,
+    });
   });
 });
 

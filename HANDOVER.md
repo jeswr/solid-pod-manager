@@ -40,8 +40,9 @@ maintainer wants you **autonomous, avoiding blockers** (mock/stub rather than wa
 ## Stack & rules (from `AGENTS.md` — non-negotiable)
 - **Next.js (App Router) + TypeScript + Tailwind + shadcn/ui (Radix)** + Lucide + react-hook-form/zod +
   sonner. Node ≥ 24. Vercel-deploy-shaped.
-- **Solid libs:** `@solid/reactive-authentication` (auth, `<authorization-code-flow>`, patches global
-  fetch), `@solid/object` + `@rdfjs/wrapper` + `n3` (typed pod data), `@jeswr/fetch-rdf` (RDF fetch).
+- **Solid libs:** `@solid/reactive-authentication` (auth protocol layer, patches global fetch; the
+  login UI + popup lifecycle are FIRST-PARTY — `src/lib/popup-login.ts` + `login-screen.tsx`, no
+  web components), `@solid/object` + `@rdfjs/wrapper` + `n3` (typed pod data), `@jeswr/fetch-rdf` (RDF fetch).
   **NEVER use `@inrupt/*`** — the guide explicitly rejects it.
 - **Layering:** `src/lib/` is the ONLY code that touches RDF (typed, TSDoc'd, typed error classes —
   branch on `instanceof`, never string-match). `app/` + `src/components/` is UI and never touches RDF.

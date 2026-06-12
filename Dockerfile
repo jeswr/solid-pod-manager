@@ -20,7 +20,10 @@ FROM caddy:2-alpine
 # (cap_net_bind_service=ep). We listen on :8080 so it is unneeded, and its
 # *effective* bit makes exec fail with EPERM under the hardened compose
 # posture (cap_drop: ALL + no-new-privileges) the server stack runs us with.
-RUN apk add --no-cache libcap && setcap -r /usr/bin/caddy
+RUN apk add --no-cache libcap && setcap -r /usr/bin/caddy \
+    # Regression guard: fail the BUILD if any file capability remains — a base-image
+    # change that adds one would otherwise resurface the crash-loop only at runtime.
+    && [ -z "$(getcap /usr/bin/caddy)" ]
 
 # The origin the export must have been built for. Override with
 # `--build-arg APP_ORIGIN=...` when building for a different deployment.

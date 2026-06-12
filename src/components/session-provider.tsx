@@ -38,6 +38,11 @@ import { RecentAccounts, type RecentAccount } from "@/lib/login-ux";
 import { resolveLoginInput, type LoginTarget } from "@/lib/login-input";
 import { openPopupUnlessRenewable, PopupLoginController } from "@/lib/popup-login";
 import { AmbiguousIssuerError, type WebIdDPoPTokenProvider } from "@/lib/webid-token-provider";
+import {
+  IndexedDbSessionStore,
+  indexedDbAvailable,
+  type SessionStore,
+} from "@/lib/session-persistence";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 
 type Status = "loading" | "logged-out" | "authenticating" | "logged-in";
@@ -104,6 +109,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // The WebID the provider's 401-upgrade path should resolve the issuer from
   // when no issuer is pinned yet (the silent-restore path after a reload).
   const pendingWebIdRef = useRef<string>(undefined);
+  // The issuer of the active (restored or freshly-logged-in) session, kept so
+  // logout can clear that issuer's persisted refresh token + DPoP key.
+  const activeIssuerRef = useRef<string>(undefined);
+  // The durable refresh-token-session store (IndexedDB, origin-scoped). Created
+  // once on the client; shared by the provider (persist/restore) and logout.
+  const sessionStoreRef = useRef<SessionStore | null>(null);
   // The one popup controller — created lazily on the client, shared between
   // the click handlers (synchronous open) and the token provider (getCode).
   const controllerRef = useRef<PopupLoginController>(null);
@@ -164,6 +175,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // (solid-client-id skill).
       const clientId = new URL("/clientid.jsonld", location.href).toString();
 
+      // Durable DPoP-bound refresh-token session (IndexedDB, origin-scoped) —
+      // lets a returning user restore via a refresh grant (a fetch) instead of
+      // the prompt=none authorization probe that flashes a window. Absent in
+      // SSR / locked-down environments; the provider then stays in-memory only.
+      const sessionStore: SessionStore | undefined = indexedDbAvailable()
+        ? new IndexedDbSessionStore()
+        : undefined;
+      sessionStoreRef.current = sessionStore ?? null;
+
       const provider = new WebIdDPoPTokenProvider(
         callbackUri,
         // The app-owned popup drives the user through the authorization
@@ -179,6 +199,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         {
           clientId,
           allowInsecureLoopback: true, // local CSS over HTTP; remote stays HTTPS-strict
+          sessionStore,
         },
       );
 
@@ -194,7 +215,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
       // Load remembered accounts and attempt a silent restore of the last one.
       const accounts = new RecentAccounts();
-      if (!cancelled) setRecentAccounts(accounts.list());
+      const remembered = accounts.list();
+      if (!cancelled) setRecentAccounts(remembered);
 
       const last =
         typeof localStorage !== "undefined"
@@ -202,6 +224,21 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           : null;
       if (last) {
         try {
+          // If a DPoP-bound refresh-token session was persisted for this
+          // account's issuer, restore it via a refresh grant FIRST — a plain
+          // token-endpoint fetch, NO popup/iframe. This is what removes the
+          // brief window a returning user used to see: the in-memory session is
+          // rebuilt before any private read can 401. On failure (expired /
+          // revoked refresh token) restoreIssuer clears the dead entry and
+          // returns undefined; we fall through to the public-profile restore,
+          // and a later private read re-auths silently while the IdP cookie
+          // lives — exactly the previous behaviour, still no popup on restore.
+          const issuer = remembered.find((a) => a.webId === last)?.issuer;
+          if (issuer) {
+            const provider = await providerReadyRef.current;
+            await provider?.restoreIssuer(new URL(issuer)).catch(() => undefined);
+            if (!cancelled) activeIssuerRef.current = issuer;
+          }
           await restore(last);
         } catch {
           if (!cancelled) setStatus("logged-out");
@@ -260,8 +297,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         const id = knownWebId ?? statedWebId;
         if (!id) throw new NoWebIdFromProviderError(issuer);
 
-        // From here the 401-upgrade path knows whose session this is.
+        // From here the 401-upgrade path knows whose session this is, and
+        // logout knows which issuer's persisted session to clear.
         pendingWebIdRef.current = id;
+        activeIssuerRef.current = issuer;
 
         const p = await fetchProfile(id);
         setWebId(id);
@@ -355,6 +394,18 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     pendingWebIdRef.current = undefined;
     if (typeof localStorage !== "undefined") {
       localStorage.removeItem(ACTIVE_WEBID_KEY);
+    }
+    // Wipe the persisted DPoP-bound refresh token + key for this issuer so a
+    // logged-out user is NOT silently restored on the next load (the credential
+    // must not outlive an explicit sign-out). Fire-and-forget; clears both via
+    // the provider (which owns the store) and, defensively, the store directly.
+    const issuer = activeIssuerRef.current;
+    activeIssuerRef.current = undefined;
+    if (issuer) {
+      void providerReadyRef.current
+        ?.then((p) => p?.forgetPersisted(new URL(issuer)))
+        .catch(() => {});
+      void sessionStoreRef.current?.delete(issuer).catch(() => {});
     }
   }, []);
 

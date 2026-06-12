@@ -17,6 +17,7 @@ import {
   createFakeAuthorizationServer,
   type FakeAuthorizationServer,
 } from "./test-utils/fake-authorization-server";
+import { StructuredCloneSessionStore } from "./test-utils/structured-clone-session-store";
 
 const WEBID = "https://pod.test/profile/card#me";
 const CALLBACK = "https://app.test/callback.html";
@@ -552,5 +553,192 @@ describe("click path: no popup when the session suffices", () => {
     blocked[0]!.resume();
     const { webId } = await pending;
     expect(webId).toBe(WEBID);
+  });
+});
+
+// ── Persisted DPoP-bound refresh-token session: restore WITHOUT a window ─────
+//
+// The maintainer's goal: a returning user (in-memory state gone) restores via a
+// refresh_token grant — a token-endpoint FETCH, never a popup/iframe. These
+// model the page-reload boundary by building a SECOND provider over the SAME
+// SessionStore + AS, with a getCode that THROWS if a popup is ever needed.
+
+describe("persisted refresh-token session: restore without a window", () => {
+  // The store is keyed by the canonical issuer URL (URL.href adds the slash).
+  const ISSUER_HREF = new URL("https://as.test").href;
+  /** A getCode that fails the test if any authorize navigation is attempted. */
+  const noPopup = vi.fn(async (): Promise<string> => {
+    throw new Error("no popup may open during a refresh-grant restore");
+  });
+
+  function makeProviderWith(
+    store: StructuredCloneSessionStore,
+    getCode: typeof noPopup = noPopup,
+  ) {
+    return new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: store,
+    });
+  }
+
+  beforeEach(async () => {
+    as = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    noPopup.mockClear();
+  });
+
+  it("persists the DPoP-bound refresh token + key on login, but NEVER the access token", async () => {
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: store,
+    });
+
+    await provider.login(new URL("https://as.test"));
+
+    const persisted = store.peek(ISSUER_HREF);
+    expect(persisted?.refreshToken).toMatch(/^rt-/);
+    expect(persisted?.webId).toBe(WEBID);
+    expect(persisted?.dpopKey.privateKey.extractable).toBe(false);
+    // The access token is short-lived and must never be written to storage.
+    expect(persisted && "accessToken" in persisted).toBe(false);
+    expect(JSON.stringify({ ...persisted, dpopKey: undefined })).not.toContain("at-");
+  });
+
+  it("restores a returning user via the refresh grant — no popup, no authorize round-trip", async () => {
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    const first = makeProviderWith(store, getCode as unknown as typeof noPopup);
+    await first.login(new URL("https://as.test")); // original login (one authorize)
+    expect(as.authorizationRequests).toHaveLength(1);
+
+    // A fresh provider models the reload: in-memory maps + DPoP key are gone.
+    const reloaded = makeProviderWith(store);
+    const restored = await reloaded.restoreIssuer(new URL("https://as.test"));
+
+    expect(restored).toEqual({ webId: WEBID });
+    expect(noPopup).not.toHaveBeenCalled(); // NO window opened
+    expect(as.authorizationRequests).toHaveLength(1); // still just the original
+    expect(as.tokenRequests.at(-1)?.get("grant_type")).toBe("refresh_token");
+
+    // The restored session is live: a 401 upgrade now works with no interaction.
+    const upgraded = await reloaded.upgrade(new Request("https://pod.test/private"));
+    expect(upgraded.headers.get("Authorization")).toMatch(/^DPoP at-\d+$/);
+    expect(noPopup).not.toHaveBeenCalled();
+  });
+
+  it("the restored DPoP key signs the refresh-grant proof (key continuity across the reload)", async () => {
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    await makeProviderWith(store, getCode as unknown as typeof noPopup).login(
+      new URL("https://as.test"),
+    );
+
+    const reloaded = makeProviderWith(store);
+    await reloaded.restoreIssuer(new URL("https://as.test"));
+
+    // The refresh request carried a DPoP proof (the AS only rotates a token for
+    // a proof-bearing request); the grant succeeding proves the persisted key
+    // signed it — the same key that minted the original token. A throwing
+    // getCode never fired, so this was a pure fetch.
+    expect(as.tokenRequests.at(-1)?.get("grant_type")).toBe("refresh_token");
+    expect(noPopup).not.toHaveBeenCalled();
+  });
+
+  it("persists the ROTATED refresh token after restore (so a second reload still works)", async () => {
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    await makeProviderWith(store, getCode as unknown as typeof noPopup).login(
+      new URL("https://as.test"),
+    );
+    const original = store.peek(ISSUER_HREF)?.refreshToken;
+
+    const reloaded = makeProviderWith(store);
+    await reloaded.restoreIssuer(new URL("https://as.test"));
+
+    const rotated = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(rotated).toBeDefined();
+    expect(rotated).not.toBe(original); // rotation (RFC 9700) persisted
+
+    // A SECOND reload restores from the rotated token, still no popup.
+    const reloadedAgain = makeProviderWith(store);
+    const restored = await reloadedAgain.restoreIssuer(new URL("https://as.test"));
+    expect(restored).toEqual({ webId: WEBID });
+    expect(noPopup).not.toHaveBeenCalled();
+  });
+
+  it("a dead refresh token (invalid_grant) clears the persisted session and opens NO window on restore", async () => {
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    await makeProviderWith(store, getCode as unknown as typeof noPopup).login(
+      new URL("https://as.test"),
+    );
+    expect(store.peek(ISSUER_HREF)).toBeDefined();
+
+    as.activeRefreshTokens.clear(); // revoked server-side → invalid_grant
+
+    const reloaded = makeProviderWith(store);
+    const restored = await reloaded.restoreIssuer(new URL("https://as.test"));
+
+    expect(restored).toBeUndefined(); // nothing restored
+    expect(noPopup).not.toHaveBeenCalled(); // and crucially NO popup on restore
+    expect(store.peek(ISSUER_HREF)).toBeUndefined(); // dead entry cleared
+    expect(store.deletes).toContain(ISSUER_HREF);
+  });
+
+  it("restoreIssuer is a no-op (undefined) when nothing was persisted", async () => {
+    const store = new StructuredCloneSessionStore();
+    const reloaded = makeProviderWith(store);
+    expect(await reloaded.restoreIssuer(new URL("https://as.test"))).toBeUndefined();
+    expect(noPopup).not.toHaveBeenCalled();
+  });
+
+  it("forgetPersisted clears the stored session (logout)", async () => {
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    const provider = makeProviderWith(store, getCode as unknown as typeof noPopup);
+    await provider.login(new URL("https://as.test"));
+    expect(store.peek(ISSUER_HREF)).toBeDefined();
+
+    await provider.forgetPersisted(new URL("https://as.test"));
+    expect(store.peek(ISSUER_HREF)).toBeUndefined();
+
+    // After logout, a reload restores nothing (no silent revival of a logged-out
+    // session) and opens no window.
+    const reloaded = makeProviderWith(store);
+    expect(await reloaded.restoreIssuer(new URL("https://as.test"))).toBeUndefined();
+    expect(noPopup).not.toHaveBeenCalled();
+  });
+
+  it("an issuer-first login with no webid claim is not persisted (nothing to restore by WebID)", async () => {
+    as = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      // no webIdClaim
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    const provider = new WebIdDPoPTokenProvider(
+      CALLBACK,
+      getCode,
+      async () => {
+        throw new Error("issuer-first: getWebId must not be called");
+      },
+      { clientId: CLIENT_ID, profileFetch, sessionStore: store },
+    );
+
+    const { webId } = await provider.login(new URL("https://as.test"));
+    expect(webId).toBeUndefined();
+    expect(store.peek(ISSUER_HREF)).toBeUndefined(); // not persisted
   });
 });

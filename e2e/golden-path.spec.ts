@@ -119,4 +119,41 @@ test.describe("Golden path: login → My data", () => {
     await expect(page.getByRole("link", { name: /identity/i })).toBeVisible();
     await expect(page.getByRole("link", { name: /health/i })).toBeVisible();
   });
+
+  test("a reload restores the session via the refresh grant — NO popup/window opens", async ({
+    page,
+    context,
+  }) => {
+    // Sign in (persists a DPoP-bound refresh token + non-extractable key in
+    // IndexedDB), then reload and assert the session comes back with zero
+    // windows — the brief popup/tab a returning user used to see is gone,
+    // because restore is now a token-endpoint fetch (refresh_token grant).
+    await revealSignInForm(page);
+    await page.fill('input[type="url"]', WEBID);
+    const firstLoginPages = bufferPages(context);
+    await page.getByRole("button", { name: /^sign in$/i }).click();
+    const popup = await waitForLoginPopup(firstLoginPages);
+    await completeCssLogin(popup, EMAIL, PASSWORD);
+    await expect(page.getByRole("heading", { name: /welcome back/i })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    // Watch for ANY new page (popup/tab) from here on; a restore must open none.
+    const openedAfterReload: string[] = [];
+    context.on("page", (p) => openedAfterReload.push(p.url()));
+
+    // A private read must also succeed silently (proves the restored session is
+    // live, not just the public-profile shell).
+    await page.reload();
+    await expect(page.getByRole("heading", { name: /welcome back/i })).toBeVisible({
+      timeout: 30_000,
+    });
+    await page.getByRole("link", { name: /^my data$/i }).first().click();
+    await expect(page.getByRole("heading", { name: /^my data$/i })).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // The no-window proof: nothing opened across the whole restore.
+    expect(openedAfterReload).toEqual([]);
+  });
 });

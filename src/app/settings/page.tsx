@@ -1,6 +1,7 @@
 "use client";
 
-import { Database, Fingerprint, LogOut, Server } from "lucide-react";
+import Link from "next/link";
+import { ChevronRight, Database, Fingerprint, Globe, LogOut, Server } from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { Button } from "@/components/ui/button";
@@ -52,6 +53,32 @@ export default function SettingsPage() {
               arrives with the write features.
             </p>
           ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Domains</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Link
+            href="/settings/domains"
+            className="group flex items-start gap-3 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            <Globe
+              className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <span className="min-w-0">
+              <span className="flex items-center gap-1 text-sm font-medium underline-offset-4 group-hover:underline">
+                Custom domains
+                <ChevronRight className="size-4 text-muted-foreground" aria-hidden="true" />
+              </span>
+              <span className="mt-0.5 block text-sm text-muted-foreground">
+                Use your own web address for your pod.
+              </span>
+            </span>
+          </Link>
         </CardContent>
       </Card>
 

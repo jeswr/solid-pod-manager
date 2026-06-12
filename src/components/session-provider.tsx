@@ -10,8 +10,11 @@
  *
  * Login model (first-party UI): the user picks a provider, or enters EITHER a
  * WebID OR a bare issuer URL in one smart input (`src/lib/login-input.ts`).
- * The popup is opened SYNCHRONOUSLY in the click handler (user activation),
- * then the protocol layer (`WebIdDPoPTokenProvider` — the vendored PR #11–#14
+ * The popup is opened SYNCHRONOUSLY in the click handler (user activation) —
+ * UNLESS the provider's synchronous probe says a cached session or refresh
+ * token completes the login with fetches alone (`openPopupUnlessRenewable`),
+ * in which case no window opens at all. When one does open, the protocol
+ * layer (`WebIdDPoPTokenProvider` — the vendored PR #11–#14
  * token+refresh logic) navigates it straight to the INTERACTIVE authorize URL
  * (explicit logins skip the doomed `prompt=none` hop; recent-account clicks
  * and background 401 re-auth keep silent-first, retrying interactively in the
@@ -33,7 +36,7 @@ import {
 } from "react";
 import { RecentAccounts, type RecentAccount } from "@/lib/login-ux";
 import { resolveLoginInput, type LoginTarget } from "@/lib/login-input";
-import { PopupLoginController } from "@/lib/popup-login";
+import { openPopupUnlessRenewable, PopupLoginController } from "@/lib/popup-login";
 import { AmbiguousIssuerError, type WebIdDPoPTokenProvider } from "@/lib/webid-token-provider";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 
@@ -58,8 +61,10 @@ export interface Session {
   recentAccounts: RecentAccount[];
   /**
    * Begin login for a WebID OR a bare issuer URL (one smart input). Call
-   * DIRECTLY from the click/submit handler — the popup opens synchronously at
-   * the top so the user activation is never lost. Resolves once
+   * DIRECTLY from the click/submit handler — when a popup is needed it opens
+   * synchronously at the top so the user activation is never lost; when the
+   * issuer is known up front (`opts.issuer`) and a cached session or refresh
+   * token suffices, no popup opens at all. Resolves once
    * authenticated; throws on failure ({@link AmbiguousIssuerError} when the
    * WebID advertises several issuers and `opts.issuer` was not given).
    *
@@ -104,6 +109,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const controllerRef = useRef<PopupLoginController>(null);
   // Resolves to the token provider once the auth module is wired up.
   const providerReadyRef = useRef<Promise<WebIdDPoPTokenProvider>>(null);
+  // The SAME provider, synchronously reachable once ready — the click handlers
+  // consult its canRenewWithoutInteraction probe BEFORE deciding to open a
+  // popup, and a click handler cannot await (the user activation would be
+  // spent). Null until the auth module loads; the probe then says "open".
+  const providerSyncRef = useRef<WebIdDPoPTokenProvider>(null);
   const [status, setStatus] = useState<Status>("loading");
   const [webId, setWebId] = useState<string>();
   const [profile, setProfile] = useState<PodProfile>();
@@ -174,6 +184,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
       const manager = new ReactiveFetchManager([provider]);
       manager.registerGlobally();
+      providerSyncRef.current = provider;
       return provider;
     })();
 
@@ -282,8 +293,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (input: string, opts?: { issuer?: string; silentFirst?: boolean }) => {
-      // SYNCHRONOUS popup open — first statement, inside the user activation.
-      getController().open();
+      // SYNCHRONOUS popup decision — first statement, inside the user
+      // activation. When the issuer is known NOW (recent-account chip, issuer
+      // choice) and the provider's probe says a cached session or refresh
+      // token completes this login with fetches alone, no popup opens at all
+      // — "Continue as" with a live session must not flash a blank window.
+      // Everywhere else (typed WebID: the issuer is a profile fetch away)
+      // the popup opens here, synchronously, exactly as before.
+      openPopupUnlessRenewable(getController(), providerSyncRef.current, opts?.issuer);
       setStatus("authenticating");
       try {
         // Resolve the smart input: WebID (deref → solid:oidcIssuer) or bare
@@ -316,8 +333,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const loginWithIssuer = useCallback(
     async (issuer: string) => {
-      // SYNCHRONOUS popup open — first statement, inside the user activation.
-      getController().open();
+      // SYNCHRONOUS popup decision — first statement, inside the user
+      // activation (see login() above; a repeat provider-picker click with a
+      // live session re-logs-in without a window).
+      openPopupUnlessRenewable(getController(), providerSyncRef.current, issuer);
       await completeLogin(issuer, undefined);
     },
     [completeLogin, getController],

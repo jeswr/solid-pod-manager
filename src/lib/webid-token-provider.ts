@@ -17,6 +17,12 @@
  * Background paths (401 upgrade/renewal) keep silent-first: there the IdP
  * cookie usually lives and `prompt=none` succeeds without bothering the user.
  *
+ * A second APP-SPECIFIC divergence (also a candidate for upstream):
+ * {@link WebIdDPoPTokenProvider.canRenewWithoutInteraction} — a SYNCHRONOUS
+ * probe the click handler consults BEFORE `window.open`, so no popup flashes
+ * open when a cached session (or its refresh token) can complete the login
+ * with fetches alone.
+ *
  * Two app-supplied callbacks drive identity:
  *  - `getWebId()`   — how the app states whose WebID a 401-upgrade is for
  *                     (the Pod Manager seeds it from its login/restore state).
@@ -236,6 +242,14 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   /** Single-flight session per issuer: parallel 401s share one login flow. */
   readonly #sessions = new Map<string, Promise<IssuerSession>>();
   /**
+   * The last SETTLED session per issuer — a synchronous snapshot beside the
+   * promise map above, kept solely so {@link canRenewWithoutInteraction} can
+   * answer without awaiting anything (a click handler must decide whether to
+   * `window.open` BEFORE its user activation is consumed by an await). Never
+   * read on the auth path itself; `#sessions` stays the single-flight truth.
+   */
+  readonly #settledSessions = new Map<string, IssuerSession>();
+  /**
    * Shared auth work (issuer resolution, login) is provider-owned: it must NOT
    * be tied to any single request's AbortSignal, or aborting one request would
    * cancel the login other concurrent 401 upgrades are waiting on. The user
@@ -313,6 +327,30 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       options.silentFirst === true ? "silent-first" : "interactive";
     const session = await this.#getSession(issuer, this.#authSignal, mode);
     return { webId: session.webId };
+  }
+
+  /**
+   * SYNCHRONOUS probe: would {@link login} for this issuer complete without
+   * any authorize navigation? True when the last settled session is still
+   * fresh (within the expiry skew) OR carries a refresh token — the refresh
+   * grant (RFC 6749 §6) is a plain fetch, no popup. False when nothing is
+   * cached, the cached state is unusable, or a first login is still in
+   * flight (unknown ≠ yes).
+   *
+   * The click handler uses this to decide whether to `window.open` while the
+   * user activation is live (`openPopupUnlessRenewable` in popup-login.ts).
+   * A YES can still be wrong — the server may reject the refresh grant — in
+   * which case {@link #renew} drops the dead token (keeping this probe honest
+   * for the next click) and the code-flow fallback recovers via the popup
+   * controller's `onBlocked` affordance, never a raw unactivated open.
+   *
+   * APP-SPECIFIC (candidate for upstream alongside the PR #11/#12 session
+   * cache): upstream's DPoPTokenProvider exposes no popup-avoidance probe.
+   */
+  canRenewWithoutInteraction(issuer: URL): boolean {
+    const session = this.#settledSessions.get(issuer.href);
+    if (session === undefined) return false;
+    return !hasExpired(session) || session.refreshToken !== undefined;
   }
 
   async upgrade(request: Request): Promise<Request> {
@@ -398,7 +436,12 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   async #begin(issuer: URL, work: Promise<IssuerSession>): Promise<IssuerSession> {
     this.#sessions.set(issuer.href, work);
     try {
-      return await work;
+      const session = await work;
+      // Synchronous snapshot for canRenewWithoutInteraction(). The SAME object
+      // is stored, so in-place staleness marks (invalidate()'s expiresAt = 0,
+      // #renew dropping a rejected refresh token) are visible to the probe.
+      this.#settledSessions.set(issuer.href, session);
+      return session;
     } catch (e) {
       if (this.#sessions.get(issuer.href) === work) {
         this.#sessions.delete(issuer.href);
@@ -424,8 +467,13 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     try {
       return await this.#refresh(issuer, expired, expired.refreshToken);
     } catch {
-      // On the background path the fallback stays silent while the IdP cookie
-      // lives (prompt=none first); an explicit login goes interactive at once.
+      // The grant was rejected (refresh-token expiry, revocation, rotation
+      // reuse, …): drop the dead token IN PLACE so the synchronous probe
+      // (canRenewWithoutInteraction) stops promising a popup-free renewal on
+      // the next click. On the background path the fallback stays silent
+      // while the IdP cookie lives (prompt=none first); an explicit login
+      // goes interactive at once.
+      expired.refreshToken = undefined;
       return this.#authenticate(issuer, signal, mode);
     }
   }

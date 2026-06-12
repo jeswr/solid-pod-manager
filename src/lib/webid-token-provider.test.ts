@@ -7,6 +7,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebIdDPoPTokenProvider } from "./webid-token-provider";
 import {
+  openPopupUnlessRenewable,
+  PopupLoginController,
+  type MessageEventLike,
+  type OpenerWindowLike,
+  type PopupWindowLike,
+} from "./popup-login";
+import {
   createFakeAuthorizationServer,
   type FakeAuthorizationServer,
 } from "./test-utils/fake-authorization-server";
@@ -270,5 +277,280 @@ describe("WebIdDPoPTokenProvider refresh tokens", () => {
 
     expect(getCode).toHaveBeenCalledTimes(2); // re-authorized via the popup flow
     expect(second.headers.get("Authorization")).toMatch(/^DPoP at-\d+$/);
+  });
+});
+
+describe("canRenewWithoutInteraction (the synchronous popup-avoidance probe)", () => {
+  const ISSUER = new URL("https://as.test");
+
+  it("is false before any session exists", () => {
+    const { provider } = makeProvider();
+    expect(provider.canRenewWithoutInteraction(ISSUER)).toBe(false);
+  });
+
+  it("is true while the cached session is fresh", async () => {
+    const { provider } = makeProvider();
+    await provider.login(ISSUER);
+    expect(provider.canRenewWithoutInteraction(ISSUER)).toBe(true);
+  });
+
+  it("is true after expiry when a refresh token is held (the grant is a fetch, not a popup)", async () => {
+    const { provider } = makeProvider();
+    await provider.login(ISSUER);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 3601 * 1000);
+
+    expect(provider.canRenewWithoutInteraction(ISSUER)).toBe(true);
+  });
+
+  it("is false after expiry when no refresh token was issued", async () => {
+    as = await createFakeAuthorizationServer({
+      scopesSupported: ["openid", "webid"],
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const { provider } = makeProvider();
+    await provider.login(ISSUER);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 3601 * 1000);
+
+    expect(provider.canRenewWithoutInteraction(ISSUER)).toBe(false);
+  });
+
+  it("is false while the FIRST login is still in flight (unknown is not yes)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const getCode = vi.fn((url: URL) => gate.then(() => as.authorize(url)));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+    });
+
+    const pending = provider.login(ISSUER);
+    await vi.waitFor(() => expect(getCode).toHaveBeenCalled());
+    expect(provider.canRenewWithoutInteraction(ISSUER)).toBe(false);
+
+    release();
+    await pending;
+    expect(provider.canRenewWithoutInteraction(ISSUER)).toBe(true);
+  });
+
+  it("turns false again when a rejected refresh grant proves the cached token dead", async () => {
+    let failPopup = false;
+    const getCode = vi.fn((url: URL) =>
+      failPopup
+        ? Promise.reject(new DOMException("Sign-in was cancelled.", "AbortError"))
+        : as.authorize(url),
+    );
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+    });
+    await provider.login(ISSUER);
+
+    as.activeRefreshTokens.clear(); // revoked server-side
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 3601 * 1000);
+    expect(provider.canRenewWithoutInteraction(ISSUER)).toBe(true); // honestly believed
+
+    // The refresh grant is rejected AND the code-flow fallback fails too
+    // (the user dismisses the recovered popup).
+    failPopup = true;
+    await expect(provider.login(ISSUER)).rejects.toMatchObject({ name: "AbortError" });
+
+    // The dead refresh token was dropped in place: the probe no longer
+    // promises a popup-free renewal, so the next click opens one synchronously.
+    expect(provider.canRenewWithoutInteraction(ISSUER)).toBe(false);
+  });
+});
+
+// ── Click path: the app's click-handler wiring, minus React ─────────────────
+//
+// These four are the maintainer's regression tests for "Continue as opens an
+// unnecessary about:blank popup": the click handler must consult the
+// synchronous probe BEFORE window.open, and only ever recover a wrong YES via
+// the blocked-popup affordance (fresh activation), never a raw open.
+
+const APP_ORIGIN = "https://app.test";
+
+class ClickFakePopup implements PopupWindowLike {
+  closed = false;
+  urls: string[] = [];
+  close(): void {
+    this.closed = true;
+  }
+  focus(): void {}
+}
+
+/**
+ * A fake opener window whose popup completes the OAuth dance like the real
+ * one: navigating it to an authorize URL drives the fake AS and posts the
+ * /callback.html URL back with the app origin and OUR popup as the source —
+ * so the controller's postMessage origin/source gate stays on the tested
+ * path. `blockFreshOpens` models the popup blocker: fresh windows need user
+ * activation; navigating an already-open named window does not.
+ */
+class FakeAuthWindow implements OpenerWindowLike {
+  listeners = new Set<(event: MessageEventLike) => void>();
+  popup: ClickFakePopup | null = null;
+  opens: string[] = [];
+  blockFreshOpens = false;
+  readonly #onOpen?: (url: string) => void;
+
+  constructor(onOpen?: (url: string) => void) {
+    this.#onOpen = onOpen;
+  }
+
+  open(url?: string): PopupWindowLike | null {
+    const href = url ?? "";
+    this.opens.push(href);
+    this.#onOpen?.(href);
+    if (this.popup === null || this.popup.closed) {
+      if (this.blockFreshOpens) return null;
+      this.popup = new ClickFakePopup();
+    }
+    this.popup.urls.push(href);
+    if (href !== "" && href !== "about:blank") this.#completeAuthorization(href, this.popup);
+    return this.popup;
+  }
+
+  /** The "user agent" inside the popup: authorize, then postMessage back. */
+  #completeAuthorization(url: string, popup: ClickFakePopup): void {
+    // Macrotask: getCode registers its message listener within the current
+    // microtask chain, before this fires.
+    setTimeout(async () => {
+      const callbackUrl = await as.authorize(new URL(url));
+      this.emit({ origin: APP_ORIGIN, source: popup, data: callbackUrl });
+    }, 0);
+  }
+
+  addEventListener(_: "message", listener: (event: MessageEventLike) => void): void {
+    this.listeners.add(listener);
+  }
+  removeEventListener(_: "message", listener: (event: MessageEventLike) => void): void {
+    this.listeners.delete(listener);
+  }
+  emit(event: MessageEventLike): void {
+    for (const l of [...this.listeners]) l(event);
+  }
+}
+
+/** The exact wiring session-provider.tsx uses: controller as getCode, probe in the click. */
+function makeClickHarness(onOpen?: (url: string) => void) {
+  const win = new FakeAuthWindow(onOpen);
+  const blocked: { resume: () => void; cancel: () => void }[] = [];
+  const controller = new PopupLoginController({
+    expectedOrigin: APP_ORIGIN,
+    windowRef: win,
+    onBlocked: (resume, cancel) => blocked.push({ resume, cancel }),
+  });
+  const provider = new WebIdDPoPTokenProvider(
+    CALLBACK,
+    (uri, signal) => controller.getCode(uri, signal),
+    async () => WEBID,
+    { clientId: CLIENT_ID, profileFetch },
+  );
+  /** The click handler shape: SYNCHRONOUS probe + open decision, then login. */
+  const clickLogin = (issuer: string, opts?: { silentFirst?: boolean }) => {
+    openPopupUnlessRenewable(controller, provider, issuer);
+    return provider.login(new URL(issuer), opts);
+  };
+  return { win, controller, provider, clickLogin, blocked };
+}
+
+describe("click path: no popup when the session suffices", () => {
+  beforeEach(async () => {
+    as = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+  });
+
+  it("a login click with a live cached session NEVER calls window.open", async () => {
+    const { win, clickLogin } = makeClickHarness();
+    await clickLogin("https://as.test"); // first sign-in: the popup path
+    expect(win.opens).toEqual(["about:blank", expect.stringContaining("/authorize")]);
+
+    const opensBefore = win.opens.length;
+    // “Continue as” shape: silentFirst chip, but the session is live.
+    const { webId } = await clickLogin("https://as.test", { silentFirst: true });
+
+    expect(webId).toBe(WEBID); // the session resolved
+    expect(win.opens).toHaveLength(opensBefore); // window.open never called again
+    expect(as.authorizationRequests).toHaveLength(1); // and no authorize round-trip
+  });
+
+  it("a login click with only a refresh token uses the refresh grant — still no window.open", async () => {
+    const { win, clickLogin } = makeClickHarness();
+    await clickLogin("https://as.test");
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 3601 * 1000); // access token expired; refresh token held
+
+    const opensBefore = win.opens.length;
+    const { webId } = await clickLogin("https://as.test", { silentFirst: true });
+
+    expect(webId).toBe(WEBID);
+    expect(win.opens).toHaveLength(opensBefore); // no popup: the grant is a fetch
+    expect(as.tokenRequests.at(-1)?.get("grant_type")).toBe("refresh_token");
+    expect(as.authorizationRequests).toHaveLength(1); // no second authorize navigation
+  });
+
+  it("a login click with neither opens the popup synchronously, before any await", async () => {
+    const events: string[] = [];
+    const { win, clickLogin } = makeClickHarness((url) => events.push(`window.open:${url}`));
+    vi.stubGlobal("fetch", ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      events.push("network");
+      return as.fetch(input, init);
+    }) as typeof fetch);
+
+    const pending = clickLogin("https://as.test");
+    // User-activation ordering: window.open fired synchronously inside the
+    // click, before anything else the login flow does (discovery, etc.).
+    expect(events[0]).toBe("window.open:about:blank");
+
+    const { webId } = await pending;
+    expect(webId).toBe(WEBID);
+    expect(events[0]).toBe("window.open:about:blank"); // still first after the dust settles
+    expect(win.popup?.closed).toBe(true); // terminal response closed the popup
+  });
+
+  it("recovers a wrong yes-probe (refresh grant rejected) via the blocked-popup affordance", async () => {
+    as = await createFakeAuthorizationServer({
+      expiresIn: 0, // expired on arrival: the refresh token is all the probe has
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const { win, clickLogin, blocked } = makeClickHarness();
+    await clickLogin("https://as.test");
+
+    as.activeRefreshTokens.clear(); // revoked server-side: the yes-probe is wrong
+    win.blockFreshOpens = true; // by the time the grant fails, activation is spent
+    const opensBefore = win.opens.length;
+
+    const pending = clickLogin("https://as.test", { silentFirst: true });
+    expect(win.opens).toHaveLength(opensBefore); // probe said yes → no popup on click
+
+    // The refresh grant is rejected; the code-flow fallback's window.open is
+    // blocked, so the flow lands in the onBlocked affordance (the alertdialog).
+    await vi.waitFor(() => expect(blocked).toHaveLength(1));
+    // The only window.open since the click is that blocked navigation attempt
+    // — never a raw unactivated about:blank open.
+    expect(win.opens.slice(opensBefore)).toEqual([expect.stringContaining("/authorize")]);
+
+    // The affordance's button click IS the fresh activation resume() runs under.
+    win.blockFreshOpens = false;
+    blocked[0]!.resume();
+    const { webId } = await pending;
+    expect(webId).toBe(WEBID);
   });
 });

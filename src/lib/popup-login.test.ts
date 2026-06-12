@@ -10,11 +10,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  openPopupUnlessRenewable,
   PopupBlockedError,
   PopupLoginController,
   type MessageEventLike,
   type OpenerWindowLike,
   type PopupWindowLike,
+  type RenewProbe,
 } from "./popup-login";
 
 const ORIGIN = "https://app.test";
@@ -319,6 +321,55 @@ describe("blocked-popup recovery", () => {
     await flush();
     handlers!.cancel();
     await expect(code).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+describe("openPopupUnlessRenewable (the click-handler front door)", () => {
+  const probe = (answer: boolean): RenewProbe => ({
+    canRenewWithoutInteraction: () => answer,
+  });
+
+  it("does NOT open any window when the probe says the session suffices", () => {
+    const controller = makeController();
+    openPopupUnlessRenewable(controller, probe(true), "https://as.test");
+    expect(win.opens).toEqual([]); // window.open never called — no flash
+    expect(controller.isOpen).toBe(false);
+  });
+
+  it("opens the popup synchronously when the probe says interaction may be needed", () => {
+    const controller = makeController();
+    openPopupUnlessRenewable(controller, probe(false), "https://as.test");
+    expect(win.opens).toEqual(["about:blank"]);
+    expect(controller.isOpen).toBe(true);
+  });
+
+  it("opens the popup when no provider is ready yet (loading ≠ yes)", () => {
+    const controller = makeController();
+    openPopupUnlessRenewable(controller, null, "https://as.test");
+    expect(win.opens).toEqual(["about:blank"]);
+  });
+
+  it("opens the popup when the issuer is not known synchronously (typed WebID)", () => {
+    const controller = makeController();
+    const spy = vi.fn(() => true);
+    openPopupUnlessRenewable(controller, { canRenewWithoutInteraction: spy }, undefined);
+    expect(spy).not.toHaveBeenCalled();
+    expect(win.opens).toEqual(["about:blank"]);
+  });
+
+  it("opens the popup for an unparsable issuer instead of throwing", () => {
+    const controller = makeController();
+    const spy = vi.fn(() => true);
+    openPopupUnlessRenewable(controller, { canRenewWithoutInteraction: spy }, "not a url");
+    expect(spy).not.toHaveBeenCalled(); // new URL threw before the probe ran
+    expect(win.opens).toEqual(["about:blank"]);
+  });
+
+  it("hands the probe the parsed issuer URL", () => {
+    const controller = makeController();
+    const spy = vi.fn((issuer: URL) => issuer instanceof URL);
+    openPopupUnlessRenewable(controller, { canRenewWithoutInteraction: spy }, "https://as.test");
+    expect(spy).toHaveBeenCalledWith(new URL("https://as.test"));
   });
 });
 

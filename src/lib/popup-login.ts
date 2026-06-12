@@ -8,13 +8,20 @@
  *
  * The lifecycle rules (each one was a real bug class in popup logins):
  *
- * 1. **Open ONE named popup synchronously in the click handler.** Popup
- *    blockers allow `window.open` only while the user activation is live;
- *    the token provider needs async work (issuer discovery) before it knows
- *    the authorization URL. So the UI calls {@link PopupLoginController.open}
- *    synchronously on click (an `about:blank` named window), and the provider's
- *    later `getCode` NAVIGATES that named window — browsers allow navigating
- *    an already-open named window without fresh activation.
+ * 1. **Open ONE named popup synchronously in the click handler — but ONLY
+ *    when the login can actually need one.** Popup blockers allow
+ *    `window.open` only while the user activation is live; the token provider
+ *    needs async work (issuer discovery) before it knows the authorization
+ *    URL. So the UI calls {@link openPopupUnlessRenewable} synchronously on
+ *    click: when the provider's synchronous probe says a cached session or
+ *    refresh token completes the login with fetches alone, NO window is
+ *    opened (no about:blank flash); otherwise an `about:blank` named window
+ *    opens immediately and the provider's later `getCode` NAVIGATES it —
+ *    browsers allow navigating an already-open named window without fresh
+ *    activation. When the probe was wrong (the refresh grant is rejected
+ *    after the activation is spent), `getCode` finds no popup, the fresh
+ *    `window.open` is blocked, and the flow recovers through the `onBlocked`
+ *    affordance — never a raw unactivated open.
  * 2. **When the provider goes silent first, the interactive retry uses the
  *    SAME window.** On background re-auth the provider tries `prompt=none`;
  *    when the server answers `login_required` / `interaction_required` /
@@ -127,6 +134,51 @@ function needsInteraction(authorizationResponse: string): boolean {
     error === "interaction_required" ||
     error === "consent_required"
   );
+}
+
+/**
+ * The shape of the provider-side probe {@link openPopupUnlessRenewable}
+ * consults — `WebIdDPoPTokenProvider.canRenewWithoutInteraction`, stated
+ * structurally so this module needs no import from the protocol layer.
+ */
+export interface RenewProbe {
+  canRenewWithoutInteraction(issuer: URL): boolean;
+}
+
+/**
+ * The click-handler front door (lifecycle rule 1): open the login popup
+ * synchronously UNLESS the provider's SYNCHRONOUS probe says this login will
+ * complete without any authorize navigation — a live cached session, or a
+ * refresh token (the refresh grant is a plain fetch). Call this FIRST in the
+ * click/submit handler, before any `await`: when a popup IS needed, the
+ * `window.open` happens inside the user activation.
+ *
+ * The probe only ever skips the popup on a confident YES. No provider yet
+ * (auth module still loading), no issuer known synchronously (typed WebID —
+ * its issuer is on the profile, a network hop away), or an unparsable issuer
+ * all open the popup, preserving the pre-probe behaviour. And when a YES
+ * turns out wrong (the refresh grant is rejected after the activation is
+ * spent), the provider falls back to the code flow, whose blocked
+ * `window.open` is recovered through the controller's `onBlocked` affordance
+ * — a button click that supplies fresh activation — never a raw unactivated
+ * open.
+ */
+export function openPopupUnlessRenewable(
+  controller: PopupLoginController,
+  provider: RenewProbe | null | undefined,
+  issuer: string | undefined,
+): void {
+  if (provider != null && issuer !== undefined) {
+    let renewable = false;
+    try {
+      renewable = provider.canRenewWithoutInteraction(new URL(issuer));
+    } catch {
+      // Unparsable issuer: open the popup and let the login flow surface the
+      // error (its failure path closes the dangling window).
+    }
+    if (renewable) return;
+  }
+  controller.open();
 }
 
 export class PopupLoginController {

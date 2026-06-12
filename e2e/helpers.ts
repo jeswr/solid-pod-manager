@@ -15,9 +15,11 @@ export const PASSWORD = "test-password-123";
 /**
  * Buffer every new page in the context so none is missed while another is being
  * inspected. Returns a `next(timeout)` that yields pages in arrival order.
- * Subscribe BEFORE clicking login: the transient `prompt=none` popup and the
- * interactive one open ~100ms apart, so an unbuffered waitForEvent misses the
- * second while inspecting the first (observed against the prod build).
+ * Subscribe BEFORE clicking login. Explicit logins now navigate the popup
+ * straight to the interactive authorize URL (one page), but background
+ * re-auth paths still bounce a transient `prompt=none` popup ~100ms before
+ * the interactive one — an unbuffered waitForEvent misses the second while
+ * inspecting the first (observed against the prod build).
  */
 export function bufferPages(context: BrowserContext): (timeoutMs: number) => Promise<Page> {
   const queue: Page[] = [];
@@ -41,9 +43,11 @@ export function bufferPages(context: BrowserContext): (timeoutMs: number) => Pro
 }
 
 /**
- * Wait for the INTERACTIVE login popup. The provider first opens a transient
- * `prompt=none` popup that bounces to callback.html?error=interaction_required
- * and closes itself; skip anything that is not the CSS login/authorize UI.
+ * Wait for the INTERACTIVE login popup. Explicit logins go interactive-first
+ * (the first popup IS the login UI), but background re-auth still opens a
+ * transient `prompt=none` popup that bounces to
+ * callback.html?error=interaction_required and closes itself; skip anything
+ * that is not the CSS login/authorize UI.
  */
 export async function waitForLoginPopup(
   nextPage: (timeoutMs: number) => Promise<Page>,

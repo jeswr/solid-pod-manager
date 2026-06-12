@@ -15,12 +15,15 @@
  *    synchronously on click (an `about:blank` named window), and the provider's
  *    later `getCode` NAVIGATES that named window — browsers allow navigating
  *    an already-open named window without fresh activation.
- * 2. **Silent first, interactive second, SAME window.** The provider tries
- *    `prompt=none`; when the server answers `login_required` /
- *    `interaction_required` / `consent_required` the popup is kept open so the
- *    interactive retry re-navigates it (upstream reactive-authentication
- *    PR #13's insight — closing it would strand the retry behind the popup
- *    blocker, the original click's activation being already consumed).
+ * 2. **When the provider goes silent first, the interactive retry uses the
+ *    SAME window.** On background re-auth the provider tries `prompt=none`;
+ *    when the server answers `login_required` / `interaction_required` /
+ *    `consent_required` the popup is kept open so the interactive retry
+ *    re-navigates it (upstream reactive-authentication PR #13's insight —
+ *    closing it would strand the retry behind the popup blocker, the original
+ *    click's activation being already consumed). Explicit user-initiated
+ *    logins skip the silent hop entirely (the provider navigates straight to
+ *    the interactive authorize URL); this controller is mode-agnostic.
  * 3. **Strict message checks.** The callback page posts its URL (carrying the
  *    OAuth `code`) via `postMessage`; only messages whose `event.origin` is
  *    the callback's origin AND whose `event.source` is OUR popup window are

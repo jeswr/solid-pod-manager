@@ -50,6 +50,7 @@ export const googleTakeoutFileAdapter: FileImportAdapter = {
   accept: ".json,application/json",
   fileHint:
     "Request an archive at takeout.google.com (choose 'My Activity', JSON format). Unzip it and select a MyActivity.json (e.g. Takeout/My Activity/YouTube/MyActivity.json).",
+  exportUrl: "https://takeout.google.com",
 
   async importFile(file: ImportFile, ctx: FileImportContext): Promise<void> {
     ctx.progress({ label: "Reading your Google activity…", done: 0, total: 1 });

@@ -12,7 +12,7 @@
  */
 import { useId, useRef } from "react";
 import Link from "next/link";
-import { CheckCircle2, FileUp, Loader2, ShieldCheck } from "lucide-react";
+import { CheckCircle2, ExternalLink, FileUp, Loader2, ShieldCheck } from "lucide-react";
 import { categoryIcon } from "@/components/category-icon";
 import { ErrorState } from "@/components/states";
 import { useFileImport } from "@/components/use-file-import";
@@ -55,6 +55,21 @@ export function TierCImport({
           sent anywhere else.
         </p>
         <p className="mt-3 text-sm">{adapter.fileHint}</p>
+
+        {/* Send the user straight to the platform's own export page when it
+            has one (adapter.exportUrl). In-app/bank-specific exports have no
+            single URL — the field is absent and the fileHint stands alone.
+            Real <a href>: external link, new tab, noopener noreferrer. */}
+        {adapter.exportUrl ? (
+          <p className="mt-3">
+            <Button variant="outline" size="sm" asChild>
+              <a href={adapter.exportUrl} target="_blank" rel="noopener noreferrer">
+                Get your export from {entry.name}
+                <ExternalLink className="size-4" aria-hidden="true" />
+              </a>
+            </Button>
+          </p>
+        ) : null}
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <input

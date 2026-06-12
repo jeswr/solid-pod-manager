@@ -84,6 +84,14 @@ export interface FileImportAdapter {
    * including any "unzip first and choose X" step for archive exports.
    */
   readonly fileHint: string;
+  /**
+   * The platform's own "download your data" page, rendered as a prominent
+   * external link on the connect screen. **Absent** when there is no single
+   * web URL to send the user to (in-app exports like WhatsApp/Apple Health,
+   * or bank-specific statement downloads) — the UI must handle absence.
+   * The `fileHint` still carries the which-file guidance either way.
+   */
+  readonly exportUrl?: string;
   /** Parse the uploaded file and write normalised documents. */
   importFile(file: ImportFile, ctx: FileImportContext): Promise<void>;
 }

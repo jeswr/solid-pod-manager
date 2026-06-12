@@ -46,6 +46,7 @@ export const steamFileAdapter: FileImportAdapter = {
   accept: ".json,application/json",
   fileHint:
     "Steam → Account details → Download a copy of my data. From the export, select your owned-games JSON (games + playtime).",
+  exportUrl: "https://help.steampowered.com/en/accountdata",
 
   async importFile(file: ImportFile, ctx: FileImportContext): Promise<void> {
     ctx.progress({ label: "Reading your games…", done: 0, total: 1 });

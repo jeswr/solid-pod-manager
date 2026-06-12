@@ -127,6 +127,33 @@ describe("integrations registry", () => {
     }
   });
 
+  it("Tier-C export links: a real https URL where the platform has one, absent otherwise", () => {
+    // Platforms with a single web page where the user requests/downloads the export.
+    const EXPORT_URLS: Record<string, string> = {
+      "google-takeout": "https://takeout.google.com",
+      netflix: "https://www.netflix.com/viewingactivity",
+      "amazon-orders": "https://www.amazon.co.uk/hz/privacy-central/data-requests/preview.html",
+      uber: "https://myprivacy.uber.com/privacy/exploreyourdata/download",
+      goodreads: "https://www.goodreads.com/review/import",
+      steam: "https://help.steampowered.com/en/accountdata",
+      chatgpt: "https://chatgpt.com",
+    };
+    // In-app or institution-specific exports: no URL to send the user to —
+    // the field must be ABSENT (the UI renders no link).
+    const NO_EXPORT_URL = ["apple-health", "whatsapp", "bank-statements"];
+
+    for (const a of FILE_ADAPTERS) {
+      const expected = EXPORT_URLS[a.metadata.id];
+      if (expected) {
+        expect(a.exportUrl, a.metadata.id).toBe(expected);
+        expect(new URL(a.exportUrl!).protocol).toBe("https:");
+      } else {
+        expect(NO_EXPORT_URL).toContain(a.metadata.id);
+        expect(a.exportUrl, `${a.metadata.id} must not carry an exportUrl`).toBeUndefined();
+      }
+    }
+  });
+
   it("proxy-requiring platforms are honest about it in their requirements", () => {
     for (const a of ADAPTERS) {
       if (a.oauth?.tokenExchange === "proxy") {

@@ -35,6 +35,7 @@ export const goodreadsFileAdapter: FileImportAdapter = {
   accept: ".csv,text/csv",
   fileHint:
     "Goodreads → My Books → Import and export → Export Library. Select goodreads_library_export.csv.",
+  exportUrl: "https://www.goodreads.com/review/import",
 
   async importFile(file: ImportFile, ctx: FileImportContext): Promise<void> {
     ctx.progress({ label: "Reading your library…", done: 0, total: 1 });

@@ -59,6 +59,7 @@ export const uberFileAdapter: FileImportAdapter = {
   accept: ".csv,text/csv",
   fileHint:
     "Uber → Privacy → Download your data. Unzip the export and select trips_data.csv (your trip and fare history).",
+  exportUrl: "https://myprivacy.uber.com/privacy/exploreyourdata/download",
 
   async importFile(file: ImportFile, ctx: FileImportContext): Promise<void> {
     ctx.progress({ label: "Reading your trips…", done: 0, total: 1 });

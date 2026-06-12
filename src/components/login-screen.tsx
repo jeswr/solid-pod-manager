@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   ArrowRight,
   ExternalLink,
@@ -456,6 +457,17 @@ export function LoginScreen() {
             </span>
           </p>
         </div>
+
+        {/* Legal links — public pages, reachable before sign-in. */}
+        <footer className="mt-6 flex items-center justify-center gap-4 text-xs text-muted-foreground">
+          <Link href="/privacy" className="hover:text-foreground hover:underline">
+            Privacy policy
+          </Link>
+          <span aria-hidden="true">·</span>
+          <Link href="/terms" className="hover:text-foreground hover:underline">
+            Terms of service
+          </Link>
+        </footer>
       </div>
     </main>
   );

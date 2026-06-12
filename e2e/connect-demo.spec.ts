@@ -30,6 +30,26 @@ test.describe("Connect sources", () => {
     await expect(netflixCard.getByText(/import a file/i)).toBeVisible();
   });
 
+  test("Tier-C export link: safe external link where the platform has an export page, absent otherwise", async ({
+    page,
+    context,
+  }) => {
+    await loginAsAlice(page, context);
+
+    // Netflix has a web export page → a real external <a href> link.
+    await page.goto("/connect/netflix");
+    const link = page.getByRole("link", { name: /get your export from netflix/i });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("href", "https://www.netflix.com/viewingactivity");
+    await expect(link).toHaveAttribute("target", "_blank");
+    await expect(link).toHaveAttribute("rel", "noopener noreferrer");
+
+    // Apple Health's export is in-app only → no link, just the file hint.
+    await page.goto("/connect/apple-health");
+    await expect(page.getByText(/Export All Health Data/)).toBeVisible();
+    await expect(page.getByRole("link", { name: /get your export from/i })).toHaveCount(0);
+  });
+
   test("demo-mode Spotify connect imports fixture data that appears under My data", async ({
     page,
     context,

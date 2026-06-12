@@ -36,6 +36,7 @@ export const netflixFileAdapter: FileImportAdapter = {
   accept: ".csv,text/csv",
   fileHint:
     "Netflix → Account → Download your personal information. From the export, select NetflixViewingHistory.csv (Title, Date).",
+  exportUrl: "https://www.netflix.com/viewingactivity",
 
   async importFile(file: ImportFile, ctx: FileImportContext): Promise<void> {
     ctx.progress({ label: "Reading your viewing history…", done: 0, total: 1 });

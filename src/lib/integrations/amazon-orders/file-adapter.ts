@@ -55,6 +55,7 @@ export const amazonOrdersFileAdapter: FileImportAdapter = {
   accept: ".csv,text/csv",
   fileHint:
     "Amazon → Account → Request your data → Your Orders. From the export, select the order-history CSV (e.g. Retail.OrderHistory.1.csv).",
+  exportUrl: "https://www.amazon.co.uk/hz/privacy-central/data-requests/preview.html",
 
   async importFile(file: ImportFile, ctx: FileImportContext): Promise<void> {
     ctx.progress({ label: "Reading your orders…", done: 0, total: 1 });

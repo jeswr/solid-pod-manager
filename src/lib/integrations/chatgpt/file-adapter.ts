@@ -44,6 +44,7 @@ export const chatgptFileAdapter: FileImportAdapter = {
   accept: ".json,application/json",
   fileHint:
     "ChatGPT → Settings → Data controls → Export data. Unzip the emailed archive and select conversations.json.",
+  exportUrl: "https://chatgpt.com",
 
   async importFile(file: ImportFile, ctx: FileImportContext): Promise<void> {
     ctx.progress({ label: "Reading your conversations…", done: 0, total: 1 });

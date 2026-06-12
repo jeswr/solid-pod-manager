@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { usePathname } from "next/navigation";
 import { Loader2, Menu } from "lucide-react";
 import { useSession } from "@/components/session-provider";
 import { LoginScreen } from "@/components/login-screen";
@@ -17,9 +18,21 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/s
  * app on the Solid session — the user's own data is never behind a wall, so the
  * gate is purely "are you signed in", nothing more (DESIGN.md §2/§5).
  */
+/**
+ * Public legal pages: never behind the sign-in gate (platform reviews and
+ * signed-out users must reach them), and prerendered with their real content
+ * under `output: "export"` — they carry their own minimal chrome.
+ */
+const PUBLIC_ROUTES = new Set(["/privacy", "/terms"]);
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { status } = useSession();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const pathname = usePathname();
+
+  if (pathname !== null && PUBLIC_ROUTES.has(pathname)) {
+    return <>{children}</>;
+  }
 
   if (status === "loading") {
     return (

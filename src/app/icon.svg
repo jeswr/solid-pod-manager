@@ -1,8 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <!-- App favicon (Next.js app-router auto-wiring: src/app/icon.svg → /icon.svg
        + <link rel="icon" type="image/svg+xml">). Brand teal = the light-theme
-       --primary token, oklch(0.52 0.094 205) ≈ #007883 (src/app/globals.css).
-       Glyph: a pod (centered circle) with an orbiting satellite at 45°. -->
+       "primary" CSS token, oklch(0.52 0.094 205) ≈ #007883 (src/app/globals.css).
+       Glyph: a pod (centered circle) with an orbiting satellite at 45°.
+       NOTE: keep this comment free of double hyphens; they make the XML comment
+       invalid and strict SVG parsers (librsvg) reject the file. -->
   <rect width="100" height="100" rx="22" fill="#007883"/>
   <circle cx="50" cy="50" r="28" fill="#ffffff"/>
   <circle cx="71.2" cy="28.8" r="10" fill="#ffffff"/>

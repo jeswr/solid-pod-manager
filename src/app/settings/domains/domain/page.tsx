@@ -7,6 +7,12 @@
  * field), a "Check now" button driving POST verify, and polls politely while
  * on-screen. Addressed as `?name=<domain>` — a query parameter so the page
  * prerenders under `output: "export"` (domains are unknowable at build time).
+ *
+ * Purchased bindings (Phase 3) take a different path while still `claimed`:
+ * pending approval → registering (progress strip; each poll advances the
+ * server's registration) → registered → the same verified/live finish — and
+ * NEVER show DNS instructions: the server registers the domain and authors
+ * the zone itself.
  */
 import { Suspense, useState } from "react";
 import Link from "next/link";
@@ -15,13 +21,14 @@ import {
   ArrowLeft,
   ArrowUpRight,
   Globe,
+  Hourglass,
   LoaderCircle,
   RefreshCw,
   ShieldCheck,
   TriangleAlert,
 } from "lucide-react";
 import { toast } from "sonner";
-import { CheckStatusLine, DnsRecordRow, DomainsErrorState, DomainStateBadge } from "@/components/domains-ui";
+import { CheckStatusLine, DnsRecordRow, DomainBindingBadge, DomainsErrorState } from "@/components/domains-ui";
 import { EmptyState } from "@/components/states";
 import { useDomain } from "@/components/use-domains";
 import {
@@ -39,14 +46,17 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  describeState,
+  bindingBadge,
   DomainNotFoundError,
   DomainsError,
+  formatUsd,
   isPollableState,
+  needsManualDns,
   releaseDomain,
   routingInstructions,
   txtInstruction,
   type DomainBinding,
+  type PurchaseStatus,
 } from "@/lib/domains";
 
 export default function DomainDetailPage() {
@@ -80,14 +90,17 @@ function DomainDetail() {
     }
   }
 
-  async function release() {
+  async function release(
+    done: { title: string; description: string } = {
+      title: binding ? `${binding.domain} was disconnected.` : "Disconnected.",
+      description: "Your pod and its data are untouched.",
+    },
+  ) {
     if (!base || !binding) return;
     setReleasing(true);
     try {
       await releaseDomain(base, binding.domain);
-      toast.success(`${binding.domain} was disconnected.`, {
-        description: "Your pod and its data are untouched.",
-      });
+      toast.success(done.title, { description: done.description });
       router.push("/settings/domains");
     } catch (e: unknown) {
       toast.error(
@@ -96,6 +109,21 @@ function DomainDetail() {
       setReleasing(false);
     }
   }
+
+  /** Cancelling a not-yet-approved purchase is a release with honest copy. */
+  function cancelPurchase() {
+    void release({
+      title: binding ? `The purchase of ${binding.domain} was cancelled.` : "Purchase cancelled.",
+      description: "Nothing was charged.",
+    });
+  }
+
+  // The purchase phase rules the screen while a purchased binding is still
+  // `claimed`; from `verified` onward it converges with the normal flow.
+  const purchasePhase: PurchaseStatus | undefined =
+    binding?.purchase !== undefined && binding.state === "claimed"
+      ? binding.purchase.status
+      : undefined;
 
   return (
     <div className="flex flex-col gap-6">
@@ -113,10 +141,10 @@ function DomainDetail() {
               <h1 className="break-all text-2xl font-semibold tracking-tight md:text-3xl">
                 {binding.domain}
               </h1>
-              <DomainStateBadge state={binding.state} />
+              <DomainBindingBadge binding={binding} />
             </div>
             <p className="measure mt-1 text-muted-foreground text-pretty">
-              {describeState(binding.state).description}
+              {bindingBadge(binding).description}
             </p>
           </>
         ) : (
@@ -159,12 +187,41 @@ function DomainDetail() {
         <>
           {binding.state === "live" ? <LiveCard binding={binding} /> : null}
           {binding.state === "suspended" ? <SuspendedNotice /> : null}
-          {binding.state === "claimed" ? <TxtChallengeCard binding={binding} /> : null}
-          {binding.state !== "live" && binding.state !== "released" ? (
+
+          {/* Purchase phases (the binding stays `claimed` until registered). */}
+          {purchasePhase === "pending-approval" ? (
+            <PendingApprovalCard
+              binding={binding}
+              cancelling={releasing}
+              onCancel={cancelPurchase}
+            />
+          ) : null}
+          {purchasePhase === "registering" ? (
+            <RegisteringCard binding={binding} checking={checking} onCheck={runCheck} />
+          ) : null}
+          {purchasePhase === "denied" || purchasePhase === "failed" ? (
+            <PurchaseDeadEndCard
+              binding={binding}
+              releasing={releasing}
+              onRelease={() => void release()}
+            />
+          ) : null}
+          {purchasePhase === "registered" ? <AutoDnsNotice /> : null}
+
+          {/* DNS instructions — never for purchased bindings (the server
+              registers the domain and authors the zone itself). */}
+          {binding.state === "claimed" && needsManualDns(binding) ? (
+            <TxtChallengeCard binding={binding} />
+          ) : null}
+          {binding.state !== "live" && binding.state !== "released" && needsManualDns(binding) ? (
             <RoutingCard binding={binding} />
           ) : null}
 
-          {binding.state !== "released" ? (
+          {binding.state !== "released" &&
+          purchasePhase !== "pending-approval" &&
+          purchasePhase !== "registering" &&
+          purchasePhase !== "denied" &&
+          purchasePhase !== "failed" ? (
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Status</CardTitle>
@@ -173,10 +230,17 @@ function DomainDetail() {
                 <CheckStatusLine label="Ownership (TXT)" result={binding.checks?.txt} />
                 <CheckStatusLine label="Routing" result={binding.checks?.routing} />
                 {!binding.checks && binding.state !== "live" ? (
-                  <p className="text-sm text-muted-foreground">
-                    Once your DNS records are in place, run a check. DNS changes can take up to
-                    48 hours to propagate, so don&apos;t worry if it takes a few tries.
-                  </p>
+                  needsManualDns(binding) ? (
+                    <p className="text-sm text-muted-foreground">
+                      Once your DNS records are in place, run a check. DNS changes can take up
+                      to 48 hours to propagate, so don&apos;t worry if it takes a few tries.
+                    </p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      Your provider set up the DNS automatically — this usually completes
+                      within minutes.
+                    </p>
+                  )
                 ) : null}
                 {binding.state === "live" ? (
                   <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
@@ -206,6 +270,7 @@ function DomainDetail() {
             </Card>
           ) : null}
 
+          {purchasePhase === undefined ? (
           <Card className="border-destructive/30">
             <CardHeader>
               <CardTitle className="text-base">Disconnect</CardTitle>
@@ -215,6 +280,9 @@ function DomainDetail() {
                 Disconnecting stops this domain from serving your pod
                 {binding.state === "live" ? " — links using it will stop working" : ""}. Your
                 pod and everything in it stay exactly where they are.
+                {binding.purchase
+                  ? " The domain itself stays registered with your provider."
+                  : ""}
               </p>
               <div>
                 <AlertDialog>
@@ -245,7 +313,7 @@ function DomainDetail() {
                       <AlertDialogCancel>Keep it connected</AlertDialogCancel>
                       <AlertDialogAction
                         className="bg-destructive text-white hover:bg-destructive/90"
-                        onClick={release}
+                        onClick={() => void release()}
                       >
                         Disconnect
                       </AlertDialogAction>
@@ -255,6 +323,7 @@ function DomainDetail() {
               </div>
             </CardContent>
           </Card>
+          ) : null}
         </>
       )}
     </div>
@@ -280,9 +349,226 @@ function LiveCard({ binding }: { binding: DomainBinding }) {
           <ArrowUpRight className="size-3.5 shrink-0" aria-hidden="true" />
         </a>
         <p className="measure text-sm text-muted-foreground text-pretty">
-          Your old address redirects here, so existing links and apps keep working. The TXT
-          ownership record is no longer needed — you can delete it at your registrar.
+          Your old address redirects here, so existing links and apps keep working.{" "}
+          {binding.purchase
+            ? "Your provider manages the domain's DNS and renewal — there's nothing to set up at a registrar."
+            : "The TXT ownership record is no longer needed — you can delete it at your registrar."}
         </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Purchase: waiting for the operator to approve (nothing charged yet). */
+function PendingApprovalCard({
+  binding,
+  cancelling,
+  onCancel,
+}: {
+  binding: DomainBinding;
+  cancelling: boolean;
+  onCancel: () => void;
+}) {
+  const price = binding.purchase?.priceUsd;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Hourglass className="size-4 text-muted-foreground" aria-hidden="true" />
+          Waiting for approval
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <p className="measure text-sm text-muted-foreground text-pretty">
+          Your purchase request{price !== undefined ? ` (${formatUsd(price)} first year)` : ""} is
+          with the server operator. Nothing is charged until they approve, and registration
+          starts automatically the moment they do — we check for you every minute while
+          you&apos;re on this page.
+        </p>
+        <div>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                variant="outline"
+                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                disabled={cancelling}
+              >
+                {cancelling ? (
+                  <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+                ) : null}
+                Cancel purchase
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Cancel the purchase of {binding.domain}?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  The request is withdrawn before anything is charged. You can request the same
+                  domain again later.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Keep waiting</AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-destructive text-white hover:bg-destructive/90"
+                  onClick={onCancel}
+                >
+                  Cancel purchase
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Purchase: the registrar is registering the domain. The progress strip shows
+ * the server's own progress sentence; each check (manual or the ~60 s poll)
+ * advances the registration server-side by one registrar poll.
+ */
+function RegisteringCard({
+  binding,
+  checking,
+  onCheck,
+}: {
+  binding: DomainBinding;
+  checking: boolean;
+  onCheck: () => void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Registering your domain</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <div
+          role="status"
+          className="flex items-start gap-3 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3"
+        >
+          <LoaderCircle
+            className="mt-0.5 size-4 shrink-0 animate-spin text-sky-700 dark:text-sky-400"
+            aria-hidden="true"
+          />
+          <p className="measure text-sm text-pretty">
+            {binding.progress ?? "Registration submitted — waiting for the registry."}
+          </p>
+        </div>
+        <p className="measure text-sm text-muted-foreground text-pretty">
+          This usually takes a few minutes, though some domain endings take hours or longer.
+          Once it completes, the DNS is set up automatically and the domain goes live by
+          itself — registrations can&apos;t be cancelled mid-flight.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button onClick={onCheck} disabled={checking}>
+            {checking ? (
+              <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <RefreshCw className="size-4" aria-hidden="true" />
+            )}
+            {checking ? "Checking…" : "Check now"}
+          </Button>
+          <span className="text-sm text-muted-foreground">
+            We also check automatically every minute while you&apos;re on this page.
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Brief notice while a freshly registered purchase converges to live. */
+function AutoDnsNotice() {
+  return (
+    <div
+      role="status"
+      className="flex items-start gap-3 rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4"
+    >
+      <ShieldCheck
+        className="mt-0.5 size-4 shrink-0 text-sky-700 dark:text-sky-400"
+        aria-hidden="true"
+      />
+      <p className="measure text-sm text-pretty">
+        The domain is yours and its DNS was set up automatically. We&apos;re waiting for the
+        records to be visible everywhere — no action needed.
+      </p>
+    </div>
+  );
+}
+
+/** Purchase: an honest dead-end (denied or failed) with retry/release paths. */
+function PurchaseDeadEndCard({
+  binding,
+  releasing,
+  onRelease,
+}: {
+  binding: DomainBinding;
+  releasing: boolean;
+  onRelease: () => void;
+}) {
+  const purchase = binding.purchase;
+  const failed = purchase?.status === "failed";
+  return (
+    <Card className="border-destructive/30">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <TriangleAlert className="size-4 text-destructive" aria-hidden="true" />
+          {failed ? "The registration failed" : "The purchase wasn't approved"}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <p className="measure text-sm text-pretty">
+          {purchase?.failureReason ??
+            (failed
+              ? "The registration didn't complete."
+              : "The server operator didn't approve this purchase.")}
+        </p>
+        <p className="measure text-sm text-muted-foreground text-pretty">
+          Nothing more will be charged. You can try the purchase again, or release the domain
+          to remove it from this list.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button asChild>
+            <Link href={`/settings/domains/buy?domain=${encodeURIComponent(binding.domain)}`}>
+              <RefreshCw className="size-4" aria-hidden="true" />
+              Try again
+            </Link>
+          </Button>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                variant="outline"
+                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                disabled={releasing}
+              >
+                {releasing ? (
+                  <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+                ) : null}
+                Release domain
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Release {binding.domain}?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  The binding is removed from your account. Your pod and its data are
+                  untouched, and you can request the domain again later.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Keep it</AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-destructive text-white hover:bg-destructive/90"
+                  onClick={onRelease}
+                >
+                  Release
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
       </CardContent>
     </Card>
   );

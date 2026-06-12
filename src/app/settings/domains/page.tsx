@@ -1,26 +1,49 @@
 "use client";
 
 /**
- * Domains — the connected custom domains list (BYOD Phase 1 app side).
- * Each row links to the detail/setup screen; the add button starts the
- * connect flow. Feature-disabled servers get an honest empty state, not an
- * error (the routes simply don't exist there).
+ * Domains — the connected custom domains list (BYOD Phase 1 app side, plus
+ * the Phase 3 buy path when the server offers it). Each row links to the
+ * detail/setup screen; "Connect a domain" starts the connect-your-own flow
+ * and — only where the quote endpoint feature-detects — "Get a new domain"
+ * starts the purchase flow. Feature-disabled servers get an honest empty
+ * state, not an error (the routes simply don't exist there).
  */
 import Link from "next/link";
-import { ChevronRight, Globe, Plus, ShieldCheck } from "lucide-react";
-import { DomainsErrorState, DomainStateBadge } from "@/components/domains-ui";
+import { ChevronRight, Globe, Plus, ShieldCheck, ShoppingCart } from "lucide-react";
+import { DomainBindingBadge, DomainsErrorState } from "@/components/domains-ui";
 import { EmptyState } from "@/components/states";
-import { useDomains } from "@/components/use-domains";
+import { useDomains, usePurchaseFeature } from "@/components/use-domains";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { describeState, DomainsUnavailableError } from "@/lib/domains";
+import { bindingBadge, DomainsUnavailableError } from "@/lib/domains";
 
 export default function DomainsPage() {
-  const { data, loading, error, reload } = useDomains();
+  const { data, base, loading, error, reload } = useDomains();
+  // Probe the buy path only once the list answered (feature + session known).
+  const { available: purchasable } = usePurchaseFeature(base, data !== undefined);
 
   // Released bindings are tombstones — not "connected", so not listed.
   const domains = (data ?? []).filter((d) => d.state !== "released");
   const featureAvailable = !(error instanceof DomainsUnavailableError);
+
+  const actions = (
+    <>
+      {purchasable === true ? (
+        <Button asChild>
+          <Link href="/settings/domains/buy">
+            <ShoppingCart className="size-4" aria-hidden="true" />
+            Get a new domain
+          </Link>
+        </Button>
+      ) : null}
+      <Button asChild variant={purchasable === true ? "outline" : "default"}>
+        <Link href="/settings/domains/add">
+          <Plus className="size-4" aria-hidden="true" />
+          Connect a domain
+        </Link>
+      </Button>
+    </>
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -34,12 +57,7 @@ export default function DomainsPage() {
           </p>
         </div>
         {featureAvailable && !loading ? (
-          <Button asChild>
-            <Link href="/settings/domains/add">
-              <Plus className="size-4" aria-hidden="true" />
-              Add domain
-            </Link>
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">{actions}</div>
         ) : null}
       </header>
 
@@ -55,15 +73,12 @@ export default function DomainsPage() {
         <EmptyState
           icon={Globe}
           title="No domains connected yet"
-          description="Connect a domain you own and your pod gets its own address. You'll add two DNS records and we take care of the rest, including the certificate."
-          action={
-            <Button asChild>
-              <Link href="/settings/domains/add">
-                <Plus className="size-4" aria-hidden="true" />
-                Add domain
-              </Link>
-            </Button>
+          description={
+            purchasable === true
+              ? "Connect a domain you already own, or get a new one right here — either way your pod gets its own address and we take care of the certificate."
+              : "Connect a domain you own and your pod gets its own address. You'll add two DNS records and we take care of the rest, including the certificate."
           }
+          action={<div className="flex flex-wrap items-center justify-center gap-2">{actions}</div>}
         />
       ) : (
         <ul className="flex flex-col gap-3">
@@ -76,10 +91,10 @@ export default function DomainsPage() {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                     <span className="break-all font-medium">{binding.domain}</span>
-                    <DomainStateBadge state={binding.state} />
+                    <DomainBindingBadge binding={binding} />
                   </div>
                   <p className="mt-1 text-sm text-muted-foreground text-pretty">
-                    {describeState(binding.state).description}
+                    {bindingBadge(binding).description}
                   </p>
                 </div>
                 <ChevronRight

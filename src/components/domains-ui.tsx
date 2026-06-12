@@ -13,11 +13,13 @@ import { EmptyState, ErrorState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  bindingBadge,
   describeState,
   DomainsAuthError,
   DomainsUnavailableError,
   type CheckResult,
   type DnsInstruction,
+  type DomainBinding,
   type DomainState,
   type StateTone,
 } from "@/lib/domains";
@@ -36,6 +38,24 @@ const TONE_CLASSES: Record<StateTone, string> = {
 /** The state badge ("Pending DNS" / "Verifying" / "Live" / "Suspended"). */
 export function DomainStateBadge({ state }: { state: DomainState }) {
   const badge = describeState(state);
+  return (
+    <Badge variant="outline" className={cn("border", TONE_CLASSES[badge.tone])}>
+      {badge.label}
+    </Badge>
+  );
+}
+
+/**
+ * The one badge for a binding row/header: purchase status while a purchased
+ * binding is still claimed (the server is buying/setting up the domain),
+ * the registry state otherwise (`bindingBadge` in the lib decides).
+ */
+export function DomainBindingBadge({
+  binding,
+}: {
+  binding: Pick<DomainBinding, "state" | "purchase">;
+}) {
+  const badge = bindingBadge(binding);
   return (
     <Badge variant="outline" className={cn("border", TONE_CLASSES[badge.tone])}>
       {badge.label}

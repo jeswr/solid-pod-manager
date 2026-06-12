@@ -12,6 +12,13 @@
  * flag off the routes do not exist, so the list endpoint answers 404 (or an
  * LDP fallthrough that is not the list shape). That is detected here as
  * {@link DomainsUnavailableError} — an empty state, never an error screen.
+ *
+ * Phase 3 adds the optional PURCHASE flow (`PSS_DOMAIN_PURCHASE_ENABLE`,
+ * server PR #122): quote → purchase request → (operator approval →)
+ * registration → the server authors the DNS itself → the same verification
+ * path to `live`. Purchase can be off even when connect-your-own is on; the
+ * quote route answering 404 ({@link DomainPurchaseUnavailableError}) hides
+ * the buy path entirely. Purchased bindings NEVER carry DNS instructions.
  */
 import { PodDataError } from "./errors.js";
 
@@ -27,6 +34,40 @@ const STATES: ReadonlySet<string> = new Set([
   "suspended",
   "released",
 ]);
+
+/**
+ * Purchase sub-state machine (server: BYOD Phase 3, ADR-0013 D8). A purchased
+ * domain is an ordinary binding that converges through the same
+ * claimed → verified → live path — but the server registers the domain and
+ * authors its DNS itself, so the owner never touches a registrar.
+ */
+export type PurchaseStatus =
+  | "pending-approval"
+  | "registering"
+  | "registered"
+  | "denied"
+  | "failed";
+
+const PURCHASE_STATUSES: ReadonlySet<string> = new Set([
+  "pending-approval",
+  "registering",
+  "registered",
+  "denied",
+  "failed",
+]);
+
+/** The purchase record on a binding created via the buy flow (owner view). */
+export interface DomainPurchase {
+  status: PurchaseStatus;
+  /** First-year USD price quoted when the purchase was requested. */
+  priceUsd: number;
+  /** ISO timestamp of the purchase request. */
+  requestedAt: string;
+  /** ISO timestamp of operator approval (absent while pending). */
+  approvedAt?: string;
+  /** Client-safe reason — present for `denied` / `failed`. */
+  failureReason?: string;
+}
 
 /** The TXT ownership challenge the owner must publish (present while `claimed`). */
 export interface TxtChallenge {
@@ -75,6 +116,10 @@ export interface DomainBinding {
   txtRecord?: TxtChallenge;
   /** Present on verify responses. */
   checks?: DomainChecks;
+  /** Present iff the binding was created by the in-service purchase flow. */
+  purchase?: DomainPurchase;
+  /** Verify responses while `registering`: the server's progress sentence. */
+  progress?: string;
 }
 
 // --- Typed errors (the UI branches on instanceof, never message strings) ---
@@ -92,6 +137,18 @@ export class DomainsUnavailableError extends DomainsError {
   constructor() {
     super("Custom domains are not enabled on your pod server.");
     this.name = "DomainsUnavailableError";
+  }
+}
+
+/**
+ * Domain PURCHASE is not enabled on this pod server (the quote/purchase
+ * routes are absent — `PSS_DOMAIN_PURCHASE_ENABLE=false`). Connect-your-own
+ * may still be available; the UI simply hides the buy path.
+ */
+export class DomainPurchaseUnavailableError extends DomainsError {
+  constructor() {
+    super("Buying a domain is not offered on your pod server.");
+    this.name = "DomainPurchaseUnavailableError";
   }
 }
 
@@ -307,6 +364,74 @@ export function isPollableState(state: DomainState): boolean {
   return state === "claimed" || state === "verified";
 }
 
+const PURCHASE_BADGES: Readonly<Record<PurchaseStatus, StateBadge>> = {
+  "pending-approval": {
+    label: "Pending approval",
+    tone: "pending",
+    description:
+      "Purchases on this server are reviewed by the operator. Nothing is charged until they approve — we'll keep checking for you.",
+  },
+  registering: {
+    label: "Registering",
+    tone: "progress",
+    description:
+      "Your domain is being registered. This usually takes a few minutes, though some domain endings take longer — no action needed.",
+  },
+  registered: {
+    label: "Setting up",
+    tone: "progress",
+    description:
+      "The domain is registered and its DNS is being set up automatically. It should be live shortly — no action needed.",
+  },
+  denied: {
+    label: "Not approved",
+    tone: "warning",
+    description: "This purchase didn't go ahead. Nothing was charged.",
+  },
+  failed: {
+    label: "Failed",
+    tone: "warning",
+    description:
+      "The registration didn't complete. Nothing more will be charged — you can try again or release the domain.",
+  },
+};
+
+/** Badge copy for a purchase status. */
+export function describePurchase(status: PurchaseStatus): StateBadge {
+  return PURCHASE_BADGES[status];
+}
+
+/**
+ * The one badge for a binding: while a purchased binding is still `claimed`
+ * the purchase status is the honest headline ("Pending DNS" would wrongly
+ * ask the owner to do DNS work the server does itself); from `verified`
+ * onward — and for every connect-your-own binding — the registry state rules.
+ */
+export function bindingBadge(binding: Pick<DomainBinding, "state" | "purchase">): StateBadge {
+  if (binding.purchase !== undefined && binding.state === "claimed") {
+    return describePurchase(binding.purchase.status);
+  }
+  return describeState(binding.state);
+}
+
+/**
+ * Verify-poll cadence for a binding while its page is visible, or `undefined`
+ * when polling is pointless. Purchase phases poll at a polite ~60 s (each
+ * verify advances the server's registration pipeline by one registrar poll);
+ * ordinary DNS convergence keeps the existing 30 s.
+ */
+export function pollIntervalMs(
+  binding: Pick<DomainBinding, "state" | "purchase">,
+): number | undefined {
+  if (binding.purchase !== undefined && binding.state === "claimed") {
+    const status = binding.purchase.status;
+    if (status === "pending-approval" || status === "registering") return 60_000;
+    if (status === "registered") return 30_000;
+    return undefined; // denied / failed — a poll can't change anything
+  }
+  return isPollableState(binding.state) ? 30_000 : undefined;
+}
+
 // --- DNS instructions --------------------------------------------------------
 
 /** One DNS record the owner must create, ready to copy field-by-field. */
@@ -343,8 +468,22 @@ export function routingInstructions(binding: {
   return isApexDomain(binding.domain) ? [...a, ...cname] : [...cname, ...a];
 }
 
+/**
+ * Whether the owner has DNS work to do for this binding. Purchased domains
+ * NEVER show DNS instructions: the server registers the domain and authors
+ * the zone itself (TXT challenge + routing records included), so there is
+ * nothing for the owner to publish at any point in the flow.
+ */
+export function needsManualDns(binding: Pick<DomainBinding, "purchase">): boolean {
+  return binding.purchase === undefined;
+}
+
 /** The TXT challenge as a copyable instruction (while the challenge is open). */
 export function txtInstruction(binding: DomainBinding): DnsInstruction | undefined {
+  // Invariant: no TXT instructions for purchased bindings — the server writes
+  // the challenge record into the hosted zone itself (defence in depth: the
+  // server never sends `txtRecord` alongside `purchase` either).
+  if (!needsManualDns(binding)) return undefined;
   if (!binding.txtRecord) return undefined;
   return { type: "TXT", name: binding.txtRecord.name, value: binding.txtRecord.value };
 }
@@ -451,6 +590,28 @@ function parseBinding(value: unknown): DomainBinding {
         ...(check(checksRaw.routing) ? { routing: check(checksRaw.routing) } : {}),
       }
     : undefined;
+  const purchaseRaw =
+    typeof raw.purchase === "object" && raw.purchase !== null
+      ? (raw.purchase as Record<string, unknown>)
+      : undefined;
+  const purchase: DomainPurchase | undefined =
+    purchaseRaw &&
+    typeof purchaseRaw.status === "string" &&
+    PURCHASE_STATUSES.has(purchaseRaw.status) &&
+    typeof purchaseRaw.priceUsd === "number" &&
+    typeof purchaseRaw.requestedAt === "string"
+      ? {
+          status: purchaseRaw.status as PurchaseStatus,
+          priceUsd: purchaseRaw.priceUsd,
+          requestedAt: purchaseRaw.requestedAt,
+          ...(typeof purchaseRaw.approvedAt === "string"
+            ? { approvedAt: purchaseRaw.approvedAt }
+            : {}),
+          ...(typeof purchaseRaw.failureReason === "string"
+            ? { failureReason: purchaseRaw.failureReason }
+            : {}),
+        }
+      : undefined;
   return {
     domain: raw.domain,
     podRoot: raw.podRoot,
@@ -460,8 +621,13 @@ function parseBinding(value: unknown): DomainBinding {
     ...(typeof raw.lastDnsCheck === "string" ? { lastDnsCheck: raw.lastDnsCheck } : {}),
     ...(typeof raw.aliasUrl === "string" ? { aliasUrl: raw.aliasUrl } : {}),
     routing,
-    ...(txtRecord ? { txtRecord } : {}),
+    // Invariant: a purchased binding never carries TXT instructions — the
+    // server authors the zone itself, so even an unexpected `txtRecord` on a
+    // purchased binding is dropped rather than rendered.
+    ...(txtRecord && purchase === undefined ? { txtRecord } : {}),
     ...(checks ? { checks } : {}),
+    ...(purchase ? { purchase } : {}),
+    ...(typeof raw.progress === "string" ? { progress: raw.progress } : {}),
   };
 }
 
@@ -538,6 +704,156 @@ export async function verifyDomain(
   );
   if (!response.ok) await throwForStatus(response, domain);
   return parseBinding(await readJson(response));
+}
+
+// --- Purchase flow (server: BYOD Phase 3, optional even when connect is on) --
+
+/** Price block of a purchasable quote (USD only in v1). */
+export interface QuotePrice {
+  registrationUsd: number;
+  renewalUsd: number;
+  currency: "USD";
+}
+
+/** A `POST /account/domains/quote` answer. */
+export interface DomainQuote {
+  domain: string;
+  /** Availability verdict — absent when the allowlist refused the TLD. */
+  available?: boolean;
+  /** Whether a purchase request would currently pass every server rail. */
+  purchasable: boolean;
+  /** The server's honest reason when not purchasable. */
+  reason?: string;
+  /** Live prices — absent when the allowlist refused or pricing is unknown. */
+  price?: QuotePrice;
+  /** Fixed facts of the v1 purchase shape, stated by the server. */
+  autoRenew: boolean;
+  privacyProtection: boolean;
+  /** True when purchases queue for operator review ("Pending approval"). */
+  approvalRequired: boolean;
+}
+
+/** Render a USD amount the way the price cards show it ("$14", "$12.50"). */
+export function formatUsd(amount: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(amount);
+}
+
+const QUOTE_PATH = `${LIST_PATH}/quote`;
+const PURCHASE_PATH = `${LIST_PATH}/purchase`;
+
+/** Coerce a quote response; throws on shapes the server never emits. */
+function parseQuote(value: Record<string, unknown> | undefined): DomainQuote {
+  if (
+    value === undefined ||
+    typeof value.domain !== "string" ||
+    typeof value.purchasable !== "boolean" ||
+    typeof value.approvalRequired !== "boolean"
+  ) {
+    throw new DomainsRequestError(200, "The server answered with an unexpected shape.");
+  }
+  const priceRaw =
+    typeof value.price === "object" && value.price !== null
+      ? (value.price as Record<string, unknown>)
+      : undefined;
+  const price: QuotePrice | undefined =
+    priceRaw &&
+    typeof priceRaw.registrationUsd === "number" &&
+    typeof priceRaw.renewalUsd === "number"
+      ? {
+          registrationUsd: priceRaw.registrationUsd,
+          renewalUsd: priceRaw.renewalUsd,
+          currency: "USD",
+        }
+      : undefined;
+  return {
+    domain: value.domain,
+    ...(typeof value.available === "boolean" ? { available: value.available } : {}),
+    purchasable: value.purchasable,
+    ...(typeof value.reason === "string" ? { reason: value.reason } : {}),
+    ...(price ? { price } : {}),
+    autoRenew: value.autoRenew === true,
+    privacyProtection: value.privacyProtection === true,
+    approvalRequired: value.approvalRequired,
+  };
+}
+
+/**
+ * Quote a domain for purchase: availability + live first-year/renewal price.
+ * Free and read-only server-side; the verdict is advisory (every rail is
+ * re-enforced at purchase time). Throws {@link DomainPurchaseUnavailableError}
+ * when the server doesn't offer purchases (route absent → 404/405).
+ */
+export async function quotePurchase(
+  base: string,
+  domain: string,
+  fetchImpl?: FetchLike,
+): Promise<DomainQuote> {
+  const doFetch = fetchImpl ?? fetch;
+  const response = await doFetch(`${base}${QUOTE_PATH}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ domain }),
+  });
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 405) {
+      throw new DomainPurchaseUnavailableError();
+    }
+    await throwForStatus(response);
+  }
+  return parseQuote(await readJson(response));
+}
+
+/**
+ * Request the purchase of a domain for a pod root. With operator approval on
+ * (the common posture) nothing is charged yet — the binding lands as
+ * `pending-approval`. Returns the claim-shaped binding (with its `purchase`
+ * block and, per the invariant, never TXT instructions).
+ */
+export async function purchaseDomain(
+  base: string,
+  request: { domain: string; podRoot: string },
+  fetchImpl?: FetchLike,
+): Promise<DomainBinding> {
+  const doFetch = fetchImpl ?? fetch;
+  const response = await doFetch(`${base}${PURCHASE_PATH}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 405) {
+      throw new DomainPurchaseUnavailableError();
+    }
+    await throwForStatus(response);
+  }
+  return parseBinding(await readJson(response));
+}
+
+/**
+ * Feature-detect the purchase flow: POST an empty body to the quote route.
+ * Where the feature exists the server answers 400 ("'domain' is a required
+ * string") — or 429 if rate-limited — without ever reaching the registrar;
+ * where it's off the route is absent (404/405). Anything unexpected counts
+ * as unavailable (fail closed: the buy path is hidden, connect still works).
+ * 401 throws {@link DomainsAuthError} so callers can offer sign-in.
+ */
+export async function detectPurchaseFeature(
+  base: string,
+  fetchImpl?: FetchLike,
+): Promise<boolean> {
+  const doFetch = fetchImpl ?? fetch;
+  const response = await doFetch(`${base}${QUOTE_PATH}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (response.status === 401) throw new DomainsAuthError();
+  return response.status === 400 || response.status === 429;
 }
 
 /** Release (disconnect) a domain binding. */

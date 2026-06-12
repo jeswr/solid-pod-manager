@@ -33,6 +33,49 @@ re-import overwrites in place, never duplicates.
 - **Tier C** apps have no user-grade API → shown as "Import from export file"; each has
   a shipped parser for its official data export (`src/lib/integrations/file-adapters.ts`).
 
+## Live robustness (sparse-response contract)
+
+The recorded fixtures are tidy; the live APIs are not. Adapters must treat every
+nested property on an API response as possibly absent/null, because real
+accounts hit shapes the fixtures never exercised (the canonical example: a live
+Spotify `/me/playlists` item with no `tracks` object at all, which crashed the
+import with *"Cannot read properties of undefined (reading 'total')"*). The
+contract for the live-capable Tier-A adapters (spotify, discord, github, strava,
+twitch, notion):
+
+- Missing arrays default to `[]`; missing counts to `0`; missing optional fields
+  **omit the triple** (the typed vocab setters drop `undefined` — we never write
+  the literal string `"undefined"`/`"null"`).
+- Null array entries, and items missing the one field they cannot exist without
+  (a stable id for their fragment IRI), are **skipped, not fatal** — one bad item
+  never aborts the whole import. The skipped count is surfaced honestly on
+  `ImportOutcome.skipped` → `ImportReport.skipped`.
+- A malformed/absent date is omitted rather than allowed to reach
+  `Date.toISOString()` (which throws on `Invalid Date`).
+- Each adapter has a `survives a sparse live response …` regression test feeding
+  the null-laden shape the live API actually returns and asserting the import
+  completes, writes valid Turtle (re-parsed with N3), and leaks no literal
+  `undefined`/`null`.
+
+Honest field caveats (advertised "what you get" vs what the live API reliably
+gives):
+
+- **GitHub** — repo `description`, `homepage` and `language` are `null` for a
+  large fraction of repos; the profile `name` and `bio` are often `null`. These
+  render as "not set" (the triple is omitted), not as empty strings.
+- **Discord** — the server list depends on the `guilds` scope being granted; if
+  it isn't, "your servers" is legitimately empty. `approximate_member_count` is
+  only present when the guild listing was requested with counts, so a server's
+  member-count line can be absent.
+- **Spotify** — playlist track counts come from `tracks.total`, which some
+  playlist items omit; those show a count of `0` rather than failing. Items you
+  no longer have access to can arrive as `null` and are skipped.
+- **Strava** — manual activities carry no `distance`/`moving_time`; those rows
+  omit distance/duration rather than showing `NaN`.
+- **Notion** — a page with no title property is labelled "Untitled"; a database
+  with no title "Untitled database". Pages with no `properties` object at all are
+  handled, not crashed.
+
 ## Tier A — end-user OAuth, adapters shipped (this increment)
 
 | App | id | Categories | What you get | PKCE without secret? |

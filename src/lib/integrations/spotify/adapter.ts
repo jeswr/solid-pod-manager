@@ -6,6 +6,7 @@
  */
 import { DataFactory, Store } from "n3";
 import { getJson } from "../core/fixture-fetch.js";
+import { arr, optionalNumber, optionalText, SkipCounter } from "../core/safe.js";
 import type { ImportContext, ImportOutcome, IntegrationAdapter } from "../core/types.js";
 import { CLASSES, MusicPlaylist, MusicRecording } from "../core/vocab.js";
 import {
@@ -43,19 +44,30 @@ export const spotifyAdapter: IntegrationAdapter = {
   fixtures: () => SPOTIFY_FIXTURES,
 
   async import(ctx: ImportContext): Promise<ImportOutcome> {
+    const skipped = new SkipCounter();
+
     ctx.progress({ label: "Fetching your top tracks…", done: 0, total: 2 });
     const top = await getJson<SpotifyTopTracks>(ID, ctx.api, `${API}/me/top/tracks?limit=50`);
 
     const tracksDoc = ctx.resolve("music/top-tracks.ttl");
     const tracks = new Store();
-    for (const t of top.items) {
+    for (const t of arr(top?.items)) {
+      // A track with no id has no stable fragment IRI — skip it.
+      if (!t || optionalText(t.id) === undefined) {
+        skipped.skip();
+        continue;
+      }
       const rec = new MusicRecording(`${tracksDoc}#track-${t.id}`, tracks, DataFactory).mark();
-      rec.name = t.name;
+      rec.name = optionalText(t.name);
       rec.identifier = t.id;
-      rec.byArtist = t.artists.map((a) => a.name).join(", ");
-      rec.inAlbum = t.album.name;
-      rec.duration = isoDuration(t.duration_ms);
-      rec.sourceUrl = t.external_urls.spotify;
+      const artists = arr(t.artists)
+        .map((a) => optionalText(a?.name))
+        .filter((n): n is string => n !== undefined);
+      rec.byArtist = artists.length > 0 ? artists.join(", ") : undefined;
+      rec.inAlbum = optionalText(t.album?.name);
+      const ms = optionalNumber(t.duration_ms);
+      rec.duration = ms !== undefined ? isoDuration(ms) : undefined;
+      rec.sourceUrl = optionalText(t.external_urls?.spotify);
     }
     await ctx.write({
       slug: "music/top-tracks.ttl",
@@ -69,13 +81,20 @@ export const spotifyAdapter: IntegrationAdapter = {
 
     const listsDoc = ctx.resolve("music/playlists.ttl");
     const playlists = new Store();
-    for (const p of lists.items) {
+    for (const p of arr(lists?.items)) {
+      // Spotify can return null entries in the playlists array (collaborative
+      // playlists you've lost access to) — skip them. No id ⇒ no fragment IRI.
+      if (!p || optionalText(p.id) === undefined) {
+        skipped.skip();
+        continue;
+      }
       const pl = new MusicPlaylist(`${listsDoc}#playlist-${p.id}`, playlists, DataFactory).mark();
-      pl.name = p.name;
+      pl.name = optionalText(p.name);
       pl.identifier = p.id;
-      pl.description = p.description || undefined;
-      pl.numTracks = p.tracks.total;
-      pl.sourceUrl = p.external_urls.spotify;
+      pl.description = optionalText(p.description);
+      // The live bug: `tracks` is absent on some playlist items. Default to 0.
+      pl.numTracks = optionalNumber(p.tracks?.total) ?? 0;
+      pl.sourceUrl = optionalText(p.external_urls?.spotify);
     }
     await ctx.write({
       slug: "music/playlists.ttl",
@@ -85,7 +104,7 @@ export const spotifyAdapter: IntegrationAdapter = {
     });
 
     ctx.progress({ label: "Done", done: 2, total: 2 });
-    return {};
+    return { skipped: skipped.value };
   },
 };
 

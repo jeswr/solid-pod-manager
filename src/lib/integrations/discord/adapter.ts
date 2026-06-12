@@ -5,6 +5,7 @@
  */
 import { DataFactory, Store } from "n3";
 import { getJson } from "../core/fixture-fetch.js";
+import { arr, optionalNumber, optionalText, SkipCounter } from "../core/safe.js";
 import type { ImportContext, ImportOutcome, IntegrationAdapter } from "../core/types.js";
 import { CLASSES, Group, OnlineAccount } from "../core/vocab.js";
 import { DISCORD_FIXTURES, type DiscordGuild, type DiscordUser } from "./fixtures.js";
@@ -38,15 +39,18 @@ export const discordAdapter: IntegrationAdapter = {
   fixtures: () => DISCORD_FIXTURES,
 
   async import(ctx: ImportContext): Promise<ImportOutcome> {
+    const skipped = new SkipCounter();
+
     ctx.progress({ label: "Fetching your Discord profile…", done: 0, total: 2 });
-    const user = await getJson<DiscordUser>(ID, ctx.api, `${API}/users/@me`);
+    const user = (await getJson<DiscordUser>(ID, ctx.api, `${API}/users/@me`)) ?? {};
 
     const profileDoc = ctx.resolve("social/profile.ttl");
     const profile = new Store();
     const account = new OnlineAccount(`${profileDoc}#account`, profile, DataFactory).mark();
-    account.accountName = user.username;
-    account.name = user.global_name ?? user.username;
-    account.identifier = user.id;
+    const username = optionalText(user.username);
+    account.accountName = username;
+    account.name = optionalText(user.global_name) ?? username;
+    account.identifier = optionalText(user.id);
     account.accountServiceHomepage = "https://discord.com/";
     await ctx.write({
       slug: "social/profile.ttl",
@@ -56,17 +60,26 @@ export const discordAdapter: IntegrationAdapter = {
     });
 
     ctx.progress({ label: "Fetching your servers…", done: 1, total: 2 });
-    const guilds = await getJson<DiscordGuild[]>(ID, ctx.api, `${API}/users/@me/guilds`);
+    // The guilds array can be missing/empty (no `guilds` scope granted, or a
+    // brand-new account in no servers).
+    const guilds = await getJson<DiscordGuild[] | null>(ID, ctx.api, `${API}/users/@me/guilds`);
 
     const guildsDoc = ctx.resolve("social/servers.ttl");
     const dataset = new Store();
-    for (const g of guilds) {
+    for (const g of arr(guilds)) {
+      // A guild with no id has no stable fragment IRI — skip it.
+      if (!g || optionalText(g.id) === undefined) {
+        skipped.skip();
+        continue;
+      }
       const group = new Group(`${guildsDoc}#guild-${g.id}`, dataset, DataFactory).mark();
-      group.name = g.name;
+      group.name = optionalText(g.name);
       group.identifier = g.id;
-      group.description = g.approximate_member_count
-        ? `${g.approximate_member_count.toLocaleString("en")} members${g.owner ? " — you own this server" : ""}`
-        : undefined;
+      const members = optionalNumber(g.approximate_member_count);
+      group.description =
+        members !== undefined
+          ? `${members.toLocaleString("en")} members${g.owner ? " — you own this server" : ""}`
+          : undefined;
     }
     await ctx.write({
       slug: "social/servers.ttl",
@@ -76,6 +89,6 @@ export const discordAdapter: IntegrationAdapter = {
     });
 
     ctx.progress({ label: "Done", done: 2, total: 2 });
-    return {};
+    return { skipped: skipped.value };
   },
 };

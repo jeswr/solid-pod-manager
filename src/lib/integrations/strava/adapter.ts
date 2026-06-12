@@ -13,6 +13,7 @@
 import { DataFactory } from "n3";
 import { asStore } from "../core/dataset.js";
 import { getJson } from "../core/fixture-fetch.js";
+import { arr, optionalDate, optionalNumber, optionalText, SkipCounter } from "../core/safe.js";
 import type { ImportContext, ImportOutcome, IntegrationAdapter } from "../core/types.js";
 import { CLASSES, ExerciseAction, TravelAction } from "../core/vocab.js";
 import { STRAVA_FIXTURES, type StravaActivity } from "./fixtures.js";
@@ -51,13 +52,16 @@ export const stravaAdapter: IntegrationAdapter = {
   fixtures: () => STRAVA_FIXTURES,
 
   async import(ctx: ImportContext): Promise<ImportOutcome> {
+    const skipped = new SkipCounter();
+
     ctx.progress({ label: "Fetching your activities…", done: 0, total: 2 });
     const after = ctx.cursor ? `&after=${encodeURIComponent(ctx.cursor)}` : "";
-    const activities = await getJson<StravaActivity[]>(
+    const activities = await getJson<StravaActivity[] | null>(
       ID,
       ctx.api,
       `${API}/athlete/activities?per_page=100${after}`,
     );
+    const list = arr(activities);
 
     const workoutsDoc = ctx.resolve("fitness/activities.ttl");
     const ridesDoc = ctx.resolve("travel/rides.ttl");
@@ -65,8 +69,14 @@ export const stravaAdapter: IntegrationAdapter = {
     const workouts = asStore(await ctx.read("fitness/activities.ttl"));
     const rides = asStore(await ctx.read("travel/rides.ttl"));
 
-    for (const a of activities) {
-      if (RIDE_TYPES.has(a.sport_type)) {
+    for (const a of list) {
+      // An activity with no id has no stable fragment IRI — skip it.
+      if (!a || a.id === undefined || a.id === null) {
+        skipped.skip();
+        continue;
+      }
+      const sportType = optionalText(a.sport_type);
+      if (sportType !== undefined && RIDE_TYPES.has(sportType)) {
         const ride = new TravelAction(`${ridesDoc}#activity-${a.id}`, rides, DataFactory).mark();
         fill(ride, a);
       } else {
@@ -76,7 +86,7 @@ export const stravaAdapter: IntegrationAdapter = {
           DataFactory,
         ).mark();
         fill(workout, a);
-        workout.exerciseType = a.sport_type;
+        workout.exerciseType = sportType;
       }
     }
 
@@ -95,23 +105,33 @@ export const stravaAdapter: IntegrationAdapter = {
     });
 
     ctx.progress({ label: "Done", done: 2, total: 2 });
-    return { cursor: nextCursor(ctx.cursor, activities) };
+    return { cursor: nextCursor(ctx.cursor, list), skipped: skipped.value };
   },
 };
 
 function fill(action: ExerciseAction | TravelAction, a: StravaActivity): void {
-  action.name = a.name;
+  action.name = optionalText(a.name);
   action.identifier = String(a.id);
-  action.startTime = new Date(a.start_date);
-  action.duration = `PT${Math.floor(a.moving_time / 60)}M${a.moving_time % 60}S`;
-  action.distance = `${(a.distance / 1000).toFixed(1)} km`;
+  action.startTime = optionalDate(a.start_date);
+  const movingTime = optionalNumber(a.moving_time);
+  action.duration =
+    movingTime !== undefined
+      ? `PT${Math.floor(movingTime / 60)}M${movingTime % 60}S`
+      : undefined;
+  const distance = optionalNumber(a.distance);
+  action.distance = distance !== undefined ? `${(distance / 1000).toFixed(1)} km` : undefined;
   action.sourceUrl = `https://www.strava.com/activities/${a.id}`;
 }
 
 
 /** Newest start time (epoch seconds) across old cursor + new activities. */
-function nextCursor(previous: string | undefined, activities: StravaActivity[]): string | undefined {
-  const epochs = activities.map((a) => Math.floor(Date.parse(a.start_date) / 1000));
+function nextCursor(
+  previous: string | undefined,
+  activities: (StravaActivity | null)[],
+): string | undefined {
+  const epochs = activities
+    .map((a) => (a?.start_date ? Math.floor(Date.parse(a.start_date) / 1000) : Number.NaN))
+    .filter((n) => Number.isFinite(n));
   if (previous) epochs.push(Number.parseInt(previous, 10) || 0);
   return epochs.length > 0 ? String(Math.max(...epochs)) : previous;
 }

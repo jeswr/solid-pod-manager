@@ -4,29 +4,33 @@
  */
 import type { FixtureRoute } from "../core/types.js";
 
+// Field optionality reflects what the *live* API can actually return (sparser
+// than the docs imply), not just the tidy recorded fixtures: nested objects can
+// be absent and arrays can carry null entries.
 export interface SpotifyTrack {
   id: string;
-  name: string;
-  duration_ms: number;
-  artists: { name: string }[];
-  album: { name: string };
-  external_urls: { spotify: string };
+  name?: string | null;
+  duration_ms?: number | null;
+  artists?: ({ name?: string | null } | null)[] | null;
+  album?: { name?: string | null } | null;
+  external_urls?: { spotify?: string | null } | null;
 }
 
 export interface SpotifyTopTracks {
-  items: SpotifyTrack[];
+  items?: (SpotifyTrack | null)[] | null;
 }
 
 export interface SpotifyPlaylist {
   id: string;
-  name: string;
-  description: string;
-  tracks: { total: number };
-  external_urls: { spotify: string };
+  name?: string | null;
+  description?: string | null;
+  /** Absent on some live playlist items — the source of the live `.total` crash. */
+  tracks?: { total?: number | null } | null;
+  external_urls?: { spotify?: string | null } | null;
 }
 
 export interface SpotifyPlaylists {
-  items: SpotifyPlaylist[];
+  items?: (SpotifyPlaylist | null)[] | null;
 }
 
 export const TOP_TRACKS: SpotifyTopTracks = {

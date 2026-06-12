@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { DataFactory } from "n3";
-import { demoImport, TEST_POD_ROOT } from "../core/testing.js";
+import {
+  demoImport,
+  expectCleanTurtle,
+  sparseImport,
+  TEST_POD_ROOT,
+} from "../core/testing.js";
 import { CLASSES, DataCollection, DigitalDocument } from "../core/vocab.js";
 import { notionAdapter } from "./adapter.js";
 
@@ -52,5 +57,53 @@ describe("notion adapter contract", () => {
     await demoImport(notionAdapter, { pod });
     expect(pod.urls()).toEqual(before);
     expect(pod.dataset(PAGES_DOC).size).toBe(sizeBefore);
+  });
+
+  // Robustness: a page can have no `properties` object, a database no title,
+  // dates can be malformed, and the results array can carry a null.
+  it("survives a sparse live response (no properties, no title, null entry)", async () => {
+    const { pod, report } = await sparseImport(notionAdapter, [
+      {
+        method: "POST",
+        url: "https://api.notion.com/v1/search",
+        json: {
+          results: [
+            // Page with no properties at all (Object.values must not throw).
+            {
+              object: "page",
+              id: "p1",
+              url: "https://www.notion.so/p1",
+              created_time: "2026-01-01T00:00:00.000Z",
+              last_edited_time: "bad-date",
+            },
+            // Database with no title/description and a null created_time.
+            {
+              object: "database",
+              id: "d1",
+              url: "https://www.notion.so/d1",
+              created_time: null,
+              last_edited_time: "2026-02-01T00:00:00.000Z",
+            },
+            null, // null result entry
+            { object: "page", url: "https://www.notion.so/noid" }, // no id ⇒ skipped
+          ],
+        },
+      },
+    ]);
+
+    expect(report.written.map((w) => w.url).sort()).toEqual([DB_DOC, PAGES_DOC]);
+    expect(report.skipped).toBe(2); // null entry + id-less page
+
+    const pages = expectCleanTurtle(pod, PAGES_DOC);
+    const dbs = expectCleanTurtle(pod, DB_DOC);
+
+    const p1 = new DigitalDocument(`${PAGES_DOC}#page-p1`, pages, DataFactory);
+    expect(p1.name).toBe("Untitled"); // no title property ⇒ fallback
+    expect(p1.dateModified).toBeUndefined(); // malformed date omitted
+
+    const d1 = new DataCollection(`${DB_DOC}#db-d1`, dbs, DataFactory);
+    expect(d1.name).toBe("Untitled database"); // no title ⇒ fallback
+    expect(d1.description).toBeUndefined(); // omitted, not "null"
+    expect(d1.dateCreated).toBeUndefined();
   });
 });

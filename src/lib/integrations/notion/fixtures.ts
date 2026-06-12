@@ -6,32 +6,32 @@
 import type { FixtureRoute } from "../core/types.js";
 
 export interface NotionRichText {
-  plain_text: string;
+  plain_text?: string | null;
 }
 
 export interface NotionPage {
   object: "page";
-  id: string;
-  created_time: string;
-  last_edited_time: string;
-  url: string;
-  properties: Record<string, { type: string; title?: NotionRichText[] }>;
+  id?: string | null;
+  created_time?: string | null;
+  last_edited_time?: string | null;
+  url?: string | null;
+  properties?: Record<string, { type?: string | null; title?: NotionRichText[] | null } | null> | null;
 }
 
 export interface NotionDatabase {
   object: "database";
-  id: string;
-  created_time: string;
-  last_edited_time: string;
-  url: string;
-  title: NotionRichText[];
-  description: NotionRichText[];
+  id?: string | null;
+  created_time?: string | null;
+  last_edited_time?: string | null;
+  url?: string | null;
+  title?: NotionRichText[] | null;
+  description?: NotionRichText[] | null;
 }
 
 export interface NotionSearchAnswer {
-  results: (NotionPage | NotionDatabase)[];
-  next_cursor: string | null;
-  has_more: boolean;
+  results?: (NotionPage | NotionDatabase | null)[] | null;
+  next_cursor?: string | null;
+  has_more?: boolean | null;
 }
 
 export const SEARCH: NotionSearchAnswer = {

@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { DataFactory } from "n3";
-import { demoImport, TEST_POD_ROOT } from "../core/testing.js";
+import {
+  demoImport,
+  expectCleanTurtle,
+  sparseImport,
+  TEST_POD_ROOT,
+} from "../core/testing.js";
 import { CLASSES, MusicPlaylist, MusicRecording } from "../core/vocab.js";
 import { spotifyAdapter } from "./adapter.js";
 
@@ -49,5 +54,69 @@ describe("spotify adapter contract", () => {
     await demoImport(spotifyAdapter, { pod });
     expect(pod.urls()).toEqual(before);
     expect(pod.dataset(TRACKS_DOC).size).toBe(sizeBefore);
+  });
+
+  // Regression for the live crash: GET /me/playlists returned items whose
+  // `tracks` was absent (and a null entry), which the recorded fixtures never
+  // exercised — `p.tracks.total` threw "Cannot read properties of undefined".
+  it("survives a sparse live response (null entries, absent nested fields)", async () => {
+    const { pod, report } = await sparseImport(spotifyAdapter, [
+      {
+        url: "https://api.spotify.com/v1/me/top/tracks",
+        json: {
+          items: [
+            // Healthy track.
+            {
+              id: "ok1",
+              name: "Good Track",
+              duration_ms: 200000,
+              artists: [{ name: "Real Artist" }],
+              album: { name: "Real Album" },
+              external_urls: { spotify: "https://open.spotify.com/track/ok1" },
+            },
+            // Missing album, null artist entry, absent external_urls/duration.
+            { id: "ok2", name: "Bare Track", artists: [null, { name: "Solo" }] },
+            null, // null array entry
+            { name: "No Id" }, // no id ⇒ skipped
+          ],
+        },
+      },
+      {
+        url: "https://api.spotify.com/v1/me/playlists",
+        json: {
+          items: [
+            // The exact live shape: no `tracks` object at all.
+            {
+              id: "pl1",
+              name: "No Tracks Object",
+              external_urls: { spotify: "https://open.spotify.com/playlist/pl1" },
+            },
+            // tracks present but total null.
+            { id: "pl2", name: "Null Total", description: null, tracks: { total: null } },
+            null, // null playlist entry (lost collaborative access)
+          ],
+        },
+      },
+    ]);
+
+    // Completed without throwing and wrote both documents.
+    expect(report.written.map((w) => w.url).sort()).toEqual([LISTS_DOC, TRACKS_DOC]);
+    // Three items lacked a stable id (null track, id-less track, null
+    // playlist) → all skipped, none fatal.
+    expect(report.skipped).toBe(3);
+
+    // Both documents are valid Turtle with no leaked undefined/null literals.
+    const tracks = expectCleanTurtle(pod, TRACKS_DOC);
+    const lists = expectCleanTurtle(pod, LISTS_DOC);
+
+    // The "no tracks object" playlist defaulted its count to 0 (not a crash).
+    const pl1 = new MusicPlaylist(`${LISTS_DOC}#playlist-pl1`, lists, DataFactory);
+    expect(pl1.numTracks).toBe(0);
+
+    // The bare track kept its id, name and the one non-null artist.
+    const bare = new MusicRecording(`${TRACKS_DOC}#track-ok2`, tracks, DataFactory);
+    expect(bare.name).toBe("Bare Track");
+    expect(bare.byArtist).toBe("Solo");
+    expect(bare.inAlbum).toBeUndefined();
   });
 });

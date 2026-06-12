@@ -12,8 +12,9 @@ import {
   type ImportFile,
   runFileImport,
 } from "./file-import.js";
+import { fixtureFetch } from "./fixture-fetch.js";
 import { type ImportReport, runImport } from "./import-runner.js";
-import type { IntegrationAdapter } from "./types.js";
+import type { FixtureRoute, IntegrationAdapter } from "./types.js";
 
 export const TEST_POD_ROOT = "https://pod.test/alice/";
 export const TEST_WEBID = `${TEST_POD_ROOT}profile/card#me`;
@@ -174,6 +175,50 @@ export async function demoImport(
     podFetch: pod.fetch,
   });
   return { pod, report };
+}
+
+/**
+ * Run an import in **live mode** but with the source API answered by
+ * caller-supplied routes (a {@link fixtureFetch}) instead of the adapter's tidy
+ * recorded fixtures. This is how the robustness regression tests feed an
+ * adapter the sparse/partial/null-laden shapes the *live* platform actually
+ * returns — and assert the import still completes and writes valid RDF.
+ *
+ * The adapter's `apiHeaders` and bearer token are injected by the runner as in
+ * real live mode; the routes only decide the response bodies.
+ */
+export async function sparseImport(
+  adapter: IntegrationAdapter,
+  routes: readonly FixtureRoute[],
+  opts?: { pod?: MemoryPod; cursor?: string },
+): Promise<{ pod: MemoryPod; report: ImportReport }> {
+  const pod = opts?.pod ?? createMemoryPod();
+  const report = await runImport({
+    adapter,
+    webId: TEST_WEBID,
+    podRoot: TEST_POD_ROOT,
+    mode: "live",
+    token: { accessToken: "test-token", tokenType: "Bearer" },
+    cursor: opts?.cursor,
+    podFetch: pod.fetch,
+    apiFetch: fixtureFetch(adapter.metadata.id, routes),
+  });
+  return { pod, report };
+}
+
+/**
+ * Assert a pod document parses as Turtle (via N3) and carries no literal
+ * "undefined"/"null" leaked from a missing source field. Returns the parsed
+ * store for further assertions.
+ */
+export function expectCleanTurtle(pod: MemoryPod, url: string): Store {
+  const raw = pod.get(url) ?? "";
+  // No bare `undefined`/`null` tokens as RDF values (object position).
+  if (/[\s;,]"?(undefined|null)"?\s*[;.,]/.test(raw)) {
+    throw new Error(`Document ${url} contains a literal undefined/null:\n${raw}`);
+  }
+  // Re-parse from the raw bytes (not the lenient dataset()) to prove validity.
+  return parseTurtle(raw, stripFragment(url));
 }
 
 /** An in-memory {@link ImportFile} from a string (the parser only reads text). */

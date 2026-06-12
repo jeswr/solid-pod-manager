@@ -3,19 +3,22 @@
 /**
  * The Solid session bridge for React. `@solid/reactive-authentication` has no
  * session object: it patches `globalThis.fetch` and upgrades on `401`. This
- * provider owns that single patch, mounts the `<authorization-code-flow>`
- * popup element, and exposes a small reactive session for the UI.
+ * provider owns that single patch and the LOGIN POPUP LIFECYCLE (first-party —
+ * the library's `<authorization-code-flow>` web component is gone; see
+ * `src/lib/popup-login.ts` for the rules), and exposes a small reactive
+ * session for the UI.
  *
- * Login model: the user enters their WebID; we resolve its issuer (so a bad
- * WebID fails fast with a clear message) and remember it; the bundled
- * `WebIdDPoPTokenProvider` drives the popup on the first authenticated request.
- * We then probe the pod root authenticated — the probe's success *is* "logged
- * in". Tokens live in memory only (AGENTS.md): a reload re-runs silently while
- * the IdP cookie lives.
+ * Login model (first-party UI): the user picks a provider, or enters EITHER a
+ * WebID OR a bare issuer URL in one smart input (`src/lib/login-input.ts`).
+ * The popup is opened SYNCHRONOUSLY in the click handler (user activation),
+ * then the protocol layer (`WebIdDPoPTokenProvider` — the vendored PR #11–#14
+ * token+refresh logic) drives `prompt=none` first and the interactive flow in
+ * that same window. Issuer-first logins learn the WebID from the ID token's
+ * `webid` claim. Tokens live in memory only (AGENTS.md): a reload re-runs
+ * silently while the IdP cookie lives.
  *
- * Everything here is browser-only — the auth module is dynamically imported so
- * it never evaluates during SSR (its top-level `customElements.define` would
- * break `next build`; AGENTS.md §Mounting in Next.js).
+ * The auth library is dynamically imported so it never evaluates during SSR
+ * (AGENTS.md §Mounting in Next.js).
  */
 import {
   createContext,
@@ -26,14 +29,23 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  fetchLoginCandidate,
-  RecentAccounts,
-  type RecentAccount,
-} from "@/lib/login-ux";
+import { RecentAccounts, type RecentAccount } from "@/lib/login-ux";
+import { resolveLoginInput, type LoginTarget } from "@/lib/login-input";
+import { PopupLoginController } from "@/lib/popup-login";
+import { AmbiguousIssuerError, type WebIdDPoPTokenProvider } from "@/lib/webid-token-provider";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 
 type Status = "loading" | "logged-out" | "authenticating" | "logged-in";
+
+/** The provider signed the user in but stated no WebID in the ID token. */
+export class NoWebIdFromProviderError extends Error {
+  constructor(issuer: string) {
+    super(
+      `Signed in, but the provider did not state a WebID in the ID token (${issuer}).`,
+    );
+    this.name = "NoWebIdFromProviderError";
+  }
+}
 
 export interface Session {
   status: Status;
@@ -42,8 +54,22 @@ export interface Session {
   /** The storage the user is browsing (chosen when several exist). */
   activeStorage?: string;
   recentAccounts: RecentAccount[];
-  /** Begin login for a WebID. Resolves once authenticated, throws on failure. */
-  login(webId: string): Promise<void>;
+  /**
+   * Begin login for a WebID OR a bare issuer URL (one smart input). Call
+   * DIRECTLY from the click/submit handler — the popup opens synchronously at
+   * the top so the user activation is never lost. Resolves once
+   * authenticated; throws on failure ({@link AmbiguousIssuerError} when the
+   * WebID advertises several issuers and `opts.issuer` was not given).
+   */
+  login(input: string, opts?: { issuer?: string }): Promise<void>;
+  /**
+   * Begin login against a KNOWN issuer (provider picker / "Get started" with
+   * the home provider — works for a fresh human with no WebID). Call directly
+   * from the click handler, like {@link login}.
+   */
+  loginWithIssuer(issuer: string): Promise<void>;
+  /** Cancel an in-flight login: closes the popup, rejects the pending flow. */
+  cancelLogin(): void;
   /** Log out: clears session state. Keeps the recent-accounts memory. */
   logout(): void;
   /** Pick which storage to browse when the profile advertises several. */
@@ -54,16 +80,49 @@ const SessionContext = createContext<Session | null>(null);
 
 const ACTIVE_WEBID_KEY = "solid-pod-manager:active-webid";
 
+/** A blocked-popup recovery: `resume` re-opens under a fresh user gesture. */
+interface BlockedPopup {
+  resume: () => void;
+  cancel: () => void;
+}
+
 export function SessionProvider({ children }: { children: React.ReactNode }) {
-  const flowRef = useRef<HTMLElement>(null);
   const registeredRef = useRef(false);
-  // The WebID the provider should use for the next login flow.
+  // The WebID the provider's 401-upgrade path should resolve the issuer from
+  // when no issuer is pinned yet (the silent-restore path after a reload).
   const pendingWebIdRef = useRef<string>(undefined);
+  // The one popup controller — created lazily on the client, shared between
+  // the click handlers (synchronous open) and the token provider (getCode).
+  const controllerRef = useRef<PopupLoginController>(null);
+  // Resolves to the token provider once the auth module is wired up.
+  const providerReadyRef = useRef<Promise<WebIdDPoPTokenProvider>>(null);
   const [status, setStatus] = useState<Status>("loading");
   const [webId, setWebId] = useState<string>();
   const [profile, setProfile] = useState<PodProfile>();
   const [activeStorage, setActive] = useState<string>();
   const [recentAccounts, setRecentAccounts] = useState<RecentAccount[]>([]);
+  const [blockedPopup, setBlockedPopup] = useState<BlockedPopup | null>(null);
+
+  /** The popup controller (client-only; created on first use). */
+  const getController = useCallback((): PopupLoginController => {
+    controllerRef.current ??= new PopupLoginController({
+      // callback.html is same-origin with the app — the ONLY origin whose
+      // postMessage may end a flow.
+      expectedOrigin: location.origin,
+      onBlocked: (resume, cancel) =>
+        setBlockedPopup({
+          resume: () => {
+            setBlockedPopup(null);
+            resume();
+          },
+          cancel: () => {
+            setBlockedPopup(null);
+            cancel();
+          },
+        }),
+    });
+    return controllerRef.current;
+  }, []);
 
   // Register the reactive fetch manager exactly once, as early as possible.
   useEffect(() => {
@@ -71,24 +130,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     registeredRef.current = true;
 
     let cancelled = false;
-    (async () => {
-      const [{ ReactiveFetchManager, AuthorizationCodeFlow }, { WebIdDPoPTokenProvider }] =
+    providerReadyRef.current = (async () => {
+      const [{ ReactiveFetchManager }, { WebIdDPoPTokenProvider }] =
         await Promise.all([
           import("@solid/reactive-authentication"),
           import("@/lib/webid-token-provider"),
         ]);
-      if (cancelled) return;
 
-      // Since reactive-authentication PR #9 ("Isolate side-effects") importing
-      // the module no longer defines the custom elements; define the one we use.
-      if (!customElements.get("authorization-code-flow")) {
-        customElements.define("authorization-code-flow", AuthorizationCodeFlow);
-      }
-
+      const controller = getController();
       const callbackUri = new URL("/callback.html", location.href).toString();
-      const ui = flowRef.current as unknown as {
-        getCode: (uri: URL, signal: AbortSignal) => Promise<string>;
-      };
 
       // The published Client Identifier Document — served from /clientid.jsonld.
       // Locally the IdP is CSS, which dereferences localhost client-ids; in
@@ -98,8 +148,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
       const provider = new WebIdDPoPTokenProvider(
         callbackUri,
-        ui.getCode.bind(ui),
-        // The WebID comes from the in-app login form, not a popup dialog.
+        // The app-owned popup drives the user through the authorization
+        // endpoint (silent first, interactive retry in the same window).
+        (uri, signal) => controller.getCode(uri, signal),
+        // 401-upgrade fallback (post-reload silent restore): the WebID whose
+        // issuer to authenticate against comes from the restored session.
         async () => {
           const id = pendingWebIdRef.current;
           if (!id) throw new Error("No WebID provided for login");
@@ -113,6 +166,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
       const manager = new ReactiveFetchManager([provider]);
       manager.registerGlobally();
+      return provider;
+    })();
+
+    (async () => {
+      await providerReadyRef.current;
+      if (cancelled) return;
 
       // Load remembered accounts and attempt a silent restore of the last one.
       const accounts = new RecentAccounts();
@@ -146,12 +205,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // it re-auths silently while the IdP cookie lives.
     //
     // Seed pendingWebIdRef FIRST: the reactive provider's WebID resolver reads
-    // it on a 401 to know whose issuer to authenticate against. login() sets it,
-    // but after a hard navigation / reload (tokens are in-memory only) only this
-    // restore path runs — without this, the first private read throws "No WebID
-    // provided for login" and the page hangs on its loading skeleton (e.g. an
-    // external app deep-linking into /connected-apps/grant). See connected-apps
-    // e2e.
+    // it on a 401 to know whose issuer to authenticate against. login() pins
+    // the issuer directly, but after a hard navigation / reload (tokens are
+    // in-memory only) only this restore path runs — without this, the first
+    // private read throws "No WebID provided for login" and the page hangs on
+    // its loading skeleton (e.g. an external app deep-linking into
+    // /connected-apps/grant). See connected-apps e2e.
     pendingWebIdRef.current = id;
     const p = await fetchProfile(id);
     setWebId(id);
@@ -160,49 +219,100 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setStatus("logged-in");
   }, []);
 
-  const login = useCallback(
-    async (rawWebId: string) => {
+  /**
+   * The shared back half of every login: run the code flow against the
+   * resolved issuer, learn/confirm the WebID, load the profile, persist.
+   * The popup MUST already be open (synchronously, by the caller).
+   */
+  const completeLogin = useCallback(
+    async (issuer: string, knownWebId: string | undefined) => {
       setStatus("authenticating");
       try {
-        // Validate + resolve issuer first so a bad WebID fails fast with copy.
-        const candidate = await fetchLoginCandidate(rawWebId);
-        pendingWebIdRef.current = candidate.webId;
+        const provider = await providerReadyRef.current;
+        if (!provider) throw new Error("Auth is not initialised yet");
 
-        // Drive the popup: a GET against a reliably PRIVATE resource so the
-        // server returns 401, which the reactive provider upgrades to a login.
-        // The pod root container is world-readable on a fresh CSS pod, so we
-        // probe its `.acl` (owner-only Control) instead — its 200 after auth is
-        // what "logged in" means here.
-        const p = await fetchProfile(candidate.webId);
-        const podRoot = p.storages[0];
-        const probeTarget = podRoot ? `${podRoot}.acl` : candidate.webId;
-        // The patched fetch handles 401→login→retry; we only need it to settle.
-        await fetch(probeTarget, { method: "GET" }).catch(() => undefined);
+        const { webId: statedWebId } = await provider.login(new URL(issuer));
+        const id = knownWebId ?? statedWebId;
+        if (!id) throw new NoWebIdFromProviderError(issuer);
 
-        setWebId(candidate.webId);
+        // From here the 401-upgrade path knows whose session this is.
+        pendingWebIdRef.current = id;
+
+        const p = await fetchProfile(id);
+        setWebId(id);
         setProfile(p);
         setActive(p.storages[0]);
         setStatus("logged-in");
 
         const accounts = new RecentAccounts();
         accounts.remember({
-          webId: candidate.webId,
+          webId: id,
           displayName: p.displayName,
           avatarUrl: p.avatarUrl,
-          issuer: candidate.issuers[0],
+          issuer,
           storage: p.storages[0],
         });
         setRecentAccounts(accounts.list());
         if (typeof localStorage !== "undefined") {
-          localStorage.setItem(ACTIVE_WEBID_KEY, candidate.webId);
+          localStorage.setItem(ACTIVE_WEBID_KEY, id);
         }
       } catch (e) {
+        getController().closeIfOpen();
+        setBlockedPopup(null);
         setStatus("logged-out");
         throw e;
       }
     },
-    [],
+    [getController],
   );
+
+  const login = useCallback(
+    async (input: string, opts?: { issuer?: string }) => {
+      // SYNCHRONOUS popup open — first statement, inside the user activation.
+      getController().open();
+      setStatus("authenticating");
+      try {
+        // Resolve the smart input: WebID (deref → solid:oidcIssuer) or bare
+        // issuer (OIDC discovery). A remembered issuer (recent account) skips
+        // ambiguity; several advertised issuers without a choice throw so the
+        // UI can let the USER pick — never silently the first.
+        let issuer = opts?.issuer;
+        let knownWebId: string | undefined;
+        const target: LoginTarget = await resolveLoginInput(input);
+        if (target.kind === "webid") {
+          knownWebId = target.webId;
+          if (!issuer) {
+            if (target.issuers.length > 1) {
+              throw new AmbiguousIssuerError(target.webId, target.issuers);
+            }
+            issuer = target.issuers[0];
+          }
+        } else {
+          issuer ??= target.issuer;
+        }
+        await completeLogin(issuer, knownWebId);
+      } catch (e) {
+        getController().closeIfOpen();
+        setStatus("logged-out");
+        throw e;
+      }
+    },
+    [completeLogin, getController],
+  );
+
+  const loginWithIssuer = useCallback(
+    async (issuer: string) => {
+      // SYNCHRONOUS popup open — first statement, inside the user activation.
+      getController().open();
+      await completeLogin(issuer, undefined);
+    },
+    [completeLogin, getController],
+  );
+
+  const cancelLogin = useCallback(() => {
+    setBlockedPopup(null);
+    getController().cancel();
+  }, [getController]);
 
   const logout = useCallback(() => {
     setWebId(undefined);
@@ -225,17 +335,64 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       activeStorage,
       recentAccounts,
       login,
+      loginWithIssuer,
+      cancelLogin,
       logout,
       setActiveStorage,
     }),
-    [status, webId, profile, activeStorage, recentAccounts, login, logout, setActiveStorage],
+    [
+      status,
+      webId,
+      profile,
+      activeStorage,
+      recentAccounts,
+      login,
+      loginWithIssuer,
+      cancelLogin,
+      logout,
+      setActiveStorage,
+    ],
   );
 
   return (
     <SessionContext.Provider value={session}>
-      {/* The popup-driving custom element. Visually hidden until it opens. */}
-      <authorization-code-flow ref={flowRef} aria-hidden="true" />
       {children}
+      {/* Blocked-popup recovery: a background re-auth needed a popup but the
+          browser blocked window.open (no user activation). The button click
+          IS the fresh activation `resume()` re-opens under. */}
+      {blockedPopup && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="popup-blocked-title"
+          className="fixed inset-0 z-50 grid place-items-center bg-foreground/40 p-4"
+        >
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-lg">
+            <h2 id="popup-blocked-title" className="text-base font-semibold">
+              Continue signing in
+            </h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Your provider needs a sign-in window, but the browser blocked it.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={blockedPopup.cancel}
+                className="rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={blockedPopup.resume}
+                className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                Open sign-in window
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </SessionContext.Provider>
   );
 }

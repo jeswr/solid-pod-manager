@@ -109,7 +109,7 @@ Lucide icons, `react-hook-form` + `zod`, `sonner`. Node ≥ 24. Vercel-deploy-sh
 **Solid layer (`src/lib/`, the only code that touches RDF):**
 | Concern | Library |
 |---|---|
-| Browser auth (Solid-OIDC, DPoP, global-fetch patch) | `@solid/reactive-authentication` (`<authorization-code-flow>`) |
+| Browser auth (Solid-OIDC, DPoP, global-fetch patch) | `@solid/reactive-authentication` protocol layer; first-party login UI + popup lifecycle (`src/lib/popup-login.ts`, no web components) |
 | Typed pod data (WebID profile, containers, WAC/ACP docs) | `@solid/object` + `@rdfjs/wrapper` + `n3` |
 | RDF fetch | `@jeswr/fetch-rdf` (no `fetch` arg → uses the auth-patched global) |
 | **Data discovery** (categories → where data lives) | **Type Index** (`solid:publicTypeIndex` / `privateTypeIndex`, `solid:forClass`) — the `solid-type-index` skill; bootstrap if absent |

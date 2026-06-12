@@ -5,15 +5,17 @@ import {
   ArrowRight,
   ExternalLink,
   Eye,
+  Home,
   KeyRound,
   Loader2,
   Lock,
   ShieldCheck,
 } from "lucide-react";
-import { useSession } from "@/components/session-provider";
+import { NoWebIdFromProviderError, useSession } from "@/components/session-provider";
 import { Brand } from "@/components/brand";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,30 +23,37 @@ import { initials } from "@/components/account-menu";
 import {
   InvalidWebIdError,
   NoSolidIssuerError,
+  validateWebId,
   webIdFromSearch,
 } from "@/lib/login-ux";
-
-/**
- * Where a new user can create a pod. Kept short + recognisable; each is an
- * external sign-up page (we never collect credentials ourselves). Ordered by
- * how beginner-friendly the sign-up is.
- */
-const POD_PROVIDERS: { name: string; url: string; blurb: string }[] = [
-  { name: "solidcommunity.net", url: "https://solidcommunity.net/", blurb: "Free, run by the Solid community" },
-  { name: "solidweb.org", url: "https://solidweb.org/", blurb: "Free community pod host" },
-  { name: "teamid.live", url: "https://teamid.live/", blurb: "Free, quick sign-up" },
-];
+import {
+  HOME_PROVIDER,
+  LOGIN_PROVIDERS,
+  NotALoginAddressError,
+  PUBLIC_PROVIDERS,
+} from "@/lib/login-input";
+import { PopupBlockedError } from "@/lib/popup-login";
+import { AmbiguousIssuerError } from "@/lib/webid-token-provider";
 
 /** Friendly, jargon-light error copy for the login failure modes. */
 function loginErrorMessage(error: unknown): string {
   if (error instanceof InvalidWebIdError) {
     return "That doesn't look like a valid web address. A WebID looks like https://you.example/profile/card#me";
   }
-  if (error instanceof NoSolidIssuerError) {
-    return "We couldn't find a Solid login for that address. Double-check it, or get a pod below.";
+  if (error instanceof NoSolidIssuerError || error instanceof NotALoginAddressError) {
+    return "We couldn't find a Solid login at that address. Double-check it, pick a provider above, or get a pod below.";
+  }
+  if (error instanceof PopupBlockedError) {
+    return "Your browser blocked the sign-in window. Allow popups for this site and try again.";
   }
   if (error instanceof DOMException && error.name === "AbortError") {
     return "Sign-in was cancelled. Try again when you're ready.";
+  }
+  if (error instanceof DOMException && error.name === "TimeoutError") {
+    return "Sign-in took too long and was stopped. Try again when you're ready.";
+  }
+  if (error instanceof NoWebIdFromProviderError) {
+    return "You signed in, but your provider didn't tell us your WebID. Try entering your WebID directly.";
   }
   return "We couldn't sign you in. Check the address and your connection, then try again.";
 }
@@ -52,14 +61,22 @@ function loginErrorMessage(error: unknown): string {
 /**
  * First-run login. Leads with what the product does in plain language (the
  * research's #1 risk: trust + usability must be earned, not assumed), offers a
- * one-tap path to create a pod for newcomers, and keeps the pod-address sign-in
- * for people who already have one. Returning users get avatar quick-buttons.
+ * one-tap path to create a pod for newcomers — THIS server first — and a
+ * first-party sign-in surface: a provider picker (home provider leading) plus
+ * ONE smart input that accepts a WebID or a bare provider URL. Returning users
+ * get avatar quick-buttons.
+ *
+ * All login entry points call the session's login functions DIRECTLY from the
+ * click/submit handler: the OIDC popup is opened synchronously there, so the
+ * user activation is never lost (src/lib/popup-login.ts).
  */
 export function LoginScreen() {
-  const { login, recentAccounts, status } = useSession();
+  const { login, loginWithIssuer, cancelLogin, recentAccounts, status } = useSession();
   const [webId, setWebId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showSignIn, setShowSignIn] = useState(false);
+  // Set when the entered WebID advertises several issuers: the USER picks.
+  const [issuerChoices, setIssuerChoices] = useState<string[] | null>(null);
   const busy = status === "authenticating";
   const returning = recentAccounts.length > 0;
 
@@ -78,13 +95,46 @@ export function LoginScreen() {
     }
   }, []);
 
-  async function attempt(id: string) {
+  /** Shared failure handling for every login path. */
+  function fail(e: unknown) {
+    if (e instanceof AmbiguousIssuerError) {
+      // Several issuers on the profile: never pick silently — let the user.
+      setIssuerChoices(e.issuers);
+      return;
+    }
+    setError(loginErrorMessage(e));
+  }
+
+  /** Smart-input submit (WebID or bare issuer; optional pre-picked issuer). */
+  function attempt(input: string, issuer?: string) {
     setError(null);
+    setIssuerChoices(null);
+    // Validate synchronously BEFORE the popup opens: garbage input gets an
+    // inline error, not a flash of a blank popup.
     try {
-      await login(id);
+      validateWebId(input);
     } catch (e) {
       setError(loginErrorMessage(e));
+      return;
     }
+    // No await before login(): it must run inside the click's user activation.
+    login(input, issuer ? { issuer } : undefined).catch(fail);
+  }
+
+  /** Provider-picker click: login straight against a known issuer. */
+  function attemptIssuer(issuer: string) {
+    setError(null);
+    setIssuerChoices(null);
+    loginWithIssuer(issuer).catch(fail);
+  }
+
+  /** Recent-account click: WebID + remembered issuer. */
+  function attemptRecent(account: { webId: string; issuer?: string }) {
+    setError(null);
+    setIssuerChoices(null);
+    login(account.webId, account.issuer ? { issuer: account.issuer } : undefined).catch(
+      fail,
+    );
   }
 
   return (
@@ -128,6 +178,26 @@ export function LoginScreen() {
           </ul>
         )}
 
+        {/* In-flight login: one clear state with a way out. The popup is open;
+            everything else on this screen is disabled until it settles. */}
+        {busy && (
+          <div
+            role="status"
+            className="mb-6 flex items-center gap-3 rounded-xl border border-border bg-card p-4 shadow-sm"
+          >
+            <Loader2 className="size-4 shrink-0 animate-spin text-primary" aria-hidden="true" />
+            <span className="min-w-0 flex-1 text-sm">
+              <span className="block font-medium">Finish signing in with your provider</span>
+              <span className="block text-muted-foreground">
+                A sign-in window is open — complete the steps there.
+              </span>
+            </span>
+            <Button type="button" variant="ghost" size="sm" onClick={cancelLogin}>
+              Cancel
+            </Button>
+          </div>
+        )}
+
         {recentAccounts.length > 0 && (
           <section aria-label="Recent accounts" className="mb-6">
             <h2 className="mb-3 text-sm font-medium text-muted-foreground">
@@ -139,7 +209,7 @@ export function LoginScreen() {
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => attempt(a.webId)}
+                    onClick={() => attemptRecent(a)}
                     className="flex w-full items-center gap-3 rounded-xl border border-border bg-card p-3 text-left transition-colors hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
                   >
                     <Avatar className="size-9">
@@ -169,20 +239,43 @@ export function LoginScreen() {
           </section>
         )}
 
-        {/* New users: lead with "create a pod"; existing users: the sign-in form.
-            The form is always reachable via the toggle so neither path is buried. */}
+        {/* New users: lead with "create a pod" — THIS server first; existing
+            users: the sign-in surface. The sign-in surface is always reachable
+            via the toggle so neither path is buried. */}
         {!returning && !showSignIn ? (
           <section aria-label="Create a pod" className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <h2 className="text-base font-semibold">Get started — create your free pod</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Pick a provider to make your pod (it’s like creating an email account). You’ll come right
-              back here to sign in.
+              Make your pod right here (it’s like creating an email account) — or
+              pick another provider. You’ll come right back to your data.
             </p>
             <ul className="mt-4 flex flex-col gap-2">
-              {POD_PROVIDERS.map((p) => (
-                <li key={p.url}>
+              <li>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => attemptIssuer(HOME_PROVIDER.issuer)}
+                  className="flex w-full items-center gap-3 rounded-xl border border-primary/40 bg-accent/40 p-3 text-left transition-colors hover:bg-accent/70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
+                >
+                  <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground">
+                    <Home className="size-4" aria-hidden="true" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-2 font-medium">
+                      {HOME_PROVIDER.name}
+                      <Badge variant="secondary">This server</Badge>
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      Create your pod right here — free, one step
+                    </span>
+                  </span>
+                  <ArrowRight className="size-4 text-muted-foreground" aria-hidden="true" />
+                </button>
+              </li>
+              {PUBLIC_PROVIDERS.map((p) => (
+                <li key={p.issuer}>
                   <a
-                    href={p.url}
+                    href={p.issuer}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-3 rounded-xl border border-border p-3 text-left transition-colors hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
@@ -208,65 +301,135 @@ export function LoginScreen() {
             </p>
           </section>
         ) : (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void attempt(webId);
-            }}
-            className="rounded-2xl border border-border bg-card p-6 shadow-sm"
-            noValidate
-          >
-            <Label htmlFor="webid" className="text-sm font-medium">
-              Your pod address
-            </Label>
-            <Input
-              id="webid"
-              name="webid"
-              type="url"
-              inputMode="url"
-              autoComplete="url"
-              placeholder="https://you.solidcommunity.net/profile/card#me"
-              value={webId}
-              onChange={(e) => setWebId(e.target.value)}
-              disabled={busy}
-              aria-invalid={error ? "true" : undefined}
-              aria-describedby={error ? "webid-error" : "webid-hint"}
-              className="mt-2"
-            />
-            {error ? (
-              <p id="webid-error" role="alert" className="mt-2 text-sm text-destructive">
-                {error}
-              </p>
-            ) : (
-              <p id="webid-hint" className="mt-2 text-xs text-muted-foreground">
-                The web address your provider gave you (sometimes called your “WebID”).
-              </p>
-            )}
+          <section aria-label="Sign in" className="rounded-2xl border border-border bg-card p-6 shadow-sm">
+            <h2 className="text-base font-semibold">Sign in to your pod</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Pick your provider, or enter your pod address below.
+            </p>
 
-            <Button type="submit" className="mt-4 w-full" disabled={busy || !webId.trim()}>
-              {busy ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  Signing in…
-                </>
+            {/* Provider picker — the home provider leads. */}
+            <ul className="mt-4 flex flex-col gap-2" aria-label="Pod providers">
+              {LOGIN_PROVIDERS.map((p) => (
+                <li key={p.issuer}>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => attemptIssuer(p.issuer)}
+                    className={
+                      p.home
+                        ? "flex w-full items-center gap-3 rounded-xl border border-primary/40 bg-accent/40 p-3 text-left transition-colors hover:bg-accent/70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
+                        : "flex w-full items-center gap-3 rounded-xl border border-border p-3 text-left transition-colors hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
+                    }
+                  >
+                    {p.home && (
+                      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground">
+                        <Home className="size-4" aria-hidden="true" />
+                      </span>
+                    )}
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2 font-medium">
+                        {p.name}
+                        {p.home && <Badge variant="secondary">This server</Badge>}
+                      </span>
+                      <span className="block text-xs text-muted-foreground">{p.blurb}</span>
+                    </span>
+                    <ArrowRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+
+            <div className="my-5 flex items-center gap-3 text-xs text-muted-foreground">
+              <span className="h-px flex-1 bg-border" />
+              or
+              <span className="h-px flex-1 bg-border" />
+            </div>
+
+            {/* ONE smart input: WebID or bare provider URL. */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                attempt(webId);
+              }}
+              noValidate
+            >
+              <Label htmlFor="webid" className="text-sm font-medium">
+                Your pod address or provider
+              </Label>
+              <Input
+                id="webid"
+                name="webid"
+                type="url"
+                inputMode="url"
+                autoComplete="url"
+                placeholder="https://you.solidcommunity.net/profile/card#me"
+                value={webId}
+                onChange={(e) => setWebId(e.target.value)}
+                disabled={busy}
+                aria-invalid={error ? "true" : undefined}
+                aria-describedby={error ? "webid-error" : "webid-hint"}
+                className="mt-2"
+              />
+              {error ? (
+                <p id="webid-error" role="alert" className="mt-2 text-sm text-destructive">
+                  {error}
+                </p>
               ) : (
-                "Sign in"
+                <p id="webid-hint" className="mt-2 text-xs text-muted-foreground">
+                  The web address your provider gave you (your “WebID”) — or just
+                  your provider’s address if you don’t have one yet.
+                </p>
               )}
-            </Button>
 
-            {!returning && (
-              <p className="mt-4 text-center text-sm text-muted-foreground">
-                Don’t have a pod yet?{" "}
-                <button
-                  type="button"
-                  onClick={() => setShowSignIn(false)}
-                  className="font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                >
-                  Create one
-                </button>
-              </p>
-            )}
-          </form>
+              {/* The WebID advertises several issuers — the user picks one. */}
+              {issuerChoices && (
+                <fieldset className="mt-3 rounded-xl border border-border p-3">
+                  <legend className="px-1 text-xs font-medium text-muted-foreground">
+                    Your profile lists more than one sign-in provider — choose one
+                  </legend>
+                  <ul className="flex flex-col gap-2">
+                    {issuerChoices.map((issuer) => (
+                      <li key={issuer}>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => attempt(webId, issuer)}
+                          className="flex w-full items-center gap-2 rounded-lg border border-border p-2 text-left text-sm transition-colors hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
+                        >
+                          <KeyRound className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                          <span className="truncate">{issuer}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </fieldset>
+              )}
+
+              <Button type="submit" className="mt-4 w-full" disabled={busy || !webId.trim()}>
+                {busy ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    Signing in…
+                  </>
+                ) : (
+                  "Sign in"
+                )}
+              </Button>
+
+              {!returning && (
+                <p className="mt-4 text-center text-sm text-muted-foreground">
+                  Don’t have a pod yet?{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowSignIn(false)}
+                    className="font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  >
+                    Create one
+                  </button>
+                </p>
+              )}
+            </form>
+          </section>
         )}
 
         <div className="mt-6 rounded-xl border border-dashed border-border bg-muted/40 p-4">

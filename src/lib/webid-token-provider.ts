@@ -10,8 +10,13 @@
  * advertised — never silently the first.
  *
  * Two app-supplied callbacks drive identity:
- *  - `getWebId()`   — UI that asks the user for their WebID (see `promptWebIdDialog`).
- *  - `getCode(uri)` — the existing `<authorization-code-flow>` element's `getCode`.
+ *  - `getWebId()`   — how the app states whose WebID a 401-upgrade is for
+ *                     (the Pod Manager seeds it from its login/restore state).
+ *  - `getCode(uri)` — drives the user through the authorization endpoint
+ *                     (the app-owned popup in `src/lib/popup-login.ts`).
+ *
+ * App-initiated logins with a KNOWN issuer (provider picker, bare-issuer
+ * input) skip both via {@link WebIdDPoPTokenProvider.login}.
  *
  * `allowInsecureLoopback` is what makes LOCAL CSS work: it flips oauth4webapi's
  * `allowInsecureRequests` ONLY for `localhost`/`127.0.0.1` issuers, so the HTTP
@@ -143,6 +148,14 @@ interface IssuerSession {
    * provider plus a `GetIssuerCallback`.
    */
   expiresAt: number | undefined;
+  /**
+   * The authenticated WebID, from the ID token's `webid` claim (Solid-OIDC
+   * §5; `sub` accepted as a fallback when it is an http(s) URL, the NSS
+   * convention). What lets an ISSUER-FIRST login (the user picked a provider,
+   * no WebID typed) learn who just signed in. `undefined` when the ID token
+   * carries neither.
+   */
+  webId: string | undefined;
 }
 
 /** Refresh this much before the reported expiry to absorb clock skew. */
@@ -240,6 +253,22 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
 
   async matches(): Promise<boolean> {
     return true;
+  }
+
+  /**
+   * App-initiated login against a KNOWN issuer — the entry point for the
+   * first-party login UI (provider picker / bare-issuer input), where the
+   * app resolved the issuer itself and a WebID may not exist yet.
+   *
+   * Pins the provider's issuer (subsequent 401 upgrades reuse it without
+   * prompting), drives the code flow through the cached-session machinery
+   * (instant when a fresh session exists; popup otherwise), and reports the
+   * authenticated WebID from the ID token when the server states one.
+   */
+  async login(issuer: URL): Promise<{ webId: string | undefined }> {
+    this.#issuer = Promise.resolve(issuer);
+    const session = await this.#getSession(issuer, this.#authSignal);
+    return { webId: session.webId };
   }
 
   async upgrade(request: Request): Promise<Request> {
@@ -540,6 +569,7 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       accessToken: tokenResult.access_token,
       refreshToken: tokenResult.refresh_token,
       expiresAt: expiresAt(tokenResult),
+      webId: webIdFromIdToken(oauth.getValidatedIdTokenClaims(tokenResult)),
     };
   }
 
@@ -604,6 +634,22 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   }
 }
 
+/**
+ * The authenticated WebID stated by the ID token: the `webid` claim
+ * (Solid-OIDC §5), falling back to `sub` when it is an http(s) URL (the NSS
+ * convention). `undefined` when the token states neither — issuer-first
+ * logins then fail with clear copy rather than guessing.
+ */
+function webIdFromIdToken(
+  claims: oauth.IDToken | undefined,
+): string | undefined {
+  if (claims === undefined) return undefined;
+  const webid = claims.webid;
+  if (typeof webid === "string" && /^https?:\/\//.test(webid)) return webid;
+  if (/^https?:\/\//.test(claims.sub)) return claims.sub;
+  return undefined;
+}
+
 function isEssMissingIssInteractionNeeded(e: unknown): boolean {
   try {
     return (
@@ -633,57 +679,4 @@ function noUrlEncodeClientSecretBasic(clientSecret: string): oauth.ClientAuth {
 function clientSecretBasicFor(issuer: string): (secret: string) => oauth.ClientAuth {
   if (issuer.includes("login.inrupt.com")) return noUrlEncodeClientSecretBasic;
   return oauth.ClientSecretBasic;
-}
-
-/**
- * Reference default `getWebId`: a native `<dialog>` + `<input type="url">` asking
- * for the user's WebID (the WebID-first entry from the skill UX spec). Returns
- * the entered WebID, or rejects if the user cancels. Browser-only.
- */
-export function promptWebIdDialog(initialValue = ""): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const dialog = document.createElement("dialog");
-    dialog.setAttribute("part", "webid dialog");
-    dialog.innerHTML = `
-      <form method="dialog" style="display:flex;flex-direction:column;gap:.75rem;min-width:20rem">
-        <label for="webid-input" style="font-weight:600">Your WebID</label>
-        <input id="webid-input" name="webid" type="url" required
-          placeholder="https://you.example/profile/card#me"
-          style="padding:.5rem;border:1px solid #ccc;border-radius:.375rem" />
-        <div style="display:flex;gap:.5rem;justify-content:flex-end">
-          <button type="button" value="cancel" data-action="cancel">Cancel</button>
-          <button type="submit" value="continue" data-action="continue">Continue</button>
-        </div>
-      </form>`;
-    const input = dialog.querySelector<HTMLInputElement>("#webid-input")!;
-    input.value = initialValue;
-    let settled = false;
-    const cleanup = () => {
-      dialog.remove();
-    };
-    dialog
-      .querySelector<HTMLButtonElement>('[data-action="cancel"]')!
-      .addEventListener("click", () => {
-        settled = true;
-        dialog.close();
-        cleanup();
-        reject(new DOMException("WebID entry cancelled", "AbortError"));
-      });
-    dialog.addEventListener("cancel", () => {
-      // Escape key: a cancellation, never a submission (even with a prefilled value).
-      settled = true;
-      cleanup();
-      reject(new DOMException("WebID entry cancelled", "AbortError"));
-    });
-    dialog.addEventListener("close", () => {
-      if (settled) return;
-      settled = true;
-      const value = dialog.returnValue === "continue" ? input.value.trim() : "";
-      cleanup();
-      if (value) resolve(value);
-      else reject(new DOMException("WebID entry cancelled", "AbortError"));
-    });
-    document.body.appendChild(dialog);
-    dialog.showModal();
-  });
 }

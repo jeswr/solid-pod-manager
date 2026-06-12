@@ -94,10 +94,15 @@ export interface LoginCandidate {
 /**
  * Dereference the WebID (public read — uses the patched global fetch, but no
  * auth is needed for public profiles) and assemble what the login UI needs.
+ *
+ * @param fetchImpl - test-only override; omit in production (see freshRdf).
  */
-export async function fetchLoginCandidate(input: string): Promise<LoginCandidate> {
+export async function fetchLoginCandidate(
+  input: string,
+  fetchImpl?: typeof fetch,
+): Promise<LoginCandidate> {
   const webId = validateWebId(input);
-  const { dataset } = await freshRdf(webId);
+  const { dataset } = await freshRdf(webId, fetchImpl);
   const issuers = resolveIssuers(webId, dataset);
   const me = new WebIdDataset(dataset, DataFactory).mainSubject;
   return {

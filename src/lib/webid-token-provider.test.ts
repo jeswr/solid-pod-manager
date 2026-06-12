@@ -140,6 +140,55 @@ describe("WebIdDPoPTokenProvider refresh tokens", () => {
     expect(as.tokenRequests.length).toBe(tokenRequestsBefore);
   });
 
+  it("login(issuer) runs the flow against a KNOWN issuer and reports the webid claim", async () => {
+    as = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    // No WebID callback needed: the app resolved the issuer itself
+    // (provider picker / bare-issuer input — a user with no WebID yet).
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    const provider = new WebIdDPoPTokenProvider(
+      CALLBACK,
+      getCode,
+      async () => {
+        throw new Error("getWebId must not be called for issuer-first login");
+      },
+      { clientId: CLIENT_ID, profileFetch },
+    );
+
+    const { webId } = await provider.login(new URL("https://as.test"));
+
+    expect(webId).toBe(WEBID);
+    expect(getCode).toHaveBeenCalledTimes(1);
+
+    // The issuer is pinned: a later 401 upgrade reuses the session without
+    // asking for a WebID or opening another popup.
+    const upgraded = await provider.upgrade(new Request("https://pod.test/private"));
+    expect(upgraded.headers.get("Authorization")).toMatch(/^DPoP at-\d+$/);
+    expect(getCode).toHaveBeenCalledTimes(1);
+  });
+
+  it("login(issuer) reports no WebID when the ID token states none", async () => {
+    const { provider } = makeProvider(); // fake AS without a webid claim; sub is "user"
+
+    const { webId } = await provider.login(new URL("https://as.test"));
+
+    expect(webId).toBeUndefined();
+  });
+
+  it("login(issuer) reuses the cached session on repeat logins (no second popup)", async () => {
+    const { provider, getCode } = makeProvider();
+
+    await provider.login(new URL("https://as.test"));
+    await provider.login(new URL("https://as.test"));
+
+    expect(getCode).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to a fresh authorization when the refresh grant fails", async () => {
     const { provider, getCode } = makeProvider();
 

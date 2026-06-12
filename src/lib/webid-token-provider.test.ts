@@ -742,3 +742,107 @@ describe("persisted refresh-token session: restore without a window", () => {
     expect(store.peek(ISSUER_HREF)).toBeUndefined(); // not persisted
   });
 });
+
+// ── prompt=none ignored: NSS / Trinpod (non-compliant silent auth) ───────────
+//
+// Spec-compliant IdPs answer a prompt=none probe with an OIDC error
+// (login_required / interaction_required / consent_required) when no session
+// exists, and the classifier falls through to interactive login. NSS
+// (solidweb.org, datapod.igrant.io) and Trinpod (trinpod.us/.eu) IGNORE
+// prompt=none and serve their HTML login page at HTTP 200 with no OIDC error —
+// so the popup lands on a NON-callback page (no `code`, no `error`). The silent
+// path must reclassify that landing as an implicit interaction_required and
+// fall through to the interactive retry, instead of hanging. Detected by
+// RESPONSE SHAPE, never by hostname.
+
+describe("silent prompt=none ignored by the server (NSS / Trinpod)", () => {
+  beforeEach(async () => {
+    as = await createFakeAuthorizationServer({
+      ignoresPromptNone: true, // serves /login (200) instead of an OIDC error
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+  });
+
+  it("(a) reclassifies an HTML-login 200 on the silent path → interactive retry, no hang", async () => {
+    const { provider, getCode } = makeProvider();
+
+    // The 401-upgrade path is silent-first; the server ignores prompt=none.
+    const upgraded = await provider.upgrade(new Request("https://pod.test/private"));
+
+    // The login completed via the interactive retry rather than hanging.
+    expect(upgraded.headers.get("Authorization")).toMatch(/^DPoP at-\d+$/);
+    // Two getCode calls: the silent prompt=none probe, then the interactive
+    // retry in the same window (NOT a thrown error, NOT a hang).
+    expect(getCode).toHaveBeenCalledTimes(2);
+    expect(as.authorizationRequests[0]?.prompt).toBe("none");
+    expect(as.authorizationRequests.at(-1)?.prompt).not.toBe("none");
+  });
+
+  it("(d) gives up the silent attempt without opening a SECOND window (reuses the one popup)", async () => {
+    // The click harness models the real popup: a non-callback landing keeps the
+    // single named window open and the interactive retry re-navigates IT — the
+    // provider never asks for an extra window on the silent give-up.
+    const { win, clickLogin } = makeClickHarness();
+
+    const { webId } = await clickLogin("https://as.test", { silentFirst: true });
+
+    expect(webId).toBe(WEBID);
+    // One about:blank open + the two authorize navigations (silent, then
+    // interactive) — both into the SAME named window. No extra window churn,
+    // and crucially no hang: the flow resolved.
+    expect(win.opens[0]).toBe("about:blank");
+    const authorizeOpens = win.opens.filter((u) => u.includes("/authorize"));
+    expect(authorizeOpens).toHaveLength(2);
+    expect(as.authorizationRequests[0]?.prompt).toBe("none");
+    expect(as.authorizationRequests.at(-1)?.prompt).not.toBe("none");
+  });
+});
+
+describe("silent prompt=none on a COMPLIANT server still classifies the OIDC error", () => {
+  it("(b) a real login_required error still falls through to interactive (unchanged)", async () => {
+    as = await createFakeAuthorizationServer({
+      enforceOfflineAccessConsent: true, // prompt=none → error=login_required
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const { provider, getCode } = makeProvider();
+
+    const upgraded = await provider.upgrade(new Request("https://pod.test/private"));
+
+    expect(upgraded.headers.get("Authorization")).toMatch(/^DPoP at-\d+$/);
+    expect(getCode).toHaveBeenCalledTimes(2); // silent → login_required → interactive
+    expect(as.authorizationRequests[0]?.prompt).toBe("none");
+    expect(as.authorizationRequests.at(-1)?.prompt).toBe("consent");
+  });
+});
+
+describe("genuine interactive login landing on the IdP HTML is NOT reclassified", () => {
+  it("(c) an interactive-first login does not treat its own authorize landing as a retry trigger", async () => {
+    // A server that ignores prompt=none — but the explicit login never SENDS
+    // prompt=none, so its single interactive authorize must complete normally:
+    // exactly ONE getCode call, no spurious retry.
+    as = await createFakeAuthorizationServer({
+      ignoresPromptNone: true,
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const { provider, getCode } = makeProvider();
+
+    // login() is interactive-first by default (no prompt=none).
+    const { webId } = await provider.login(new URL("https://as.test"));
+
+    expect(webId).toBe(WEBID);
+    expect(getCode).toHaveBeenCalledTimes(1); // ONE navigation, no reclassification
+    expect(as.authorizationRequests).toHaveLength(1);
+    expect(as.authorizationRequests[0]?.prompt).not.toBe("none");
+  });
+});

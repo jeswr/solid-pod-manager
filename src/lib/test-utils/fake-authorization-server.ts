@@ -32,6 +32,15 @@ export interface FakeAuthorizationServerOptions {
     grantTypesSupported?: string[]
     /** When set, ID tokens carry this value as the Solid-OIDC `webid` claim. */
     webIdClaim?: string
+    /**
+     * Emulate a server that IGNORES `prompt=none` (NSS — solidweb.org,
+     * datapod.igrant.io; Trinpod): instead of redirecting back to the callback
+     * with `error=login_required`, it serves its own HTML login page at HTTP
+     * 200, so the popup lands on a page that is NOT our callback. Modelled by
+     * {@link FakeAuthorizationServer.authorize} returning the AS's own login
+     * URL (no `code`, no `error`) for a `prompt=none` request. Default false.
+     */
+    ignoresPromptNone?: boolean
 }
 
 export interface AuthorizationRequestRecord {
@@ -222,6 +231,13 @@ export async function createFakeAuthorizationServer(options: FakeAuthorizationSe
                 clientId: authorizationUrl.searchParams.get("client_id"),
             })
             const redirect = new URL(authorizationUrl.searchParams.get("redirect_uri")!)
+
+            if (options.ignoresPromptNone && prompt === "none") {
+                // The server ignores prompt=none and serves its HTML login page
+                // at 200: the popup lands on the AS's own login URL — NOT our
+                // callback, carrying neither `code` nor `error`.
+                return `${issuer}/login`
+            }
 
             if (options.enforceOfflineAccessConsent && prompt === "none") {
                 // No session: a silent request cannot succeed.

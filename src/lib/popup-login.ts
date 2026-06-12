@@ -118,22 +118,39 @@ const DEFAULT_POLL_MS = 500;
 const CLOSE_GRACE_MS = 1_000;
 
 /**
- * Whether the authorization response is one of the OIDC "the user must
- * interact" errors — exactly the ones the token provider retries
- * interactively right away (so the popup must stay open for the retry).
+ * Whether the authorization response is one the token provider retries
+ * interactively right away — so the popup must stay OPEN for that retry to
+ * re-navigate this same window (closing it would strand the retry behind the
+ * popup blocker, the click's activation already spent).
+ *
+ * Two cases:
+ *  - an explicit OIDC "the user must interact" error
+ *    (`login_required` / `interaction_required` / `consent_required`); or
+ *  - a NON-CALLBACK landing: a response carrying neither `code` nor `error`.
+ *    Servers that ignore `prompt=none` (NSS, Trinpod) serve their HTML login
+ *    page at HTTP 200 with no OIDC parameter; the provider reclassifies that as
+ *    an implicit `interaction_required` (see `isNonCallbackResponse` there), so
+ *    the popup must likewise stay open for the interactive retry. Detected by
+ *    SHAPE, server-agnostically — never by hostname.
  */
 function needsInteraction(authorizationResponse: string): boolean {
-  let error: string | null;
+  let params: URLSearchParams;
   try {
-    error = new URL(authorizationResponse).searchParams.get("error");
+    params = new URL(authorizationResponse).searchParams;
   } catch {
-    return false;
+    // Unparsable: not our callback at all — keep the window for the retry.
+    return true;
   }
-  return (
+  const error = params.get("error");
+  if (
     error === "login_required" ||
     error === "interaction_required" ||
     error === "consent_required"
-  );
+  ) {
+    return true;
+  }
+  // Neither a code nor an error: a non-callback landing (prompt=none ignored).
+  return !params.has("code") && error === null;
 }
 
 /**

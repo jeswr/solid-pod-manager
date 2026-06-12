@@ -1249,36 +1249,62 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     const authorizationUrl = buildAuthorizationUrl(silentFirst);
     if (usePkce) authorizationUrl.searchParams.set("code_challenge", codeChallenge);
 
-    let authorizationCodeParams: URLSearchParams;
-    const authorizationCodeResponse = await this.#getCode(authorizationUrl, signal);
-    try {
-      authorizationCodeParams = oauth.validateAuthResponse(
+    // Run the interactive (no-`prompt=none`) authorization once, reusing the
+    // same popup window. Shared by the two silent-fallthrough paths below.
+    const interactiveRetry = async (): Promise<URLSearchParams> => {
+      const retryUrl = buildAuthorizationUrl(false);
+      if (usePkce) retryUrl.searchParams.set("code_challenge", codeChallenge);
+      const retryResponse = await this.#getCode(retryUrl, signal);
+      return oauth.validateAuthResponse(
         authorizationServer,
         clientRegistration,
-        new URL(authorizationCodeResponse),
+        new URL(retryResponse),
         state,
       );
-    } catch (e) {
-      if (
-        silentFirst &&
-        ((e instanceof oauth.AuthorizationResponseError &&
-          (e.error === "interaction_required" ||
-            e.error === "consent_required" ||
-            e.error === "login_required")) ||
-          isEssMissingIssInteractionNeeded(e))
-      ) {
-        // The IdP needs the user to interact: retry once without `prompt=none`.
-        const retryUrl = buildAuthorizationUrl(false);
-        if (usePkce) retryUrl.searchParams.set("code_challenge", codeChallenge);
-        const retryResponse = await this.#getCode(retryUrl, signal);
+    };
+
+    let authorizationCodeParams: URLSearchParams;
+    const authorizationCodeResponse = await this.#getCode(authorizationUrl, signal);
+
+    // Non-compliant servers (NSS — solidweb.org, datapod.igrant.io; Trinpod)
+    // IGNORE `prompt=none`: instead of an OIDC error redirect back to our
+    // callback (`?error=login_required`), they serve their HTML login page
+    // with HTTP 200 and no OIDC parameter. The popup then lands on a page that
+    // is NOT our callback, so the response carries neither `code` nor `error`.
+    // `validateAuthResponse` would surface that as an opaque "missing response
+    // parameter" error the classifier below never matches — so on the SILENT
+    // path we detect it FIRST, by response SHAPE (not by hostname — any other
+    // server that ignores prompt=none behaves the same), and treat it as an
+    // IMPLICIT `interaction_required`: fall through to the interactive retry in
+    // the same window instead of hanging or surfacing a raw error.
+    //
+    // Scoped to `silentFirst`: a GENUINE interactive login that lands on the
+    // IdP's HTML is expected (the user types credentials there) and must NOT be
+    // reclassified — that path runs with `mode === "interactive"`.
+    if (silentFirst && isNonCallbackResponse(authorizationCodeResponse)) {
+      authorizationCodeParams = await interactiveRetry();
+    } else {
+      try {
         authorizationCodeParams = oauth.validateAuthResponse(
           authorizationServer,
           clientRegistration,
-          new URL(retryResponse),
+          new URL(authorizationCodeResponse),
           state,
         );
-      } else {
-        throw e;
+      } catch (e) {
+        if (
+          silentFirst &&
+          ((e instanceof oauth.AuthorizationResponseError &&
+            (e.error === "interaction_required" ||
+              e.error === "consent_required" ||
+              e.error === "login_required")) ||
+            isEssMissingIssInteractionNeeded(e))
+        ) {
+          // The IdP needs the user to interact: retry once without `prompt=none`.
+          authorizationCodeParams = await interactiveRetry();
+        } else {
+          throw e;
+        }
       }
     }
 
@@ -1409,6 +1435,31 @@ function isInvalidGrant(e: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether a `getCode` result is NOT a usable OIDC authorization response — the
+ * popup landed somewhere OTHER than our callback redirect. True when the string
+ * does not parse as a URL, or parses to a URL carrying neither a `code` nor an
+ * `error` query parameter (an authorization response MUST carry one or the
+ * other; RFC 6749 §4.1.2 / §4.1.2.1). This is the SHAPE of a server ignoring
+ * `prompt=none` and serving its HTML login page (NSS, Trinpod) — detected
+ * server-agnostically, never by hostname. Used ONLY on the silent path, to
+ * reclassify such a landing as an implicit `interaction_required`.
+ */
+function isNonCallbackResponse(response: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(response);
+  } catch {
+    return true;
+  }
+  return (
+    !url.searchParams.has("code") &&
+    !url.searchParams.has("error") &&
+    !new URLSearchParams(url.hash.replace(/^#/, "")).has("code") &&
+    !new URLSearchParams(url.hash.replace(/^#/, "")).has("error")
+  );
 }
 
 function isEssMissingIssInteractionNeeded(e: unknown): boolean {

@@ -7,6 +7,12 @@
  * admit the app before it can read a user's activities. Garmin uses OAuth with
  * a confidential client, so live mode runs code→token through the maintainer's
  * token proxy. Demoable now against recorded fixtures.
+ *
+ * Hybrid: Garmin also has a self-serve data export, so `file-adapter.ts`
+ * complements this OAuth adapter under the same catalog id — the connect page
+ * shows the approval-gated OAuth path AND a working real-data file import.
+ * The partner-program application draft lives in
+ * `docs/garmin-partner-application.md`.
  */
 import { DataFactory, Store } from "n3";
 import { getJson } from "../core/fixture-fetch.js";

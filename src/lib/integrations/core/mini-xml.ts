@@ -58,6 +58,65 @@ export function* extractElements(
   }
 }
 
+/** One extracted element with its raw inner markup (`""` when self-closing). */
+export interface XmlBlock {
+  readonly attrs: XmlAttrs;
+  /** Everything between `<tag …>` and `</tag>`, verbatim (still encoded). */
+  readonly inner: string;
+}
+
+/**
+ * Yield every `<tag …>…</tag>` (or self-closing `<tag …/>`) element as
+ * attributes + raw inner markup. The close tag is found by linear scan, so a
+ * tag must not nest inside itself — true of the GPX/TCX shapes we read
+ * (`trk`, `trkpt`, `Activity`, `Lap`, `Trackpoint`). Same security posture as
+ * {@link extractElements}: untrusted text in, inert strings out, DOCTYPE and
+ * external entities ignored. Bounded by `limit`.
+ */
+export function* extractBlocks(
+  xml: string,
+  tag: string,
+  limit = Number.POSITIVE_INFINITY,
+): Generator<XmlBlock> {
+  const open = new RegExp(`<${escapeTag(tag)}((?:\\s[^>]*)?)/?>`, "g");
+  const close = `</${tag}>`;
+  let count = 0;
+  let m: RegExpExecArray | null;
+  // Standard regex `exec` loop (the assignment is intentional).
+  while (count < limit && (m = open.exec(xml)) !== null) {
+    const attrs = parseAttrs(m[1] ?? "");
+    if (m[0].endsWith("/>")) {
+      yield { attrs, inner: "" };
+      count++;
+      continue;
+    }
+    const end = xml.indexOf(close, open.lastIndex);
+    if (end === -1) {
+      // Truncated/hostile input: take the rest rather than scanning forever.
+      yield { attrs, inner: xml.slice(open.lastIndex) };
+      return;
+    }
+    yield { attrs, inner: xml.slice(open.lastIndex, end) };
+    open.lastIndex = end + close.length;
+    count++;
+  }
+}
+
+/**
+ * The decoded text content of the **first** `<tag>…</tag>` in `xml`, trimmed —
+ * for simple leaf elements (`<name>`, `<time>`, `<DistanceMeters>`).
+ * `undefined` when the tag is absent or holds markup rather than text.
+ */
+export function firstTagText(xml: string, tag: string): string | undefined {
+  for (const block of extractBlocks(xml, tag, 1)) {
+    const inner = block.inner.trim();
+    if (inner.includes("<")) return undefined; // not a leaf element
+    const text = decodeXmlEntities(inner).trim();
+    return text.length > 0 ? text : undefined;
+  }
+  return undefined;
+}
+
 const ATTR_RE = /([A-Za-z_:][\w:.-]*)\s*=\s*"([^"]*)"|([A-Za-z_:][\w:.-]*)\s*=\s*'([^']*)'/g;
 
 function parseAttrs(chunk: string): XmlAttrs {

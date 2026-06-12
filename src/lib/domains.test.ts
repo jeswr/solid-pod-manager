@@ -1,24 +1,34 @@
 import { describe, expect, it } from "vitest";
 import {
+  bindingBadge,
   claimDomain,
+  describePurchase,
   describeState,
+  detectPurchaseFeature,
   DomainConflictError,
   DomainNotFoundError,
+  DomainPurchaseUnavailableError,
   DomainQuotaError,
   DomainsAuthError,
   DomainsUnavailableError,
   DomainValidationError,
   domainsApiBase,
+  formatUsd,
   getDomain,
   isApexDomain,
   isPollableState,
   listDomains,
+  needsManualDns,
+  pollIntervalMs,
+  purchaseDomain,
+  quotePurchase,
   releaseDomain,
   routingInstructions,
   txtInstruction,
   validateDomainInput,
   verifyDomain,
   type DomainState,
+  type PurchaseStatus,
 } from "./domains.js";
 
 // --- Helpers -----------------------------------------------------------------
@@ -357,5 +367,310 @@ describe("getDomain / verifyDomain / releaseDomain", () => {
     const { fetch, calls } = fetchMock(new Response(null, { status: 204 }));
     await releaseDomain(BASE, "pod.example.org", fetch);
     expect(calls[0].init?.method).toBe("DELETE");
+  });
+});
+
+// --- Purchase flow (BYOD Phase 3) ----------------------------------------------
+
+const PURCHASE_QUOTE = {
+  domain: "alice-pods.com",
+  available: true,
+  purchasable: true,
+  price: { registrationUsd: 14, renewalUsd: 14, currency: "USD" },
+  autoRenew: true,
+  privacyProtection: true,
+  approvalRequired: true,
+};
+
+const PURCHASED_BINDING = {
+  domain: "alice-pods.com",
+  podRoot: "https://pod.example/alice/",
+  state: "claimed",
+  createdAt: "2026-06-12T00:00:00.000Z",
+  routing: { aTargets: ["192.0.2.10"] },
+  purchase: {
+    status: "pending-approval",
+    priceUsd: 14,
+    requestedAt: "2026-06-12T00:00:00.000Z",
+  },
+};
+
+describe("quotePurchase", () => {
+  it("POSTs the domain and parses a purchasable quote", async () => {
+    const { fetch, calls } = fetchMock(jsonResponse(200, PURCHASE_QUOTE));
+    const quote = await quotePurchase(BASE, "alice-pods.com", fetch);
+    expect(calls[0].url).toBe("https://pod.example/account/domains/quote");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ domain: "alice-pods.com" });
+    expect(quote.purchasable).toBe(true);
+    expect(quote.price).toEqual({ registrationUsd: 14, renewalUsd: 14, currency: "USD" });
+    expect(quote.approvalRequired).toBe(true);
+    expect(quote.autoRenew).toBe(true);
+    expect(quote.privacyProtection).toBe(true);
+  });
+
+  it("parses an allowlist refusal (no available/price, server reason kept)", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(200, {
+        domain: "alice.dev",
+        purchasable: false,
+        reason: "The .dev top-level domain is not offered for purchase here.",
+        autoRenew: true,
+        privacyProtection: true,
+        approvalRequired: true,
+      }),
+    );
+    const quote = await quotePurchase(BASE, "alice.dev", fetch);
+    expect(quote.purchasable).toBe(false);
+    expect(quote.available).toBeUndefined();
+    expect(quote.price).toBeUndefined();
+    expect(quote.reason).toMatch(/not offered for purchase/);
+  });
+
+  it("parses a taken domain (available: false)", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(200, {
+        domain: "taken.com",
+        available: false,
+        purchasable: false,
+        reason: "This domain is already taken.",
+        autoRenew: true,
+        privacyProtection: true,
+        approvalRequired: false,
+      }),
+    );
+    const quote = await quotePurchase(BASE, "taken.com", fetch);
+    expect(quote.available).toBe(false);
+    expect(quote.purchasable).toBe(false);
+    expect(quote.reason).toBe("This domain is already taken.");
+  });
+
+  it("maps a 404 (purchase off even with connect on) to purchase-unavailable", async () => {
+    const { fetch } = fetchMock(jsonResponse(404, { message: "Route not found" }));
+    await expect(quotePurchase(BASE, "alice-pods.com", fetch)).rejects.toBeInstanceOf(
+      DomainPurchaseUnavailableError,
+    );
+  });
+
+  it("maps 400 to a validation error with the server reason", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(400, { error: "BadRequest", message: "Domain contains an invalid label." }),
+    );
+    const error = await quotePurchase(BASE, "bad..name", fetch).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DomainValidationError);
+    expect((error as Error).message).toBe("Domain contains an invalid label.");
+  });
+
+  it("surfaces the rate limit (429) as a retryable request error", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(429, { message: "Rate limit exceeded, retry in 1 minute" }),
+    );
+    const error = await quotePurchase(BASE, "alice-pods.com", fetch).catch((e: unknown) => e);
+    expect(error).not.toBeInstanceOf(DomainPurchaseUnavailableError);
+    expect((error as Error).message).toMatch(/retry in 1 minute/);
+  });
+});
+
+describe("purchaseDomain", () => {
+  it("POSTs domain + podRoot and returns the purchase-carrying binding", async () => {
+    const { fetch, calls } = fetchMock(jsonResponse(201, PURCHASED_BINDING));
+    const binding = await purchaseDomain(
+      BASE,
+      { domain: "alice-pods.com", podRoot: "https://pod.example/alice/" },
+      fetch,
+    );
+    expect(calls[0].url).toBe("https://pod.example/account/domains/purchase");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      domain: "alice-pods.com",
+      podRoot: "https://pod.example/alice/",
+    });
+    expect(binding.purchase).toEqual({
+      status: "pending-approval",
+      priceUsd: 14,
+      requestedAt: "2026-06-12T00:00:00.000Z",
+    });
+  });
+
+  it("maps 403 (purchase quota) to the quota error with the server copy", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(403, {
+        error: "Forbidden",
+        message: "Per-account domain purchase quota (1) reached.",
+      }),
+    );
+    const error = await purchaseDomain(
+      BASE,
+      { domain: "alice-pods.com", podRoot: "https://pod.example/alice/" },
+      fetch,
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DomainQuotaError);
+    expect((error as Error).message).toBe("Per-account domain purchase quota (1) reached.");
+  });
+
+  it("maps 409 (rails re-check / in-flight purchase) verbatim", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(409, {
+        error: "Conflict",
+        message: "A purchase for this domain is already in progress.",
+      }),
+    );
+    const error = await purchaseDomain(
+      BASE,
+      { domain: "alice-pods.com", podRoot: "https://pod.example/alice/" },
+      fetch,
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DomainConflictError);
+    expect((error as Error).message).toBe("A purchase for this domain is already in progress.");
+  });
+
+  it("maps 401 to the session-expired error", async () => {
+    const { fetch } = fetchMock(jsonResponse(401, { error: "Unauthorized" }));
+    await expect(
+      purchaseDomain(
+        BASE,
+        { domain: "alice-pods.com", podRoot: "https://pod.example/alice/" },
+        fetch,
+      ),
+    ).rejects.toBeInstanceOf(DomainsAuthError);
+  });
+
+  it("maps a 404 (routes absent) to purchase-unavailable", async () => {
+    const { fetch } = fetchMock(jsonResponse(404, {}));
+    await expect(
+      purchaseDomain(
+        BASE,
+        { domain: "alice-pods.com", podRoot: "https://pod.example/alice/" },
+        fetch,
+      ),
+    ).rejects.toBeInstanceOf(DomainPurchaseUnavailableError);
+  });
+});
+
+describe("detectPurchaseFeature", () => {
+  it("treats the route validating the empty body (400) as feature-present", async () => {
+    const { fetch, calls } = fetchMock(
+      jsonResponse(400, { error: "BadRequest", message: "Field 'domain' is a required string." }),
+    );
+    await expect(detectPurchaseFeature(BASE, fetch)).resolves.toBe(true);
+    expect(calls[0].url).toBe("https://pod.example/account/domains/quote");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({});
+  });
+
+  it("treats a rate-limited probe (429) as feature-present", async () => {
+    const { fetch } = fetchMock(jsonResponse(429, { message: "Rate limit exceeded" }));
+    await expect(detectPurchaseFeature(BASE, fetch)).resolves.toBe(true);
+  });
+
+  it.each([404, 405])("treats an absent route (%d) as feature-off", async (status) => {
+    const { fetch } = fetchMock(jsonResponse(status, {}));
+    await expect(detectPurchaseFeature(BASE, fetch)).resolves.toBe(false);
+  });
+
+  it("fails closed on shapes the server never emits (LDP 200)", async () => {
+    const { fetch } = fetchMock(new Response("created", { status: 201 }));
+    await expect(detectPurchaseFeature(BASE, fetch)).resolves.toBe(false);
+  });
+
+  it("surfaces 401 as a session-expired error", async () => {
+    const { fetch } = fetchMock(jsonResponse(401, {}));
+    await expect(detectPurchaseFeature(BASE, fetch)).rejects.toBeInstanceOf(DomainsAuthError);
+  });
+});
+
+describe("formatUsd", () => {
+  it("renders whole-dollar prices without cents and fractional ones with", () => {
+    expect(formatUsd(14)).toBe("$14");
+    expect(formatUsd(12.5)).toBe("$12.50");
+    expect(formatUsd(9.99)).toBe("$9.99");
+  });
+});
+
+describe("purchase state mapping", () => {
+  it.each([
+    ["pending-approval", "Pending approval", "pending"],
+    ["registering", "Registering", "progress"],
+    ["registered", "Setting up", "progress"],
+    ["denied", "Not approved", "warning"],
+    ["failed", "Failed", "warning"],
+  ] as const)("maps %s → %s (%s)", (status, label, tone) => {
+    const badge = describePurchase(status as PurchaseStatus);
+    expect(badge.label).toBe(label);
+    expect(badge.tone).toBe(tone);
+    expect(badge.description.length).toBeGreaterThan(10);
+  });
+
+  it("headlines the purchase status while claimed, the registry state after", () => {
+    const purchase = { status: "registering", priceUsd: 14, requestedAt: "x" } as const;
+    expect(bindingBadge({ state: "claimed", purchase }).label).toBe("Registering");
+    expect(bindingBadge({ state: "verified", purchase }).label).toBe("Verifying");
+    expect(bindingBadge({ state: "live", purchase }).label).toBe("Live");
+    expect(bindingBadge({ state: "claimed" }).label).toBe("Pending DNS");
+  });
+
+  it("polls purchases at 60s, DNS convergence at 30s, dead-ends never", () => {
+    const purchase = (status: PurchaseStatus) => ({
+      status,
+      priceUsd: 14,
+      requestedAt: "x",
+    });
+    expect(pollIntervalMs({ state: "claimed", purchase: purchase("pending-approval") })).toBe(
+      60_000,
+    );
+    expect(pollIntervalMs({ state: "claimed", purchase: purchase("registering") })).toBe(60_000);
+    expect(pollIntervalMs({ state: "claimed", purchase: purchase("registered") })).toBe(30_000);
+    expect(pollIntervalMs({ state: "claimed", purchase: purchase("denied") })).toBeUndefined();
+    expect(pollIntervalMs({ state: "claimed", purchase: purchase("failed") })).toBeUndefined();
+    expect(pollIntervalMs({ state: "claimed" })).toBe(30_000);
+    expect(pollIntervalMs({ state: "verified", purchase: purchase("registered") })).toBe(30_000);
+    expect(pollIntervalMs({ state: "live" })).toBeUndefined();
+    expect(pollIntervalMs({ state: "suspended" })).toBeUndefined();
+  });
+});
+
+describe("no DNS instructions for purchased bindings (invariant)", () => {
+  const statuses: PurchaseStatus[] = [
+    "pending-approval",
+    "registering",
+    "registered",
+    "denied",
+    "failed",
+  ];
+
+  it.each(statuses)("needsManualDns is false and txtInstruction hidden while %s", (status) => {
+    const binding = {
+      ...BINDING,
+      state: "claimed" as const,
+      purchase: { status, priceUsd: 14, requestedAt: "2026-06-12T00:00:00.000Z" },
+    };
+    expect(needsManualDns(binding)).toBe(false);
+    // Even with a txtRecord present on the object, no TXT instruction renders.
+    expect(txtInstruction(binding)).toBeUndefined();
+  });
+
+  it("connect-your-own bindings keep their DNS instructions", () => {
+    expect(needsManualDns({ purchase: undefined })).toBe(true);
+    expect(txtInstruction({ ...BINDING, state: "claimed" as const })).toBeDefined();
+  });
+
+  it("parseBinding drops a txtRecord the server would never send on a purchase", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(200, { ...PURCHASED_BINDING, txtRecord: BINDING.txtRecord }),
+    );
+    const binding = await getDomain(BASE, "alice-pods.com", fetch);
+    expect(binding.purchase?.status).toBe("pending-approval");
+    expect(binding.txtRecord).toBeUndefined();
+  });
+
+  it("verify responses carry the registration progress string", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(200, {
+        ...PURCHASED_BINDING,
+        purchase: { ...PURCHASED_BINDING.purchase, status: "registering" },
+        progress: "Registration in-progress.",
+      }),
+    );
+    const binding = await verifyDomain(BASE, "alice-pods.com", fetch);
+    expect(binding.progress).toBe("Registration in-progress.");
+    expect(binding.purchase?.status).toBe("registering");
   });
 });

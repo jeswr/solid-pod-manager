@@ -12,7 +12,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Globe, LoaderCircle } from "lucide-react";
 import { DomainsErrorState } from "@/components/domains-ui";
-import { useDomains } from "@/components/use-domains";
+import { useDomains, usePurchaseFeature } from "@/components/use-domains";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -32,7 +32,9 @@ import {
 export default function AddDomainPage() {
   // The list state doubles as the feature/session probe: a disabled server or
   // an expired session surfaces here before the user types anything.
-  const { base, podRoot, loading, error, reload } = useDomains();
+  const { base, podRoot, data, loading, error, reload } = useDomains();
+  // Only to offer the buy path as the alternative where the server sells domains.
+  const { available: purchasable } = usePurchaseFeature(base, data !== undefined);
   const router = useRouter();
 
   const [input, setInput] = useState("");
@@ -156,6 +158,19 @@ export default function AddDomainPage() {
           </CardContent>
         </Card>
       )}
+
+      {!error && !loading && purchasable === true ? (
+        <p className="text-sm text-muted-foreground">
+          Don&apos;t have a domain yet?{" "}
+          <Link
+            href="/settings/domains/buy"
+            className="text-primary underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            Get a new one here
+          </Link>
+          .
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -5,26 +5,26 @@
 import type { FixtureRoute } from "../core/types.js";
 
 export interface TwitchUser {
-  id: string;
-  login: string;
-  display_name: string;
+  id?: string | null;
+  login?: string | null;
+  display_name?: string | null;
 }
 
 export interface TwitchUsersAnswer {
-  data: TwitchUser[];
+  data?: (TwitchUser | null)[] | null;
 }
 
 export interface TwitchFollowedChannel {
-  broadcaster_id: string;
-  broadcaster_login: string;
-  broadcaster_name: string;
-  followed_at: string; // ISO
+  broadcaster_id?: string | null;
+  broadcaster_login?: string | null;
+  broadcaster_name?: string | null;
+  followed_at?: string | null; // ISO
 }
 
 export interface TwitchFollowsAnswer {
-  total: number;
-  data: TwitchFollowedChannel[];
-  pagination: { cursor?: string };
+  total?: number | null;
+  data?: (TwitchFollowedChannel | null)[] | null;
+  pagination?: { cursor?: string | null } | null;
 }
 
 export const USERS: TwitchUsersAnswer = {

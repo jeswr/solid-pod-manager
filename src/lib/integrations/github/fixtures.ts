@@ -4,23 +4,25 @@
  */
 import type { FixtureRoute } from "../core/types.js";
 
+// Null fields are common on the live API: profile name/bio, and repo
+// description/homepage/language are routinely null.
 export interface GitHubUser {
-  login: string;
-  name: string | null;
-  bio: string | null;
-  html_url: string;
-  created_at: string;
+  login?: string | null;
+  name?: string | null;
+  bio?: string | null;
+  html_url?: string | null;
+  created_at?: string | null;
 }
 
 export interface GitHubRepo {
   id: number;
-  name: string;
-  full_name: string;
-  description: string | null;
-  language: string | null;
-  html_url: string;
-  private: boolean;
-  pushed_at: string;
+  name?: string | null;
+  full_name?: string | null;
+  description?: string | null;
+  language?: string | null;
+  html_url?: string | null;
+  private?: boolean | null;
+  pushed_at?: string | null;
 }
 
 export const USER: GitHubUser = {

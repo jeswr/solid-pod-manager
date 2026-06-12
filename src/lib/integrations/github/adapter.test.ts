@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { DataFactory } from "n3";
-import { demoImport, TEST_POD_ROOT } from "../core/testing.js";
+import {
+  demoImport,
+  expectCleanTurtle,
+  sparseImport,
+  TEST_POD_ROOT,
+} from "../core/testing.js";
 import { CLASSES, OnlineAccount, SoftwareSourceCode } from "../core/vocab.js";
 import { githubAdapter } from "./adapter.js";
 
@@ -48,5 +53,55 @@ describe("github adapter contract", () => {
     await demoImport(githubAdapter, { pod });
     expect(pod.urls()).toEqual(before);
     expect(pod.dataset(REPOS_DOC).size).toBe(sizeBefore);
+  });
+
+  // Robustness: null description/homepage/language are common on the live API,
+  // the profile name/bio can be null, and the repos array may carry a null.
+  it("survives a sparse live response (null repo fields, null profile fields)", async () => {
+    const { pod, report } = await sparseImport(githubAdapter, [
+      // More-specific URL first: `/user/repos` also startsWith `/user`.
+      {
+        url: "https://api.github.com/user/repos",
+        json: [
+          {
+            id: 1,
+            name: "bare",
+            full_name: "octo/bare",
+            description: null,
+            language: null,
+            html_url: "https://github.com/octo/bare",
+            pushed_at: null,
+          },
+          null, // null repo entry
+        ],
+      },
+      {
+        url: "https://api.github.com/user",
+        json: {
+          login: "octo",
+          name: null,
+          bio: null,
+          html_url: "https://github.com/octo",
+          created_at: null, // malformed/absent date must not crash
+        },
+      },
+    ]);
+
+    expect(report.written.map((w) => w.url).sort()).toEqual([PROFILE_DOC, REPOS_DOC]);
+    expect(report.skipped).toBe(1); // the null repo
+
+    const profile = expectCleanTurtle(pod, PROFILE_DOC);
+    const repos = expectCleanTurtle(pod, REPOS_DOC);
+
+    const account = new OnlineAccount(`${PROFILE_DOC}#account`, profile, DataFactory);
+    expect(account.name).toBe("octo"); // null name fell back to login
+    expect(account.description).toBeUndefined(); // null bio omitted, not "null"
+    expect(account.dateCreated).toBeUndefined(); // null date omitted, no crash
+
+    const repo = new SoftwareSourceCode(`${REPOS_DOC}#repo-1`, repos, DataFactory);
+    expect(repo.name).toBe("octo/bare");
+    expect(repo.description).toBeUndefined();
+    expect(repo.programmingLanguage).toBeUndefined();
+    expect(repo.dateModified).toBeUndefined();
   });
 });

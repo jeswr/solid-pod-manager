@@ -10,6 +10,7 @@
  */
 import { DataFactory, Store } from "n3";
 import { postJson } from "../core/fixture-fetch.js";
+import { arr, optionalDate, optionalText, SkipCounter } from "../core/safe.js";
 import type { ImportContext, ImportOutcome, IntegrationAdapter } from "../core/types.js";
 import { CLASSES, DataCollection, DigitalDocument } from "../core/vocab.js";
 import { type NotionPage, type NotionSearchAnswer, NOTION_FIXTURES } from "./fixtures.js";
@@ -46,6 +47,8 @@ export const notionAdapter: IntegrationAdapter = {
   fixtures: () => NOTION_FIXTURES,
 
   async import(ctx: ImportContext): Promise<ImportOutcome> {
+    const skipped = new SkipCounter();
+
     ctx.progress({ label: "Searching your Notion workspace…", done: 0, total: 2 });
     const search = await postJson<NotionSearchAnswer>(ID, ctx.api, `${API}/search`, {
       page_size: 100,
@@ -56,24 +59,30 @@ export const notionAdapter: IntegrationAdapter = {
     const pages = new Store();
     const databases = new Store();
 
-    for (const result of search.results) {
+    for (const result of arr(search?.results)) {
+      // A result with no id has no stable fragment IRI — skip it.
+      const id = result ? optionalText(result.id) : undefined;
+      if (!result || id === undefined) {
+        skipped.skip();
+        continue;
+      }
       if (result.object === "page") {
-        const page = new DigitalDocument(`${pagesDoc}#page-${result.id}`, pages, DataFactory).mark(
+        const page = new DigitalDocument(`${pagesDoc}#page-${id}`, pages, DataFactory).mark(
           CLASSES.TextDigitalDocument,
         );
         page.name = pageTitle(result);
-        page.identifier = result.id;
-        page.sourceUrl = result.url;
-        page.dateCreated = new Date(result.created_time);
-        page.dateModified = new Date(result.last_edited_time);
+        page.identifier = id;
+        page.sourceUrl = optionalText(result.url);
+        page.dateCreated = optionalDate(result.created_time);
+        page.dateModified = optionalDate(result.last_edited_time);
       } else {
-        const db = new DataCollection(`${dbDoc}#db-${result.id}`, databases, DataFactory).mark();
+        const db = new DataCollection(`${dbDoc}#db-${id}`, databases, DataFactory).mark();
         db.name = plain(result.title) ?? "Untitled database";
-        db.identifier = result.id;
+        db.identifier = id;
         db.description = plain(result.description);
-        db.sourceUrl = result.url;
-        db.dateCreated = new Date(result.created_time);
-        db.dateModified = new Date(result.last_edited_time);
+        db.sourceUrl = optionalText(result.url);
+        db.dateCreated = optionalDate(result.created_time);
+        db.dateModified = optionalDate(result.last_edited_time);
       }
     }
 
@@ -92,14 +101,14 @@ export const notionAdapter: IntegrationAdapter = {
     });
 
     ctx.progress({ label: "Done", done: 2, total: 2 });
-    return {};
+    return { skipped: skipped.value };
   },
 };
 
 /** A page's title property is whichever property has `type: "title"`. */
 function pageTitle(page: NotionPage): string {
-  for (const prop of Object.values(page.properties)) {
-    if (prop.type === "title" && prop.title) {
+  for (const prop of Object.values(page.properties ?? {})) {
+    if (prop && prop.type === "title" && prop.title) {
       const text = plain(prop.title);
       if (text) return text;
     }
@@ -107,7 +116,11 @@ function pageTitle(page: NotionPage): string {
   return "Untitled";
 }
 
-function plain(rich: { plain_text: string }[] | undefined): string | undefined {
-  const joined = (rich ?? []).map((r) => r.plain_text).join("");
+function plain(
+  rich: ({ plain_text?: string | null } | null)[] | null | undefined,
+): string | undefined {
+  const joined = arr(rich)
+    .map((r) => optionalText(r?.plain_text) ?? "")
+    .join("");
   return joined.length > 0 ? joined : undefined;
 }

@@ -136,6 +136,14 @@ export interface ImportContext {
 export interface ImportOutcome {
   /** Opaque incremental cursor for the next import, where the API supports it. */
   readonly cursor?: string;
+  /**
+   * Count of source items the adapter had to skip because the live API sent a
+   * malformed/incomplete shape (a null array entry, or an item missing the one
+   * field it cannot exist without — e.g. a stable id for its fragment IRI). One
+   * bad item is skipped, never fatal; this is how the count surfaces honestly to
+   * the UI. Omitted (undefined) when nothing was skipped.
+   */
+  readonly skipped?: number;
 }
 
 /** One recorded fixture route for the typed fake fetch. */

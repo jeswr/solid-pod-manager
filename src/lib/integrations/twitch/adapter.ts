@@ -10,6 +10,8 @@
  */
 import { DataFactory, Store } from "n3";
 import { getJson } from "../core/fixture-fetch.js";
+import { arr, optionalDate, optionalText, SkipCounter } from "../core/safe.js";
+import { IntegrationSyncError } from "../core/errors.js";
 import type { ImportContext, ImportOutcome, IntegrationAdapter } from "../core/types.js";
 import { CLASSES, WatchAction } from "../core/vocab.js";
 import { TWITCH_FIXTURES, type TwitchFollowsAnswer, type TwitchUsersAnswer } from "./fixtures.js";
@@ -47,29 +49,44 @@ export const twitchAdapter: IntegrationAdapter = {
   fixtures: () => TWITCH_FIXTURES,
 
   async import(ctx: ImportContext): Promise<ImportOutcome> {
+    const skipped = new SkipCounter();
+
     ctx.progress({ label: "Checking who you are on Twitch…", done: 0, total: 2 });
     const users = await getJson<TwitchUsersAnswer>(ID, ctx.api, `${API}/users`);
-    const me = users.data[0];
+    // `data` can be an empty array; the follows endpoint needs our user id, so
+    // a missing id is genuinely fatal (not a per-item skip).
+    const me = arr(users?.data)[0];
+    const myId = optionalText(me?.id);
+    if (myId === undefined) {
+      throw new IntegrationSyncError(ID, "Twitch did not return your user id — cannot list follows.");
+    }
 
     ctx.progress({ label: "Fetching the channels you follow…", done: 1, total: 2 });
     const follows = await getJson<TwitchFollowsAnswer>(
       ID,
       ctx.api,
-      `${API}/channels/followed?user_id=${encodeURIComponent(me.id)}&first=100`,
+      `${API}/channels/followed?user_id=${encodeURIComponent(myId)}&first=100`,
     );
 
     const doc = ctx.resolve("media/followed-channels.ttl");
     const dataset = new Store();
-    for (const f of follows.data) {
+    for (const f of arr(follows?.data)) {
+      // A follow with no broadcaster id has no stable fragment IRI — skip it.
+      const broadcasterId = f ? optionalText(f.broadcaster_id) : undefined;
+      if (!f || broadcasterId === undefined) {
+        skipped.skip();
+        continue;
+      }
       const watch = new WatchAction(
-        `${doc}#follow-${f.broadcaster_id}`,
+        `${doc}#follow-${broadcasterId}`,
         dataset,
         DataFactory,
       ).mark();
-      watch.name = f.broadcaster_name;
-      watch.identifier = f.broadcaster_id;
-      watch.sourceUrl = `https://www.twitch.tv/${f.broadcaster_login}`;
-      watch.startTime = new Date(f.followed_at);
+      watch.name = optionalText(f.broadcaster_name);
+      watch.identifier = broadcasterId;
+      const login = optionalText(f.broadcaster_login);
+      watch.sourceUrl = login !== undefined ? `https://www.twitch.tv/${login}` : undefined;
+      watch.startTime = optionalDate(f.followed_at);
     }
     await ctx.write({
       slug: "media/followed-channels.ttl",
@@ -79,6 +96,6 @@ export const twitchAdapter: IntegrationAdapter = {
     });
 
     ctx.progress({ label: "Done", done: 2, total: 2 });
-    return {};
+    return { skipped: skipped.value };
   },
 };

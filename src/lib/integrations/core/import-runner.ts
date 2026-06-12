@@ -53,6 +53,8 @@ export interface ImportReport {
   categories: string[];
   /** Cursor to persist for the next incremental import, if any. */
   cursor?: string;
+  /** Items the adapter skipped because the live API sent a malformed shape. */
+  skipped?: number;
   /** The type-index document used/created. */
   indexUrl: string;
 }
@@ -122,6 +124,7 @@ export async function runImport(opts: RunImportOptions): Promise<ImportReport> {
     written,
     categories: [...new Set(written.map((w) => w.category))],
     cursor: outcome.cursor,
+    skipped: outcome.skipped,
     indexUrl,
   };
 }

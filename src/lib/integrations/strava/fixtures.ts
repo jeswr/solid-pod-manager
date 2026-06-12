@@ -4,13 +4,15 @@
  */
 import type { FixtureRoute } from "../core/types.js";
 
+// Optionality reflects the live API: manual entries omit distance/time, and a
+// freshly-created activity can lack a sport type momentarily.
 export interface StravaActivity {
   id: number;
-  name: string;
-  sport_type: string; // "Run" | "Ride" | "Swim" | "Walk" | …
-  distance: number; // metres
-  moving_time: number; // seconds
-  start_date: string; // ISO
+  name?: string | null;
+  sport_type?: string | null; // "Run" | "Ride" | "Swim" | "Walk" | …
+  distance?: number | null; // metres
+  moving_time?: number | null; // seconds
+  start_date?: string | null; // ISO
 }
 
 export const ACTIVITIES: StravaActivity[] = [

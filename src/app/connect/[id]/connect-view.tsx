@@ -369,6 +369,12 @@ function SuccessPanel({
         {report.written.length} {report.written.length === 1 ? "document" : "documents"} saved
         to your pod. Find {demo ? "the sample data" : "it"} under:
       </p>
+      {report.skipped ? (
+        <p className="mt-1 text-sm text-muted-foreground">
+          {report.skipped} {report.skipped === 1 ? "item was" : "items were"} skipped because{" "}
+          {entry.name} sent them incomplete.
+        </p>
+      ) : null}
       <ul className="mt-3 flex flex-wrap gap-2">
         {report.categories.map((id) => {
           const category = categoryById(id);

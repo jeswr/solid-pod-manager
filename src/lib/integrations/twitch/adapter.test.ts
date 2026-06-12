@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { DataFactory } from "n3";
-import { demoImport, TEST_POD_ROOT } from "../core/testing.js";
+import {
+  demoImport,
+  expectCleanTurtle,
+  sparseImport,
+  TEST_POD_ROOT,
+} from "../core/testing.js";
 import { CLASSES, WatchAction } from "../core/vocab.js";
 import { twitchAdapter } from "./adapter.js";
 
@@ -36,5 +41,47 @@ describe("twitch adapter contract", () => {
     await demoImport(twitchAdapter, { pod });
     expect(pod.urls()).toEqual(before);
     expect(pod.dataset(DOC).size).toBe(sizeBefore);
+  });
+
+  // Robustness: a follow may lack a login (→ no source URL) or a name, the
+  // followed_at may be malformed, and the data array can carry a null.
+  it("survives a sparse live response (null/partial follows)", async () => {
+    const { pod, report } = await sparseImport(twitchAdapter, [
+      {
+        url: "https://api.twitch.tv/helix/users",
+        json: { data: [{ id: "me1", login: "alice", display_name: "Alice" }] },
+      },
+      {
+        url: "https://api.twitch.tv/helix/channels/followed",
+        json: {
+          data: [
+            // No login (→ omit source URL), bad date (→ omit startTime).
+            { broadcaster_id: "b1", broadcaster_name: "NoLogin", followed_at: "bad" },
+            null, // null follow entry
+            { broadcaster_name: "No Id" }, // no broadcaster id ⇒ skipped
+          ],
+        },
+      },
+    ]);
+
+    expect(report.written.map((w) => w.url)).toEqual([DOC]);
+    expect(report.skipped).toBe(2); // null entry + id-less follow
+
+    const ds = expectCleanTurtle(pod, DOC);
+    const b1 = new WatchAction(`${DOC}#follow-b1`, ds, DataFactory);
+    expect(b1.name).toBe("NoLogin");
+    expect(b1.sourceUrl).toBeUndefined(); // no login ⇒ no twitch.tv/undefined
+    expect(b1.startTime).toBeUndefined(); // malformed date omitted
+  });
+
+  // An empty users.data is genuinely fatal (the follows endpoint needs our id),
+  // and must fail loudly rather than throw a TypeError on `data[0].id`.
+  it("fails cleanly when Twitch returns no user", async () => {
+    await expect(
+      sparseImport(twitchAdapter, [
+        { url: "https://api.twitch.tv/helix/users", json: { data: [] } },
+        { url: "https://api.twitch.tv/helix/channels/followed", json: { data: [] } },
+      ]),
+    ).rejects.toThrow(/user id/);
   });
 });

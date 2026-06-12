@@ -4,17 +4,19 @@
  */
 import type { FixtureRoute } from "../core/types.js";
 
+// Optionality reflects the live API: an account with no display name, or a
+// guilds listing the user didn't grant the scope for.
 export interface DiscordUser {
-  id: string;
-  username: string;
-  global_name: string | null;
+  id?: string | null;
+  username?: string | null;
+  global_name?: string | null;
 }
 
 export interface DiscordGuild {
   id: string;
-  name: string;
-  owner: boolean;
-  approximate_member_count?: number;
+  name?: string | null;
+  owner?: boolean | null;
+  approximate_member_count?: number | null;
 }
 
 export const USER: DiscordUser = {

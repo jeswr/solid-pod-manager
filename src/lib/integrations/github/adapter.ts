@@ -10,6 +10,7 @@
  */
 import { DataFactory, Store } from "n3";
 import { getJson } from "../core/fixture-fetch.js";
+import { arr, optionalDate, optionalText, SkipCounter } from "../core/safe.js";
 import type { ImportContext, ImportOutcome, IntegrationAdapter } from "../core/types.js";
 import { CLASSES, OnlineAccount, SoftwareSourceCode } from "../core/vocab.js";
 import { GITHUB_FIXTURES, type GitHubRepo, type GitHubUser } from "./fixtures.js";
@@ -46,18 +47,22 @@ export const githubAdapter: IntegrationAdapter = {
   fixtures: () => GITHUB_FIXTURES,
 
   async import(ctx: ImportContext): Promise<ImportOutcome> {
+    const skipped = new SkipCounter();
+
     ctx.progress({ label: "Fetching your GitHub profile…", done: 0, total: 2 });
-    const user = await getJson<GitHubUser>(ID, ctx.api, `${API}/user`);
+    const user = (await getJson<GitHubUser>(ID, ctx.api, `${API}/user`)) ?? {};
 
     const profileDoc = ctx.resolve("work/profile.ttl");
     const profile = new Store();
     const account = new OnlineAccount(`${profileDoc}#account`, profile, DataFactory).mark();
-    account.accountName = user.login;
-    account.name = user.name ?? user.login;
-    account.description = user.bio ?? undefined;
-    account.sourceUrl = user.html_url;
+    const login = optionalText(user.login);
+    account.accountName = login;
+    account.name = optionalText(user.name) ?? login;
+    // description, html_url, bio are all commonly null on the live API.
+    account.description = optionalText(user.bio);
+    account.sourceUrl = optionalText(user.html_url);
     account.accountServiceHomepage = "https://github.com/";
-    account.dateCreated = new Date(user.created_at);
+    account.dateCreated = optionalDate(user.created_at);
     await ctx.write({
       slug: "work/profile.ttl",
       category: "work-education",
@@ -69,7 +74,7 @@ export const githubAdapter: IntegrationAdapter = {
     });
 
     ctx.progress({ label: "Fetching your repositories…", done: 1, total: 2 });
-    const repos = await getJson<GitHubRepo[]>(
+    const repos = await getJson<GitHubRepo[] | null>(
       ID,
       ctx.api,
       `${API}/user/repos?sort=pushed&per_page=100`,
@@ -77,15 +82,21 @@ export const githubAdapter: IntegrationAdapter = {
 
     const reposDoc = ctx.resolve("work/repositories.ttl");
     const dataset = new Store();
-    for (const r of repos) {
+    for (const r of arr(repos)) {
+      // A repo with no id has no stable fragment IRI — skip it.
+      if (!r || r.id === undefined || r.id === null) {
+        skipped.skip();
+        continue;
+      }
       const repo = new SoftwareSourceCode(`${reposDoc}#repo-${r.id}`, dataset, DataFactory).mark();
-      repo.name = r.full_name;
+      repo.name = optionalText(r.full_name) ?? optionalText(r.name);
       repo.identifier = String(r.id);
-      repo.description = r.description ?? undefined;
-      repo.programmingLanguage = r.language ?? undefined;
-      repo.codeRepository = r.html_url;
-      repo.sourceUrl = r.html_url;
-      repo.dateModified = new Date(r.pushed_at);
+      // description, homepage, language are null for a large fraction of repos.
+      repo.description = optionalText(r.description);
+      repo.programmingLanguage = optionalText(r.language);
+      repo.codeRepository = optionalText(r.html_url);
+      repo.sourceUrl = optionalText(r.html_url);
+      repo.dateModified = optionalDate(r.pushed_at);
     }
     await ctx.write({
       slug: "work/repositories.ttl",
@@ -95,6 +106,6 @@ export const githubAdapter: IntegrationAdapter = {
     });
 
     ctx.progress({ label: "Done", done: 2, total: 2 });
-    return {};
+    return { skipped: skipped.value };
   },
 };

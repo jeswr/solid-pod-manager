@@ -42,3 +42,6 @@ next-env.d.ts
 
 # test output
 test-results/
+
+# .env.production holds ONLY public client IDs (inlined into the public JS bundle anyway)
+!.env.production

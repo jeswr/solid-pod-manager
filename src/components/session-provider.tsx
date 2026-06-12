@@ -200,6 +200,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           clientId,
           allowInsecureLoopback: true, // local CSS over HTTP; remote stays HTTPS-strict
           sessionStore,
+          // Keep the cached session continuously fresh in the BACKGROUND so a
+          // long import or an idle→active session never hits an expired token
+          // mid-flow. Visibility-gated (no churn in a hidden tab); torn down on
+          // unmount; stops (no popup) on a dead refresh token. The lazy
+          // renew-on-401 path remains the fallback. (Dom visibility lifecycle is
+          // the default in a browser.)
+          proactiveRefresh: true,
         },
       );
 
@@ -252,6 +259,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       cancelled = true;
+      // Tear down proactive-refresh timers + the visibility listeners on
+      // unmount so nothing leaks (no orphaned intervals, no token churn) after
+      // this provider is discarded. Fire-and-forget; teardown is idempotent.
+      void providerReadyRef.current?.then((p) => p?.teardown()).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

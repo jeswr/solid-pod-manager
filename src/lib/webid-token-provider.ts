@@ -120,7 +120,41 @@ export interface WebIdDPoPTokenProviderOptions {
    * Absent (default): tokens stay in-memory only, the original behaviour.
    */
   sessionStore?: SessionStore;
+  /**
+   * Enable PROACTIVE background refresh: when a session carries `expires_in`,
+   * schedule a refresh-token grant at a safe fraction of the lifetime (see
+   * {@link proactiveRefreshAt}) so the cached session stays continuously fresh
+   * and `upgrade()`/`fetch` never hits an expired token mid-flow. Off by default
+   * — the lazy renew-on-401 / renew-on-expiry paths remain the only triggers.
+   *
+   * N/A without a refresh token (the server issued none): nothing is scheduled,
+   * the lazy path stays in charge.
+   */
+  proactiveRefresh?: boolean;
+  /**
+   * Page-lifecycle surface for proactive scheduling (visibility + focus). Only
+   * consulted when {@link proactiveRefresh} is on. Defaults to
+   * {@link domVisibilityLifecycle} in a browser, and to a no-op (always-visible,
+   * no events) under SSR/node — where there are no timers to leak anyway.
+   * Injectable for tests.
+   */
+  visibilityLifecycle?: VisibilityLifecycle;
+  /**
+   * Timer surface for proactive scheduling. Defaults to `globalThis.setTimeout`/
+   * `clearTimeout`. Injectable so tests can drive it with vitest fake timers
+   * (which patch the globals — this just captures them) or a manual double.
+   * @internal
+   */
+  setTimeoutFn?: (handler: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clearTimeoutFn?: (handle: ReturnType<typeof setTimeout>) => void;
 }
+
+/** A {@link VisibilityLifecycle} that reports always-visible and never fires (SSR/node). */
+const noopVisibilityLifecycle: VisibilityLifecycle = {
+  isVisible: () => true,
+  onResume: () => () => {},
+  onHide: () => () => {},
+};
 
 /** A WebID advertises several issuers but no `chooseIssuer` was supplied. */
 export class AmbiguousIssuerError extends Error {
@@ -182,6 +216,19 @@ interface IssuerSession {
   webId: string | undefined;
 }
 
+/** Per-issuer proactive-refresh scheduler bookkeeping. */
+interface IssuerScheduler {
+  /** The pending refresh timer, or undefined when none is armed (hidden tab). */
+  timer?: ReturnType<typeof setTimeout>;
+  /** Consecutive transient-failure retries already spent for the current cycle. */
+  retries: number;
+  /**
+   * The scheduled-for instant (epoch ms) the armed `timer` targets — so a
+   * visibility resume can decide whether to refresh-now vs let the timer run.
+   */
+  fireAt?: number;
+}
+
 /**
  * Whether a code flow tries `prompt=none` before the interactive request.
  *
@@ -220,6 +267,130 @@ function expiresAt(token: oauth.TokenEndpointResponse): number | undefined {
 
 function hasExpired(session: IssuerSession): boolean {
   return session.expiresAt !== undefined && Date.now() >= session.expiresAt;
+}
+
+// ── Proactive-refresh scheduling policy ──────────────────────────────────────
+//
+// The lazy paths (upgrade()-on-expiry and renew-on-rejected-token) only renew
+// AFTER a token is already stale, so a long import or an idle→active session
+// can hit a momentary expired-token request before the lazy renewal completes.
+// Proactive refresh keeps the cached session continuously fresh by running the
+// refresh grant in the background BEFORE expiry.
+//
+// MIRRORS-CANDIDATE: this whole block is a strong upstream addition to
+// reactive-authentication's DPoPTokenProvider (alongside the PR #11/#12 session
+// cache + refresh tokens it builds on). Keep these comments when porting.
+
+/**
+ * Refresh at most this long before the (skew-adjusted) expiry, even for very
+ * long-lived tokens — a multi-hour token still refreshes within a bounded
+ * window of expiry rather than hours early (pointless churn).
+ */
+const PROACTIVE_MAX_LEAD_MS = 5 * 60_000;
+/**
+ * Refresh at least this long before expiry, even for very short-lived tokens,
+ * so the grant's own round-trip completes with margin to spare.
+ */
+const PROACTIVE_MIN_LEAD_MS = 30_000;
+/** Never schedule a timer shorter than this — coalesce near-immediate fires. */
+const PROACTIVE_MIN_DELAY_MS = 1_000;
+/** Bounded retries for transient/network refresh failures before giving up. */
+const PROACTIVE_MAX_RETRIES = 3;
+/** Base backoff between transient-failure retries (doubled each attempt). */
+const PROACTIVE_RETRY_BASE_MS = 2_000;
+
+/**
+ * When (epoch ms) to PROACTIVELY refresh a session whose access token expires
+ * at `expiresAt`. Policy: fire at ~75% of the lifetime elapsed, OR
+ * `expiresAt - max(30s, 10% of lifetime)`, whichever is SOONER — then clamp the
+ * lead time into [30s, 5min] so very short tokens still refresh early enough and
+ * very long ones don't churn hours ahead. `expiresAt` here is the provider's
+ * skew-adjusted expiry (already 30s before the server's), so the schedule sits a
+ * little further still inside the real lifetime — exactly the safety we want.
+ *
+ * Returns `undefined` when the token has no reported lifetime (nothing to
+ * schedule against) — the lazy path remains the only renewal trigger.
+ */
+function proactiveRefreshAt(
+  session: IssuerSession,
+  now: number = Date.now(),
+): number | undefined {
+  if (session.expiresAt === undefined) return undefined;
+  const remaining = session.expiresAt - now;
+  // The lifetime as the provider sees it (skew already removed in expiresAt()).
+  const lifetime = Math.max(remaining, 0);
+  // "75% elapsed" measured from NOW over the remaining window.
+  const at75 = now + remaining * 0.75;
+  // expiresAt - max(30s, 10% of lifetime).
+  const leadFromTenth = Math.max(PROACTIVE_MIN_LEAD_MS, lifetime * 0.1);
+  const atLead = session.expiresAt - leadFromTenth;
+  // Whichever is SOONER.
+  let fireAt = Math.min(at75, atLead);
+  // Clamp the LEAD (expiresAt - fireAt) into [MIN, MAX].
+  const lead = session.expiresAt - fireAt;
+  if (lead < PROACTIVE_MIN_LEAD_MS) fireAt = session.expiresAt - PROACTIVE_MIN_LEAD_MS;
+  else if (lead > PROACTIVE_MAX_LEAD_MS) fireAt = session.expiresAt - PROACTIVE_MAX_LEAD_MS;
+  return fireAt;
+}
+
+/**
+ * The page-lifecycle surface proactive scheduling consults — injectable so the
+ * provider can be driven in node tests and degrade to a no-op under SSR. Models
+ * just the slice we need of the Page Visibility API + window focus.
+ *
+ * Production wires {@link domVisibilityLifecycle} (document/window). When
+ * `undefined` (SSR/node), scheduling treats the page as always-visible and skips
+ * the visibility gating — fine for non-browser callers, which have no timers to
+ * leak anyway.
+ */
+export interface VisibilityLifecycle {
+  /** Is the page currently visible? (`document.visibilityState === "visible"`.) */
+  isVisible(): boolean;
+  /**
+   * Subscribe to "page became visible OR window regained focus". Called when the
+   * user returns to a backgrounded tab — the cue to re-evaluate expiry (timers
+   * may have been throttled/dropped while hidden or during OS sleep). Returns an
+   * unsubscribe function.
+   */
+  onResume(listener: () => void): () => void;
+  /**
+   * Subscribe to "page became hidden". Returns an unsubscribe function. Used to
+   * stop firing timers in a backgrounded tab (battery + pointless token churn).
+   */
+  onHide(listener: () => void): () => void;
+}
+
+/**
+ * The production {@link VisibilityLifecycle}: the Page Visibility API
+ * (`visibilitychange`) plus a window `focus`/`blur` pair (focus catches the
+ * alt-tab-back case some browsers report only as focus, not visibilitychange).
+ * Construct only in the browser.
+ */
+export function domVisibilityLifecycle(
+  doc: Document = document,
+  win: Window = window,
+): VisibilityLifecycle {
+  return {
+    isVisible: () => doc.visibilityState === "visible",
+    onResume(listener) {
+      const onVis = () => {
+        if (doc.visibilityState === "visible") listener();
+      };
+      doc.addEventListener("visibilitychange", onVis);
+      win.addEventListener("focus", listener);
+      return () => {
+        doc.removeEventListener("visibilitychange", onVis);
+        win.removeEventListener("focus", listener);
+      };
+    },
+    onHide(listener) {
+      const onVis = () => {
+        if (doc.visibilityState === "hidden") listener();
+      };
+      doc.addEventListener("visibilitychange", onVis);
+      return () => doc.removeEventListener("visibilitychange", onVis);
+    },
+  };
 }
 
 const isLoopback = (host: string): boolean =>
@@ -266,6 +437,22 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * read on the auth path itself; `#sessions` stays the single-flight truth.
    */
   readonly #settledSessions = new Map<string, IssuerSession>();
+  /** Whether proactive background refresh is enabled (opt-in). */
+  readonly #proactiveRefresh: boolean;
+  /** Page-lifecycle surface (visibility/focus) for proactive scheduling. */
+  readonly #visibility: VisibilityLifecycle;
+  readonly #setTimeout: (handler: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  readonly #clearTimeout: (handle: ReturnType<typeof setTimeout>) => void;
+  /**
+   * Per-issuer proactive-refresh scheduler state. An entry exists only while an
+   * issuer is being kept fresh; cleared on logout, teardown, dead refresh token,
+   * or a no-refresh-token session. See {@link #scheduleProactive}.
+   */
+  readonly #schedulers = new Map<string, IssuerScheduler>();
+  /** Unsubscribe handles for the (single, shared) visibility listeners. */
+  #visibilityUnsub?: () => void;
+  /** Set by {@link teardown}; stops all future scheduling permanently. */
+  #destroyed = false;
   /**
    * Shared auth work (issuer resolution, login) is provider-owned: it must NOT
    * be tied to any single request's AbortSignal, or aborting one request would
@@ -289,6 +476,16 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     this.#profileFetch =
       options.profileFetch ?? globalThis.fetch.bind(globalThis);
     this.#sessionStore = options.sessionStore;
+    this.#proactiveRefresh = options.proactiveRefresh ?? false;
+    this.#visibility =
+      options.visibilityLifecycle ??
+      (this.#proactiveRefresh && typeof document !== "undefined"
+        ? domVisibilityLifecycle()
+        : noopVisibilityLifecycle);
+    this.#setTimeout =
+      options.setTimeoutFn ??
+      ((handler, ms) => setTimeout(handler, ms));
+    this.#clearTimeout = options.clearTimeoutFn ?? ((handle) => clearTimeout(handle));
   }
 
   /** oauth4webapi request options, enabling insecure loopback per the policy. */
@@ -465,6 +662,10 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       // own errors are swallowed inside #persist — a storage failure degrades to
       // in-memory-only, it never breaks a live login).
       await this.#persist(issuer, session);
+      // Keep the cached session continuously fresh (opt-in). Every settled
+      // session — first login, lazy renew, refresh-grant restore, AND a
+      // proactive refresh's own result — reschedules from its (rotated) token.
+      this.#scheduleProactive(issuer, session);
       return session;
     } catch (e) {
       if (this.#sessions.get(issuer.href) === work) {
@@ -472,6 +673,270 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       }
       throw e;
     }
+  }
+
+  // ── Proactive refresh (opt-in; MIRRORS-CANDIDATE for upstream) ─────────────
+  //
+  // Composes WITH the lazy paths rather than replacing them: every settled
+  // session reschedules here (#begin), and a fired refresh runs through the SAME
+  // single-flight #getSession machinery a lazy upgrade()/invalidate() uses — so a
+  // proactive refresh in flight satisfies a concurrent upgrade(), and the two
+  // never stampede the token endpoint. The persistence path is untouched: the
+  // refresh grant rotates + #persist()s the new token exactly as the lazy renew
+  // does. The renew-on-rejected path (invalidate) still wins on real 401s — a
+  // proactive refresh just makes those rare during active use.
+
+  /**
+   * Arm (or re-arm) the proactive refresh timer for an issuer from a freshly
+   * settled session. No-op unless proactive refresh is enabled AND the session
+   * holds a refresh token with a reported lifetime (otherwise there is nothing
+   * to refresh with, or nothing to schedule against — the lazy path stays).
+   *
+   * Idempotent per session: clears any prior timer first. Subscribes the shared
+   * visibility listeners on first use. While the tab is HIDDEN, no timer is armed
+   * — the resume listener re-evaluates on return instead (battery + sleep-drop
+   * correctness).
+   */
+  #scheduleProactive(issuer: URL, session: IssuerSession): void {
+    if (!this.#proactiveRefresh || this.#destroyed) return;
+    // N/A without a refresh token or a reported lifetime — document: the lazy
+    // path remains the only renewal trigger for these sessions.
+    if (session.refreshToken === undefined) {
+      this.#clearScheduler(issuer.href);
+      return;
+    }
+    const fireAt = proactiveRefreshAt(session);
+    if (fireAt === undefined) {
+      this.#clearScheduler(issuer.href);
+      return;
+    }
+
+    this.#ensureVisibilitySubscribed();
+
+    let scheduler = this.#schedulers.get(issuer.href);
+    if (scheduler === undefined) {
+      scheduler = { retries: 0 };
+      this.#schedulers.set(issuer.href, scheduler);
+    } else if (scheduler.timer !== undefined) {
+      this.#clearTimeout(scheduler.timer);
+      scheduler.timer = undefined;
+    }
+    // A successfully (re)scheduled cycle starts a fresh retry budget.
+    scheduler.retries = 0;
+    scheduler.fireAt = fireAt;
+
+    // Don't run timers in a hidden tab: the resume listener will re-evaluate.
+    if (!this.#visibility.isVisible()) {
+      scheduler.timer = undefined;
+      return;
+    }
+    this.#armTimer(issuer, scheduler, fireAt);
+  }
+
+  /** Arm a timer to fire the proactive refresh at `fireAt` (clamped ≥ now). */
+  #armTimer(issuer: URL, scheduler: IssuerScheduler, fireAt: number): void {
+    const delay = Math.max(PROACTIVE_MIN_DELAY_MS, fireAt - Date.now());
+    scheduler.fireAt = fireAt;
+    scheduler.timer = this.#setTimeout(() => {
+      scheduler.timer = undefined;
+      void this.#fireProactive(issuer);
+    }, delay);
+  }
+
+  /**
+   * Run a proactive refresh in the background, SHARING the single-flight session
+   * cache with the lazy paths so the two never stampede the token endpoint:
+   *
+   *  - If a renewal/login is already IN FLIGHT for this issuer (`#sessions` holds
+   *    a pending entry — a concurrent `upgrade()`→`#renew`, a `restoreIssuer`, …),
+   *    JOIN it instead of starting a second grant. When it settles fresh, the
+   *    cycle is satisfied (that entry's own {@link #begin} already rescheduled);
+   *    only if it settles still-expired do we fall through and refresh ourselves.
+   *  - Otherwise publish our own refresh-token grant into the cache via
+   *    {@link #begin}, so a concurrent `upgrade()` that arrives mid-flight sees
+   *    and shares it rather than firing its own.
+   *
+   * The refresh is driven through {@link #refresh} DIRECTLY (not {@link #renew}),
+   * so a dead/transient grant is handled here WITHOUT ever falling back to the
+   * authorize popup — there is no user gesture on this path. invalid_grant clears
+   * the persisted session and STOPS scheduling; transient/network failure retries
+   * with bounded backoff.
+   */
+  async #fireProactive(issuer: URL): Promise<void> {
+    const scheduler = this.#schedulers.get(issuer.href);
+    if (scheduler === undefined || this.#destroyed) return;
+    // Hidden again between arming and firing: defer to the resume listener.
+    if (!this.#visibility.isVisible()) {
+      scheduler.timer = undefined;
+      return;
+    }
+
+    // The session we mean to refresh — the last settled one, captured up front
+    // so we can tell a steady-state cache hit (refresh it) from a NEWER renewal
+    // that landed while we waited (join it; don't double-refresh).
+    const current = this.#settledSessions.get(issuer.href);
+    if (current === undefined || current.refreshToken === undefined) {
+      this.#clearScheduler(issuer.href);
+      return;
+    }
+
+    // Single-flight: in steady state `#sessions` holds the promise that settled
+    // to `current` — that is just the cache, and we go on to refresh it. But if
+    // a DIFFERENT renewal is in flight (a lazy upgrade()→#renew, a restore, …),
+    // join it rather than stampeding a second grant; when it settles to a newer
+    // fresh session the cycle is satisfied (its own #begin rescheduled).
+    const inFlight = this.#sessions.get(issuer.href);
+    if (inFlight !== undefined) {
+      const joined = await inFlight.catch(() => undefined);
+      if (joined !== undefined && joined !== current && !hasExpired(joined)) {
+        return;
+      }
+    }
+    // A renewal may have started (and not yet settled) while we awaited above —
+    // don't clobber it; let it own the cycle (it reschedules on settle).
+    if (this.#sessions.get(issuer.href) !== inFlight) return;
+
+    try {
+      // Publish our refresh-token grant into the single-flight cache so a
+      // concurrent upgrade() shares it; #begin reschedules + re-persists the
+      // rotated token on success.
+      await this.#begin(
+        issuer,
+        this.#refresh(issuer, current, current.refreshToken),
+      );
+      // #begin's success path already rescheduled via #scheduleProactive.
+    } catch (e) {
+      await this.#handleProactiveFailure(issuer, e);
+    }
+  }
+
+  /**
+   * Classify a failed proactive refresh:
+   *  - `invalid_grant` (refresh token dead/revoked): clear the persisted session
+   *    and STOP scheduling for this issuer. No popup — the next user-initiated
+   *    action falls back to the existing interactive path.
+   *  - transient/network: retry with bounded exponential backoff, still no popup.
+   *    After the budget is spent, stop scheduling (the lazy path will recover on
+   *    the next real request).
+   */
+  async #handleProactiveFailure(issuer: URL, error: unknown): Promise<void> {
+    const scheduler = this.#schedulers.get(issuer.href);
+    if (scheduler === undefined || this.#destroyed) return;
+
+    if (isInvalidGrant(error)) {
+      this.#clearScheduler(issuer.href);
+      this.#settledSessions.delete(issuer.href);
+      this.#sessions.delete(issuer.href);
+      await this.#clearPersisted(issuer);
+      return;
+    }
+
+    // Transient: retry with backoff, bounded, never a popup.
+    if (scheduler.retries >= PROACTIVE_MAX_RETRIES) {
+      this.#clearScheduler(issuer.href);
+      return;
+    }
+    const attempt = ++scheduler.retries;
+    const backoff = PROACTIVE_RETRY_BASE_MS * 2 ** (attempt - 1);
+    if (!this.#visibility.isVisible()) {
+      // Don't burn retries in the background; resume re-evaluates.
+      scheduler.timer = undefined;
+      return;
+    }
+    scheduler.timer = this.#setTimeout(() => {
+      scheduler.timer = undefined;
+      void this.#fireProactive(issuer);
+    }, backoff);
+  }
+
+  /** Subscribe the shared visibility/focus listeners once (first scheduler). */
+  #ensureVisibilitySubscribed(): void {
+    if (this.#visibilityUnsub !== undefined) return;
+    const onResume = this.#onResume.bind(this);
+    const onHide = this.#onHide.bind(this);
+    const unsubResume = this.#visibility.onResume(onResume);
+    const unsubHide = this.#visibility.onHide(onHide);
+    this.#visibilityUnsub = () => {
+      unsubResume();
+      unsubHide();
+    };
+  }
+
+  /**
+   * The tab became visible / window regained focus. Timers may have been
+   * throttled or dropped while hidden (or during OS sleep), so we ALWAYS
+   * re-evaluate expiry rather than trust a timer fired: for each issuer, if the
+   * token is already within the refresh window (or expired), refresh now; else
+   * re-arm a fresh timer to its scheduled instant.
+   */
+  #onResume(): void {
+    if (this.#destroyed) return;
+    const now = Date.now();
+    for (const [href, scheduler] of this.#schedulers) {
+      const session = this.#settledSessions.get(href);
+      if (session === undefined || session.refreshToken === undefined) {
+        this.#clearScheduler(href);
+        continue;
+      }
+      const fireAt = scheduler.fireAt ?? proactiveRefreshAt(session, now);
+      const issuer = new URL(href);
+      if (scheduler.timer !== undefined) {
+        this.#clearTimeout(scheduler.timer);
+        scheduler.timer = undefined;
+      }
+      if (fireAt === undefined || now >= fireAt) {
+        // Within (or past) the refresh window: refresh immediately.
+        void this.#fireProactive(issuer);
+      } else {
+        this.#armTimer(issuer, scheduler, fireAt);
+      }
+    }
+  }
+
+  /** The tab became hidden: stop firing timers (re-armed on resume). */
+  #onHide(): void {
+    for (const scheduler of this.#schedulers.values()) {
+      if (scheduler.timer !== undefined) {
+        this.#clearTimeout(scheduler.timer);
+        scheduler.timer = undefined;
+      }
+    }
+  }
+
+  /** Clear and forget the scheduler for one issuer (timer + bookkeeping). */
+  #clearScheduler(href: string): void {
+    const scheduler = this.#schedulers.get(href);
+    if (scheduler?.timer !== undefined) this.#clearTimeout(scheduler.timer);
+    this.#schedulers.delete(href);
+    if (this.#schedulers.size === 0) {
+      this.#visibilityUnsub?.();
+      this.#visibilityUnsub = undefined;
+    }
+  }
+
+  /**
+   * Stop proactively refreshing one issuer (e.g. explicit logout). Clears its
+   * timer + bookkeeping; the visibility listeners are released once the last
+   * scheduler is gone. Does NOT touch the persisted session — logout clears that
+   * separately via {@link forgetPersisted}.
+   */
+  stopProactiveRefresh(issuer: URL): void {
+    this.#clearScheduler(issuer.href);
+  }
+
+  /**
+   * Provider teardown: stop ALL proactive scheduling and release the shared
+   * visibility listeners. Idempotent. Call on unmount so no interval/listener
+   * leaks (and no token churn) after the provider is discarded.
+   */
+  teardown(): void {
+    this.#destroyed = true;
+    for (const scheduler of this.#schedulers.values()) {
+      if (scheduler.timer !== undefined) this.#clearTimeout(scheduler.timer);
+    }
+    this.#schedulers.clear();
+    this.#visibilityUnsub?.();
+    this.#visibilityUnsub = undefined;
   }
 
   /**
@@ -606,6 +1071,9 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * React session bridge can wipe the persisted refresh token + key on sign-out.
    */
   async forgetPersisted(issuer: URL): Promise<void> {
+    // Logout: stop refreshing this issuer (no leaked timer, no churn) AND drop
+    // the durable credential so it is not silently revived on the next load.
+    this.#clearScheduler(issuer.href);
     await this.#clearPersisted(issuer);
   }
 
@@ -917,6 +1385,30 @@ function webIdFromIdToken(
   if (typeof webid === "string" && /^https?:\/\//.test(webid)) return webid;
   if (/^https?:\/\//.test(claims.sub)) return claims.sub;
   return undefined;
+}
+
+/**
+ * Whether a failed token-endpoint request was an OAuth `invalid_grant` — the
+ * refresh token is dead (expired / revoked / rotation-reuse), so proactive
+ * scheduling must STOP rather than retry. oauth4webapi surfaces this as a
+ * `ResponseBodyError` whose `.error` is `"invalid_grant"`; we also probe the
+ * nested `cause.parameters` shape some paths carry. Anything else is treated as
+ * transient (network, 5xx, …) and retried with backoff.
+ */
+function isInvalidGrant(e: unknown): boolean {
+  if (e instanceof oauth.ResponseBodyError && e.error === "invalid_grant") {
+    return true;
+  }
+  try {
+    return (
+      (e as { error?: unknown }).error === "invalid_grant" ||
+      (e as { cause: { parameters: URLSearchParams } }).cause.parameters.get(
+        "error",
+      ) === "invalid_grant"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isEssMissingIssInteractionNeeded(e: unknown): boolean {

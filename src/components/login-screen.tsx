@@ -128,13 +128,16 @@ export function LoginScreen() {
     loginWithIssuer(issuer).catch(fail);
   }
 
-  /** Recent-account click: WebID + remembered issuer. */
+  /**
+   * Recent-account click: WebID + remembered issuer. Unlike a typed sign-in,
+   * this keeps the silent `prompt=none` attempt first — the user signed in
+   * here before, so a live IdP session is likely and silent success means
+   * zero typing (the popup closes itself in under a second).
+   */
   function attemptRecent(account: { webId: string; issuer?: string }) {
     setError(null);
     setIssuerChoices(null);
-    login(account.webId, account.issuer ? { issuer: account.issuer } : undefined).catch(
-      fail,
-    );
+    login(account.webId, { issuer: account.issuer, silentFirst: true }).catch(fail);
   }
 
   return (

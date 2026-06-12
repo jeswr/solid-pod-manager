@@ -189,6 +189,73 @@ describe("WebIdDPoPTokenProvider refresh tokens", () => {
     expect(getCode).toHaveBeenCalledTimes(1);
   });
 
+  it("login(issuer) is interactive-first: no prompt=none request on an explicit login", async () => {
+    // A strict server (oidc-provider semantics): prompt=none would bounce with
+    // login_required. Interactive-first must never send it.
+    as = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      enforceOfflineAccessConsent: true,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const { provider, getCode } = makeProvider();
+
+    await provider.login(new URL("https://as.test"));
+
+    // ONE navigation, straight to the interactive URL — the visible
+    // authorize → callback.html?error=login_required → authorize bounce is gone.
+    expect(getCode).toHaveBeenCalledTimes(1);
+    expect(as.authorizationRequests).toHaveLength(1);
+    expect(as.authorizationRequests[0]?.prompt).toBe("consent"); // OIDC Core §11: offline_access needs consent
+    expect(as.authorizationRequests[0]?.scope).toBe("openid webid offline_access");
+  });
+
+  it("login(issuer) keeps prompt=consent off when the server has no offline_access", async () => {
+    as = await createFakeAuthorizationServer({
+      scopesSupported: ["openid", "webid"],
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const { provider, getCode } = makeProvider();
+
+    await provider.login(new URL("https://as.test"));
+
+    expect(getCode).toHaveBeenCalledTimes(1);
+    expect(as.authorizationRequests[0]?.prompt).toBeNull(); // plain interactive request
+    expect(as.authorizationRequests[0]?.scope).toBe("openid webid");
+  });
+
+  it("login(issuer, { silentFirst: true }) keeps the silent attempt for one-click re-login", async () => {
+    as = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      enforceOfflineAccessConsent: true,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const { provider, getCode } = makeProvider();
+
+    await provider.login(new URL("https://as.test"), { silentFirst: true });
+
+    // prompt=none first, login_required, interactive retry — the PR #13 shape.
+    expect(getCode).toHaveBeenCalledTimes(2);
+    expect(as.authorizationRequests[0]?.prompt).toBe("none");
+    expect(as.authorizationRequests.at(-1)?.prompt).toBe("consent");
+  });
+
+  it("the 401-upgrade path stays silent-first (background re-auth must not force a login page)", async () => {
+    as = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      enforceOfflineAccessConsent: true,
+    });
+    vi.stubGlobal("fetch", as.fetch);
+    const { provider, getCode } = makeProvider();
+
+    await provider.upgrade(new Request("https://pod.test/private"));
+
+    expect(getCode).toHaveBeenCalledTimes(2); // silent attempt → login_required → interactive retry
+    expect(as.authorizationRequests[0]?.prompt).toBe("none");
+  });
+
   it("falls back to a fresh authorization when the refresh grant fails", async () => {
     const { provider, getCode } = makeProvider();
 

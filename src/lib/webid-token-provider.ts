@@ -9,6 +9,14 @@
  * WebID and reads `solid:oidcIssuer`, then asks `chooseIssuer` when several are
  * advertised — never silently the first.
  *
+ * APP-SPECIFIC divergence (candidate for upstream): {@link WebIdDPoPTokenProvider.login}
+ * goes INTERACTIVE-FIRST by default. An app-initiated login is explicit user
+ * intent with (usually) no IdP session, so the upstream silent-first pattern
+ * (PR #13) makes the user watch the popup bounce authorize →
+ * callback.html?error=login_required → authorize before the login page.
+ * Background paths (401 upgrade/renewal) keep silent-first: there the IdP
+ * cookie usually lives and `prompt=none` succeeds without bothering the user.
+ *
  * Two app-supplied callbacks drive identity:
  *  - `getWebId()`   — how the app states whose WebID a 401-upgrade is for
  *                     (the Pod Manager seeds it from its login/restore state).
@@ -158,6 +166,33 @@ interface IssuerSession {
   webId: string | undefined;
 }
 
+/**
+ * Whether a code flow tries `prompt=none` before the interactive request.
+ *
+ * - `"silent-first"` — the upstream PR #13 pattern: try `prompt=none`; on
+ *   `login_required` / `interaction_required` / `consent_required` retry
+ *   interactively in the same popup. Right for BACKGROUND re-auth (the 401
+ *   upgrade/renewal path), where the IdP cookie usually lives and the user
+ *   should not see a login page they don't need.
+ * - `"interactive"` — skip the doomed silent attempt and navigate the popup
+ *   straight to the interactive authorize URL (still `prompt=consent` when
+ *   opting into offline_access, OIDC Core §11). Right for EXPLICIT
+ *   user-initiated logins, where there is (almost always) no IdP session and
+ *   the silent hop is just a visible callback.html flash before the login page.
+ */
+type AuthorizeMode = "silent-first" | "interactive";
+
+export interface LoginOptions {
+  /**
+   * Try `prompt=none` before the interactive request. Default `false`:
+   * an app-initiated {@link WebIdDPoPTokenProvider.login} is explicit user
+   * intent, so the popup goes straight to the login page. Pass `true` for
+   * one-click re-login surfaces (e.g. a recent-account chip) where a live IdP
+   * session is likely and silent success means zero typing.
+   */
+  silentFirst?: boolean;
+}
+
 /** Refresh this much before the reported expiry to absorb clock skew. */
 const EXPIRY_SKEW_MS = 30_000;
 
@@ -264,10 +299,19 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * prompting), drives the code flow through the cached-session machinery
    * (instant when a fresh session exists; popup otherwise), and reports the
    * authenticated WebID from the ID token when the server states one.
+   *
+   * INTERACTIVE-FIRST by default (app-specific divergence from the upstream
+   * silent-first pattern; see the module docs): the silent `prompt=none`
+   * attempt is skipped unless {@link LoginOptions.silentFirst} asks for it.
    */
-  async login(issuer: URL): Promise<{ webId: string | undefined }> {
+  async login(
+    issuer: URL,
+    options: LoginOptions = {},
+  ): Promise<{ webId: string | undefined }> {
     this.#issuer = Promise.resolve(issuer);
-    const session = await this.#getSession(issuer, this.#authSignal);
+    const mode: AuthorizeMode =
+      options.silentFirst === true ? "silent-first" : "interactive";
+    const session = await this.#getSession(issuer, this.#authSignal, mode);
     return { webId: session.webId };
   }
 
@@ -325,12 +369,18 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   /**
    * Reuse the (possibly in-flight) session for the issuer; renew an expired one
    * (transparently via the refresh-token grant where possible); else run the
-   * code flow once.
+   * code flow once, with `mode` deciding whether that flow tries `prompt=none`
+   * first (background re-auth) or goes straight to the login page (explicit
+   * login).
    */
-  async #getSession(issuer: URL, signal: AbortSignal): Promise<IssuerSession> {
+  async #getSession(
+    issuer: URL,
+    signal: AbortSignal,
+    mode: AuthorizeMode = "silent-first",
+  ): Promise<IssuerSession> {
     const cached = this.#sessions.get(issuer.href);
     if (cached === undefined) {
-      return this.#begin(issuer, this.#authenticate(issuer, signal));
+      return this.#begin(issuer, this.#authenticate(issuer, signal, mode));
     }
 
     const session = await cached;
@@ -339,9 +389,9 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     // Renew, unless a concurrent caller already replaced the expired session.
     if (this.#sessions.get(issuer.href) === cached) {
       this.#sessions.delete(issuer.href);
-      return this.#begin(issuer, this.#renew(issuer, session, signal));
+      return this.#begin(issuer, this.#renew(issuer, session, signal, mode));
     }
-    return this.#getSession(issuer, signal);
+    return this.#getSession(issuer, signal, mode);
   }
 
   /** Cache the in-flight work; evict on failure so the next request can retry. */
@@ -366,15 +416,17 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     issuer: URL,
     expired: IssuerSession,
     signal: AbortSignal,
+    mode: AuthorizeMode = "silent-first",
   ): Promise<IssuerSession> {
     if (expired.refreshToken === undefined) {
-      return this.#authenticate(issuer, signal);
+      return this.#authenticate(issuer, signal, mode);
     }
     try {
       return await this.#refresh(issuer, expired, expired.refreshToken);
     } catch {
-      // The fallback stays silent while the IdP cookie lives (prompt=none first).
-      return this.#authenticate(issuer, signal);
+      // On the background path the fallback stays silent while the IdP cookie
+      // lives (prompt=none first); an explicit login goes interactive at once.
+      return this.#authenticate(issuer, signal, mode);
     }
   }
 
@@ -432,9 +484,15 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * and a STATIC-vs-DYNAMIC client branch. Flow: discovery → client identity
    * (static Client Identifier Document when {@link WebIdDPoPTokenProviderOptions.clientId}
    * is set, else dynamic client registration) → PKCE/DPoP authorization-code
-   * grant, with the `prompt=none` silent retry preserved.
+   * grant. In `"silent-first"` mode the `prompt=none` attempt + interactive
+   * retry are preserved verbatim; in `"interactive"` mode (explicit login) the
+   * first navigation IS the interactive request.
    */
-  async #authenticate(issuer: URL, signal: AbortSignal): Promise<IssuerSession> {
+  async #authenticate(
+    issuer: URL,
+    signal: AbortSignal,
+    mode: AuthorizeMode = "silent-first",
+  ): Promise<IssuerSession> {
     const http = this.#httpOptions(issuer, signal);
 
     const discoveryResponse = await oauth.discoveryRequest(issuer, http);
@@ -510,7 +568,10 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       ? await oauth.calculatePKCECodeChallenge(codeVerifier)
       : codeVerifier;
 
-    const authorizationUrl = buildAuthorizationUrl(true);
+    // Explicit logins go straight to the interactive URL; background re-auth
+    // tries prompt=none first (see AuthorizeMode).
+    const silentFirst = mode === "silent-first";
+    const authorizationUrl = buildAuthorizationUrl(silentFirst);
     if (usePkce) authorizationUrl.searchParams.set("code_challenge", codeChallenge);
 
     let authorizationCodeParams: URLSearchParams;
@@ -524,11 +585,12 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       );
     } catch (e) {
       if (
-        (e instanceof oauth.AuthorizationResponseError &&
+        silentFirst &&
+        ((e instanceof oauth.AuthorizationResponseError &&
           (e.error === "interaction_required" ||
             e.error === "consent_required" ||
             e.error === "login_required")) ||
-        isEssMissingIssInteractionNeeded(e)
+          isEssMissingIssInteractionNeeded(e))
       ) {
         // The IdP needs the user to interact: retry once without `prompt=none`.
         const retryUrl = buildAuthorizationUrl(false);

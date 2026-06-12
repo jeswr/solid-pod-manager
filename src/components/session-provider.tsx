@@ -12,8 +12,10 @@
  * WebID OR a bare issuer URL in one smart input (`src/lib/login-input.ts`).
  * The popup is opened SYNCHRONOUSLY in the click handler (user activation),
  * then the protocol layer (`WebIdDPoPTokenProvider` — the vendored PR #11–#14
- * token+refresh logic) drives `prompt=none` first and the interactive flow in
- * that same window. Issuer-first logins learn the WebID from the ID token's
+ * token+refresh logic) navigates it straight to the INTERACTIVE authorize URL
+ * (explicit logins skip the doomed `prompt=none` hop; recent-account clicks
+ * and background 401 re-auth keep silent-first, retrying interactively in the
+ * same window). Issuer-first logins learn the WebID from the ID token's
  * `webid` claim. Tokens live in memory only (AGENTS.md): a reload re-runs
  * silently while the IdP cookie lives.
  *
@@ -60,8 +62,14 @@ export interface Session {
    * the top so the user activation is never lost. Resolves once
    * authenticated; throws on failure ({@link AmbiguousIssuerError} when the
    * WebID advertises several issuers and `opts.issuer` was not given).
+   *
+   * Interactive-first by default: an explicit sign-in has (almost always) no
+   * IdP session, so the popup navigates straight to the login page instead of
+   * bouncing through a doomed `prompt=none` attempt. `opts.silentFirst` keeps
+   * the silent attempt for one-click surfaces where a live IdP session is
+   * likely (the recent-account chips) — silent success there means zero typing.
    */
-  login(input: string, opts?: { issuer?: string }): Promise<void>;
+  login(input: string, opts?: { issuer?: string; silentFirst?: boolean }): Promise<void>;
   /**
    * Begin login against a KNOWN issuer (provider picker / "Get started" with
    * the home provider — works for a fresh human with no WebID). Call directly
@@ -225,13 +233,19 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
    * The popup MUST already be open (synchronously, by the caller).
    */
   const completeLogin = useCallback(
-    async (issuer: string, knownWebId: string | undefined) => {
+    async (issuer: string, knownWebId: string | undefined, silentFirst = false) => {
       setStatus("authenticating");
       try {
         const provider = await providerReadyRef.current;
         if (!provider) throw new Error("Auth is not initialised yet");
 
-        const { webId: statedWebId } = await provider.login(new URL(issuer));
+        const { webId: statedWebId } = await provider.login(new URL(issuer), {
+          silentFirst,
+        });
+        // A cached fresh session resolves login() without running the code
+        // flow — nothing ever navigates the popup, so close the blank window
+        // the click handler opened.
+        getController().closeIfOpen();
         const id = knownWebId ?? statedWebId;
         if (!id) throw new NoWebIdFromProviderError(issuer);
 
@@ -267,7 +281,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   );
 
   const login = useCallback(
-    async (input: string, opts?: { issuer?: string }) => {
+    async (input: string, opts?: { issuer?: string; silentFirst?: boolean }) => {
       // SYNCHRONOUS popup open — first statement, inside the user activation.
       getController().open();
       setStatus("authenticating");
@@ -290,7 +304,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         } else {
           issuer ??= target.issuer;
         }
-        await completeLogin(issuer, knownWebId);
+        await completeLogin(issuer, knownWebId, opts?.silentFirst ?? false);
       } catch (e) {
         getController().closeIfOpen();
         setStatus("logged-out");

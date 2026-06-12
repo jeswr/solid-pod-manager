@@ -129,10 +129,13 @@ export function LoginScreen() {
   }
 
   /**
-   * Recent-account click: WebID + remembered issuer. Unlike a typed sign-in,
-   * this keeps the silent `prompt=none` attempt first — the user signed in
-   * here before, so a live IdP session is likely and silent success means
-   * zero typing (the popup closes itself in under a second).
+   * Recent-account click: WebID + remembered issuer. When the app still holds
+   * a session (or refresh token) for that issuer, NO popup opens — the login
+   * completes with fetches alone (the session probe in `session.login`).
+   * Otherwise, unlike a typed sign-in, this keeps the silent `prompt=none`
+   * attempt first — the user signed in here before, so a live IdP session is
+   * likely and silent success means zero typing (the popup closes itself in
+   * under a second).
    */
   function attemptRecent(account: { webId: string; issuer?: string }) {
     setError(null);

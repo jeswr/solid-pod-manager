@@ -23,7 +23,7 @@
  */
 
 /** The rendering a resource can be shown in. */
-export type ViewMode = "typed" | "data" | "table" | "source";
+export type ViewMode = "typed" | "data" | "table" | "source" | "edit";
 
 /** Inputs that decide the available modes (all derivable without I/O). */
 export interface ViewModeInputs {
@@ -36,6 +36,11 @@ export interface ViewModeInputs {
    * instances (A5)? When true, a "Table" mode lists every instance as a row.
    */
   hasClassTable?: boolean;
+  /**
+   * Can the resource be edited in place (Wave 5)? True for any RDF resource the
+   * app can offer a form for; when true an "Edit" mode is added to the tray.
+   */
+  canEdit?: boolean;
 }
 
 /** A user-facing mode option with stable id + label + lucide icon name. */
@@ -52,6 +57,7 @@ const OPTION_META: Record<ViewMode, Omit<ViewModeOption, "mode">> = {
   data: { label: "Data", icon: "table" },
   table: { label: "Table", icon: "table-rows" },
   source: { label: "Source", icon: "external-link" },
+  edit: { label: "Edit", icon: "pencil" },
 };
 
 /**
@@ -66,6 +72,7 @@ export function availableViewModes(inputs: ViewModeInputs): ViewMode[] {
   if (inputs.hasTypedView) modes.push("typed");
   modes.push("data");
   if (inputs.hasClassTable) modes.push("table");
+  if (inputs.canEdit) modes.push("edit");
   if (inputs.hasSource) modes.push("source");
   // Nothing to switch between (only the raw `data` table) → no tray.
   return modes.length > 1 ? modes : [];

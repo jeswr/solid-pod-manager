@@ -1,0 +1,168 @@
+// AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate; see docs/MODEL-PROVENANCE.md
+"use client";
+
+/**
+ * `useFormEdit` — the editing state machine shared by the inline typed-view
+ * editor and the `FormRenderer`. It seeds field values from the read dataset,
+ * tracks dirty/saving/error state, and saves the whole subject back through the
+ * conditional-write engine (`forms/write.ts`), threading the ETag so concurrent
+ * edits surface as a clear "changed elsewhere" instead of clobbering.
+ *
+ * On a successful save it refreshes its dataset + ETag from the re-read so a
+ * second edit chains cleanly. On `stale` it asks the caller to reload (via
+ * `onReload`); on `forbidden`/`validation`/`error` it surfaces the message.
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { DatasetCore } from "@rdfjs/types";
+import type { FieldSpec } from "@/lib/forms/field-types";
+import { applyFieldEdits, readFieldValue } from "@/lib/forms/subject-edit";
+import { saveFormEdits, type SaveResult } from "@/lib/forms/write";
+import { shouldRebase } from "@/lib/forms/rebase";
+
+export type SaveStatus = "idle" | "saving" | "saved" | "error";
+
+export interface UseFormEditArgs {
+  url: string;
+  /** The parsed dataset that was read (source of truth for unrelated triples). */
+  dataset: DatasetCore;
+  subject: string;
+  fields: readonly FieldSpec[];
+  /** ETag from the read, for `If-Match`. */
+  etag: string | null;
+  /** Called when a save reports `stale` — the caller should re-fetch. */
+  onReload?: () => void;
+  /**
+   * Permit an unconditional write when the resource has no ETag (some servers
+   * emit none). Off by default — without an ETag a write can't be made safe, so
+   * the engine refuses unless the caller knowingly opts in.
+   */
+  allowUnconditional?: boolean;
+  /** Test-only fetch override; **omit in production**. */
+  fetchImpl?: typeof fetch;
+}
+
+export interface FormEditState {
+  values: Record<string, string>;
+  setValue: (id: string, value: string) => void;
+  dirty: boolean;
+  status: SaveStatus;
+  /** A general (non-field) error message. */
+  error?: string;
+  /** Per-field validation errors, keyed by field id. */
+  fieldErrors: Record<string, string>;
+  save: () => Promise<void>;
+  reset: () => void;
+}
+
+/** Seed the editable values from the dataset. */
+function seedValues(
+  dataset: DatasetCore,
+  subject: string,
+  fields: readonly FieldSpec[],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of fields) out[f.id] = readFieldValue(dataset, subject, f);
+  return out;
+}
+
+export function useFormEdit(args: UseFormEditArgs): FormEditState {
+  const { url, subject, fields, fetchImpl, onReload, allowUnconditional } = args;
+  // Local baseline (dataset + ETag) we save against. Initialised from props and
+  // rebased below whenever the parent supplies a fresh read (e.g. after a stale
+  // save triggers a reload), so the next save never reuses a stale ETag.
+  const [dataset, setDataset] = useState(args.dataset);
+  const [etag, setEtag] = useState(args.etag);
+
+  const initial = useMemo(() => seedValues(dataset, subject, fields), [dataset, subject, fields]);
+  const [values, setValues] = useState<Record<string, string>>(initial);
+  const [status, setStatus] = useState<SaveStatus>("idle");
+  const [error, setError] = useState<string | undefined>();
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  // Keep the latest subject/fields available to the rebase effect WITHOUT making
+  // them effect dependencies — a parent re-render that merely reallocates the
+  // `fields` array (e.g. an auto-form computed inline) must NOT rebase and drop
+  // a locally-saved dataset/ETag (see `shouldRebase`).
+  const subjectRef = useRef(subject);
+  const fieldsRef = useRef(fields);
+  subjectRef.current = subject;
+  fieldsRef.current = fields;
+  // The last upstream read we adopted, to decide genuine "fresh read" changes.
+  const upstreamRef = useRef({ dataset: args.dataset, etag: args.etag });
+
+  // Rebase ONLY when the parent supplies a genuinely fresh read (a new dataset
+  // object or a changed ETag — e.g. after a "changed elsewhere" reload): adopt
+  // it as the new baseline and reseed the editor, dropping any unsaved edits
+  // (correct after such a reload).
+  useEffect(() => {
+    const next = { dataset: args.dataset, etag: args.etag };
+    if (!shouldRebase(upstreamRef.current, next)) return;
+    upstreamRef.current = next;
+    setDataset(next.dataset);
+    setEtag(next.etag);
+    setValues(seedValues(next.dataset, subjectRef.current, fieldsRef.current));
+    setFieldErrors({});
+    setError(undefined);
+    setStatus("idle");
+  }, [args.dataset, args.etag]);
+
+  const dirty = useMemo(
+    () => fields.some((f) => (values[f.id] ?? "") !== (initial[f.id] ?? "")),
+    [fields, values, initial],
+  );
+
+  const setValue = useCallback((id: string, value: string) => {
+    setValues((prev) => ({ ...prev, [id]: value }));
+    setFieldErrors((prev) => (prev[id] ? { ...prev, [id]: "" } : prev));
+    setStatus("idle");
+    setError(undefined);
+  }, []);
+
+  const reset = useCallback(() => {
+    setValues(initial);
+    setFieldErrors({});
+    setError(undefined);
+    setStatus("idle");
+  }, [initial]);
+
+  const save = useCallback(async () => {
+    setStatus("saving");
+    setError(undefined);
+    setFieldErrors({});
+    // Only send the dirty fields (others are left exactly as read).
+    const changed: Record<string, string> = {};
+    for (const f of fields) {
+      if ((values[f.id] ?? "") !== (initial[f.id] ?? "")) changed[f.id] = values[f.id] ?? "";
+    }
+    const result: SaveResult = await saveFormEdits(url, dataset, subject, fields, changed, {
+      etag,
+      allowUnconditional,
+      fetchImpl,
+    });
+
+    if (result.ok) {
+      setEtag(result.etag);
+      // Apply the edits to our local dataset so a subsequent edit chains off the
+      // new baseline without a refetch, and RESEED values from it so a field
+      // whose stored form is normalised (e.g. tel: `+1 555` → `+1555`, datetime
+      // → ISO) clears its dirty flag instead of looking unsaved.
+      const next = applyFieldEdits(dataset, subject, fields, changed);
+      setDataset(next);
+      setValues(seedValues(next, subject, fields));
+      setStatus("saved");
+      return;
+    }
+
+    setStatus("error");
+    if (result.reason === "validation" && result.fieldId) {
+      setFieldErrors({ [result.fieldId]: result.message });
+    } else if (result.reason === "stale") {
+      setError(result.message);
+      onReload?.();
+    } else {
+      setError(result.message);
+    }
+  }, [url, dataset, subject, fields, values, initial, etag, allowUnconditional, fetchImpl, onReload]);
+
+  return { values, setValue, dirty, status, error, fieldErrors, save, reset };
+}

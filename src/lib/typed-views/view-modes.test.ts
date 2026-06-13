@@ -85,6 +85,27 @@ describe("shouldShowSwitcher", () => {
   });
 });
 
+describe("availableViewModes — edit (Wave 5)", () => {
+  it("adds edit after table and before source when canEdit", () => {
+    expect(
+      availableViewModes({
+        hasTypedView: true,
+        hasSource: true,
+        hasClassTable: true,
+        canEdit: true,
+      }),
+    ).toEqual(["typed", "data", "table", "edit", "source"]);
+  });
+
+  it("shows the tray for an untyped resource purely because it is editable", () => {
+    expect(availableViewModes({ hasTypedView: false, hasSource: false, canEdit: true })).toEqual([
+      "data",
+      "edit",
+    ]);
+    expect(shouldShowSwitcher({ hasTypedView: false, hasSource: false, canEdit: true })).toBe(true);
+  });
+});
+
 describe("viewModeOptions", () => {
   it("resolves modes to options with labels and icon names, preserving order", () => {
     const opts = viewModeOptions({ hasTypedView: true, hasSource: true, hasClassTable: true });

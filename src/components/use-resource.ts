@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { parseRdf } from "@jeswr/fetch-rdf";
 import type { DatasetCore } from "@rdfjs/types";
 import { useSession } from "@/components/session-provider";
@@ -25,6 +25,11 @@ export interface LoadedResource {
   dataset?: DatasetCore;
   /** Optional Type-Index category id the resource was discovered under. */
   categoryId?: string;
+  /**
+   * The resource's ETag from the GET, kept for a later conditional write
+   * (inline editing — Wave 5). Absent when the server sent none.
+   */
+  etag?: string | null;
 }
 
 /**
@@ -37,8 +42,12 @@ export function useResource(url: string): {
   data?: LoadedResource;
   error?: Error;
   loading: boolean;
+  /** Re-fetch the resource (e.g. after a stale-ETag write conflict). */
+  reload: () => void;
 } {
   const { status } = useSession();
+  const [refresh, setRefresh] = useState(0);
+  const reload = useCallback(() => setRefresh((n) => n + 1), []);
   const [state, setState] = useState<{
     data?: LoadedResource;
     error?: Error;
@@ -51,7 +60,9 @@ export function useResource(url: string): {
     setState({ loading: true });
 
     (async () => {
-      const res = await fetch(url, { headers: { accept: "*/*" } });
+      // Always revalidate (no-cache) so a reload after an edit reads the fresh
+      // body + ETag rather than a heuristically-cached copy (see rdf-read.ts).
+      const res = await fetch(url, { headers: { accept: "*/*", "cache-control": "no-cache" } });
       if (!res.ok) {
         throw Object.assign(new Error(`Request failed (${res.status})`), {
           status: res.status,
@@ -62,7 +73,13 @@ export function useResource(url: string): {
       const size = sizeHeader ? Number(sizeHeader) : undefined;
       const viewer = chooseViewer(contentType, url);
 
-      const loaded: LoadedResource = { url, viewer, contentType, size };
+      const loaded: LoadedResource = {
+        url,
+        viewer,
+        contentType,
+        size,
+        etag: res.headers.get("etag"),
+      };
 
       if (viewer.kind === "rdf") {
         const body = await res.text();
@@ -88,7 +105,7 @@ export function useResource(url: string): {
     return () => {
       cancelled = true;
     };
-  }, [url, status]);
+  }, [url, status, refresh]);
 
-  return state;
+  return { ...state, reload };
 }

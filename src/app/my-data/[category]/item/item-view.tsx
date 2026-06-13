@@ -70,7 +70,7 @@ function ItemDetail({
   categoryId: string;
   categoryLabel?: string;
 }) {
-  const { data, error, loading } = useResource(url);
+  const { data, error, loading, reload } = useResource(url);
   const name = nameFromUrl(url);
 
   return (
@@ -165,7 +165,7 @@ function ItemDetail({
             <Skeleton className="h-40 w-full rounded-2xl" />
           </div>
         ) : (
-          <ResourceViewer resource={data} />
+          <ResourceViewer resource={data} onReload={reload} />
         )}
       </section>
     </div>

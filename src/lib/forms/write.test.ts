@@ -84,6 +84,31 @@ describe("saveFieldEdit — conditional write round-trip", () => {
     expect(result).toMatchObject({ ok: false, reason: "validation" });
   });
 
+  it("refuses an unconditional write when no ETag is available (safe default)", async () => {
+    const pod = createMemoryPod();
+    await seed(pod);
+    const { dataset } = await readResource(URL, pod.fetch);
+    const before = pod.putCount;
+    const result = await saveFieldEdit(URL, dataset, SUBJECT, nameField, "X", {
+      fetchImpl: pod.fetch,
+      etag: null,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "stale" });
+    expect(pod.putCount).toBe(before); // nothing was written
+  });
+
+  it("allows an unconditional write when the caller opts in", async () => {
+    const pod = createMemoryPod();
+    await seed(pod);
+    const { dataset } = await readResource(URL, pod.fetch);
+    const result = await saveFieldEdit(URL, dataset, SUBJECT, nameField, "Forced", {
+      fetchImpl: pod.fetch,
+      etag: null,
+      allowUnconditional: true,
+    });
+    expect(result.ok).toBe(true);
+  });
+
   it("reports `forbidden` on a 403", async () => {
     // A fetch that always 403s on write.
     const forbiddenFetch = (async (_url: string, init?: RequestInit) => {

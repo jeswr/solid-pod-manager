@@ -12,10 +12,10 @@
  * second edit chains cleanly. On `stale` it asks the caller to reload (via
  * `onReload`); on `forbidden`/`validation`/`error` it surfaces the message.
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DatasetCore } from "@rdfjs/types";
 import type { FieldSpec } from "@/lib/forms/field-types";
-import { readFieldValue } from "@/lib/forms/subject-edit";
+import { applyFieldEdits, readFieldValue } from "@/lib/forms/subject-edit";
 import { saveFormEdits, type SaveResult } from "@/lib/forms/write";
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -60,6 +60,9 @@ function seedValues(
 
 export function useFormEdit(args: UseFormEditArgs): FormEditState {
   const { url, subject, fields, fetchImpl, onReload } = args;
+  // Local baseline (dataset + ETag) we save against. Initialised from props and
+  // rebased below whenever the parent supplies a fresh read (e.g. after a stale
+  // save triggers a reload), so the next save never reuses a stale ETag.
   const [dataset, setDataset] = useState(args.dataset);
   const [etag, setEtag] = useState(args.etag);
 
@@ -68,6 +71,18 @@ export function useFormEdit(args: UseFormEditArgs): FormEditState {
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | undefined>();
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  // Rebase on a fresh read from the parent: adopt the new dataset/ETag and
+  // reseed the editor to the new baseline (dropping any unsaved edits, which is
+  // correct after a "changed elsewhere" reload).
+  useEffect(() => {
+    setDataset(args.dataset);
+    setEtag(args.etag);
+    setValues(seedValues(args.dataset, subject, fields));
+    setFieldErrors({});
+    setError(undefined);
+    setStatus("idle");
+  }, [args.dataset, args.etag, subject, fields]);
 
   const dirty = useMemo(
     () => fields.some((f) => (values[f.id] ?? "") !== (initial[f.id] ?? "")),
@@ -104,10 +119,13 @@ export function useFormEdit(args: UseFormEditArgs): FormEditState {
 
     if (result.ok) {
       setEtag(result.etag);
-      // Apply the edits to our local dataset so dirty-state resets cleanly and a
-      // subsequent edit chains off the new baseline without a refetch.
-      const { applyFieldEdits } = await import("@/lib/forms/subject-edit");
-      setDataset(applyFieldEdits(dataset, subject, fields, changed));
+      // Apply the edits to our local dataset so a subsequent edit chains off the
+      // new baseline without a refetch, and RESEED values from it so a field
+      // whose stored form is normalised (e.g. tel: `+1 555` → `+1555`, datetime
+      // → ISO) clears its dirty flag instead of looking unsaved.
+      const next = applyFieldEdits(dataset, subject, fields, changed);
+      setDataset(next);
+      setValues(seedValues(next, subject, fields));
       setStatus("saved");
       return;
     }

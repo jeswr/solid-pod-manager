@@ -38,10 +38,27 @@ export type SaveResult =
 export interface SaveOptions {
   /** Test-only fetch override; **omit in production** so the auth-patched global runs. */
   fetchImpl?: typeof fetch;
-  /** ETag from the read, sent as `If-Match` (omit only for a deliberate force). */
+  /** ETag from the read, sent as `If-Match`. */
   etag?: string | null;
+  /**
+   * Allow an UNCONDITIONAL write when no `etag` is available. Off by default:
+   * without an ETag a write cannot be made safe against a concurrent edit, so we
+   * refuse rather than silently turn the advertised conditional flow into a
+   * blind overwrite. A caller that genuinely wants to force (e.g. a brand-new
+   * resource, or a server that emits no ETags) opts in explicitly.
+   */
+  allowUnconditional?: boolean;
   /** Turtle prefixes (defaults to {@link FORM_PREFIXES}). */
   prefixes?: Record<string, string>;
+}
+
+/** A SaveResult refusing an unconditional write when no ETag is available. */
+function noEtagResult(): SaveResult {
+  return {
+    ok: false,
+    reason: "stale",
+    message: "This item has no version tag, so it can't be saved safely. Reload it and try again.",
+  };
 }
 
 /** Map a thrown write/validation error to a structured {@link SaveResult}. */
@@ -80,6 +97,7 @@ export async function saveFieldEdit(
   rawValue: string,
   opts: SaveOptions = {},
 ): Promise<SaveResult> {
+  if (!opts.etag && !opts.allowUnconditional) return noEtagResult();
   try {
     const next = applyFieldEdit(dataset, subject, spec, rawValue);
     const { etag } = await writeResource(url, next, {
@@ -106,6 +124,7 @@ export async function saveFormEdits(
   values: Readonly<Record<string, string>>,
   opts: SaveOptions = {},
 ): Promise<SaveResult> {
+  if (!opts.etag && !opts.allowUnconditional) return noEtagResult();
   try {
     const next = applyFieldEdits(dataset, subject, fields, values);
     const { etag } = await writeResource(url, next, {

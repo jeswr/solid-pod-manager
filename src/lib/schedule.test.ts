@@ -368,6 +368,35 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
     expect(merged).toEqual([{ attendee: DAN, option: OPT_A, response: "yes" }]);
   });
 
+  it("SSRF backstop: even if the actor advertises loopback storage, the content body is never fetched", async () => {
+    // Defence-in-depth: the actor's profile claims a 127.0.0.1 storage and the
+    // content is "within" it, so contentBelongsToActor returns true — but the
+    // final assertValidTargetUrl in readRsvpResourceAt must still block the GET.
+    const EVIL = "https://idp.example/eve#me";
+    const EVIL_DOC = "https://idp.example/eve";
+    const LOOPBACK_RESP = "http://127.0.0.1/eve/r.ttl";
+    const requested: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      requested.push(String(input));
+      if (String(input) === EVIL_DOC) {
+        return new Response(
+          `@prefix pim: <http://www.w3.org/ns/pim/space#> . <${EVIL}> pim:storage <http://127.0.0.1/> .`,
+          { status: 200, headers: { "content-type": "text/turtle" } },
+        );
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+    const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
+    const merged = await aggregatePollRsvps(
+      poll,
+      POLL_URL,
+      [{ actor: EVIL, object: POLL_URL, content: LOOPBACK_RESP }],
+      fetchImpl,
+    );
+    expect(merged).toEqual([]);
+    expect(requested).not.toContain(LOOPBACK_RESP); // blocked by the final target guard
+  });
+
   it("ignores Offers for a different poll and never fetches an unsafe response URL", async () => {
     const requested: string[] = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {

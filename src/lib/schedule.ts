@@ -450,6 +450,12 @@ function sameOrigin(a: string, b: string): boolean {
  * exactly like every other cross-pod read: `assertValidTargetUrl` (https-only,
  * no loopback/private/metadata) + `redirect: "manual"`. Returns `[]` on any
  * failure (fail closed — an unresolvable actor contributes no trusted storage).
+ *
+ * KNOWN LIMITATION: we read `pim:storage` from the WebID document only, not from
+ * extended profile documents linked via `rdfs:seeAlso`/`pim:preferencesFile`. An
+ * actor who advertises storage solely in an extended doc would fall back to the
+ * same-WebID-origin check; their split-origin vote could be dropped. Acceptable
+ * for now (the common case advertises storage on the card).
  */
 async function actorStorages(webId: string, fetchImpl?: typeof fetch): Promise<string[]> {
   let docUrl: string;
@@ -460,9 +466,16 @@ async function actorStorages(webId: string, fetchImpl?: typeof fetch): Promise<s
   }
   if (!isValidTargetUrl(docUrl)) return [];
   try {
-    // GET the validated document URL (no fragment), then read storages from the
-    // WebID subject (the `pim:storage` triples hang off the fragment subject).
-    const { dataset } = await freshRdf(docUrl, noFollowFetch(fetchImpl));
+    // GET the validated document URL and read storages from the WebID subject
+    // (the `pim:storage` triples hang off the fragment subject). We FOLLOW
+    // redirects here (like the app's normal profile reads) because WebID
+    // dereferencing routinely 303s; forcing no-redirect would drop legitimate
+    // split-origin actors. This is SAFE: storages discovered here are only used
+    // to decide membership, and the response resource itself is independently
+    // re-validated by `assertValidTargetUrl` in `readRsvpResourceAt` before any
+    // body is fetched — so a malicious/redirected profile cannot make us GET an
+    // unsafe response URL.
+    const { dataset } = await freshRdf(docUrl, fetchImpl);
     return readProfile(webId, dataset).storages;
   } catch {
     return [];

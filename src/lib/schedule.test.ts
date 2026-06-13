@@ -310,10 +310,22 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
     expect(merged).toEqual([]);
   });
 
-  it("anti-impersonation: drops an Offer whose content origin != the actor origin", async () => {
+  it("anti-impersonation: drops an Offer whose content is not in the actor's pod", async () => {
     // Attacker (bob) POSTs an Offer claiming actor=CAROL but hosts the response
-    // in bob's own pod. The origin binding must reject it WITHOUT fetching.
-    const fetchImpl = vi.fn(async () => new Response("x", { status: 200 })) as unknown as typeof fetch;
+    // in bob's own pod. CAROL's profile advertises only carol.example storage, so
+    // the bob-hosted content does NOT belong to CAROL → rejected, never fetched.
+    const requested: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requested.push(url);
+      if (url === "https://carol.example/profile/card") {
+        return new Response(
+          `@prefix pim: <http://www.w3.org/ns/pim/space#> . <${CAROL}> pim:storage <https://carol.example/> .`,
+          { status: 200, headers: { "content-type": "text/turtle" } },
+        );
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
     const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
     const merged = await aggregatePollRsvps(
       poll,
@@ -322,23 +334,68 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
       fetchImpl,
     );
     expect(merged).toEqual([]);
-    expect(fetchImpl).not.toHaveBeenCalled(); // origin mismatch → never fetched
+    expect(requested).not.toContain(BOB_RESP); // the bob-hosted response never fetched
   });
 
-  it("ignores Offers for a different poll and refuses unsafe response URLs", async () => {
-    const fetchImpl = vi.fn(async () => new Response("x", { status: 200 })) as unknown as typeof fetch;
+  it("accepts a response in the actor's advertised pim:storage even on a different WebID origin", async () => {
+    // Dan's WebID is on idp.example but his pod is on pods.example (the common
+    // split-origin Solid config). A response under his advertised storage counts.
+    const DAN = "https://idp.example/dan#me";
+    const DAN_DOC = "https://idp.example/dan";
+    const DAN_STORAGE = "https://pods.example/dan/";
+    const DAN_RESP = "https://pods.example/dan/schedule-responses/r.ttl";
+    const respTtl = rsvpTtl({ subject: DAN_RESP, object: POLL_URL, attendee: DAN, option: OPT_A });
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === DAN_DOC) {
+        return new Response(
+          `@prefix pim: <http://www.w3.org/ns/pim/space#> . <${DAN}> pim:storage <${DAN_STORAGE}> .`,
+          { status: 200, headers: { "content-type": "text/turtle" } },
+        );
+      }
+      if (url === DAN_RESP) {
+        return new Response(respTtl, { status: 200, headers: { "content-type": "text/turtle" } });
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+    const poll: Poll = { name: "p", options: [OPT_A], invitees: [DAN], rsvps: [], organizer: CAROL };
+    const merged = await aggregatePollRsvps(
+      poll,
+      POLL_URL,
+      [{ actor: DAN, object: POLL_URL, content: DAN_RESP }],
+      fetchImpl,
+    );
+    expect(merged).toEqual([{ attendee: DAN, option: OPT_A, response: "yes" }]);
+  });
+
+  it("ignores Offers for a different poll and never fetches an unsafe response URL", async () => {
+    const requested: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      requested.push(String(input));
+      // bob's profile advertises bob.example storage.
+      if (String(input) === "https://bob.example/profile/card") {
+        return new Response(
+          `@prefix pim: <http://www.w3.org/ns/pim/space#> . <${BOB}> pim:storage <https://bob.example/> .`,
+          { status: 200, headers: { "content-type": "text/turtle" } },
+        );
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
     const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
     const merged = await aggregatePollRsvps(
       poll,
       POLL_URL,
       [
+        // Wrong poll → filtered out before any fetch.
         { actor: BOB, object: "https://carol.example/schedule/OTHER.ttl", content: BOB_RESP },
+        // Unsafe content host (not in bob's storage, not same-origin as actor) → dropped.
         { actor: BOB, object: POLL_URL, content: "https://127.0.0.1/steal.ttl" },
       ],
       fetchImpl,
     );
     expect(merged).toEqual([]); // nothing aggregated
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(requested).not.toContain("https://127.0.0.1/steal.ttl");
+    expect(requested).not.toContain(BOB_RESP);
   });
 
   it("readRsvpResourceAt refuses an unsafe URL before fetching", async () => {

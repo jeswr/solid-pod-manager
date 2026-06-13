@@ -42,9 +42,12 @@ import {
 } from "@rdfjs/wrapper";
 import { DataFactory, Store } from "n3";
 import { freshRdf } from "./rdf-read.js";
-import { assertValidTargetUrl, noFollowFetch } from "./agent-target.js";
+import { assertValidTargetUrl, isValidTargetUrl, noFollowFetch } from "./agent-target.js";
 import { sendNotification } from "./notify-send.js";
 import { writeResource } from "./pod-data.js";
+import { readProfile } from "./profile.js";
+import { profileDocUrl } from "./profile-edit.js";
+import { isInOwnPods } from "./pod-scope.js";
 import {
   createStore,
   type ProductivityStore,
@@ -439,6 +442,44 @@ function sameOrigin(a: string, b: string): boolean {
   }
 }
 
+/**
+ * Resolve the storage roots an actor advertises (`pim:storage`) — the pods they
+ * legitimately control. Used to decide whether a response resource really
+ * belongs to the actor. The actor WebID is attacker-influenceable (it is the
+ * self-asserted `as:actor` of an inbox Offer), so the profile fetch is guarded
+ * exactly like every other cross-pod read: `assertValidTargetUrl` (https-only,
+ * no loopback/private/metadata) + `redirect: "manual"`. Returns `[]` on any
+ * failure (fail closed — an unresolvable actor contributes no trusted storage).
+ */
+async function actorStorages(webId: string, fetchImpl?: typeof fetch): Promise<string[]> {
+  let docUrl: string;
+  try {
+    docUrl = profileDocUrl(webId);
+  } catch {
+    return [];
+  }
+  if (!isValidTargetUrl(docUrl)) return [];
+  try {
+    // GET the validated document URL (no fragment), then read storages from the
+    // WebID subject (the `pim:storage` triples hang off the fragment subject).
+    const { dataset } = await freshRdf(docUrl, noFollowFetch(fetchImpl));
+    return readProfile(webId, dataset).storages;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * True iff `content` legitimately belongs to `actor`: it is same-origin with the
+ * actor's WebID OR within one of the actor's advertised `pim:storage` roots.
+ * Covers both the WebID==pod-origin case and the common Solid case where the
+ * WebID host differs from the pod host.
+ */
+function contentBelongsToActor(content: string, actor: string, storages: readonly string[]): boolean {
+  if (sameOrigin(content, actor)) return true;
+  return isInOwnPods(content, storages);
+}
+
 /** An inbox Offer relevant to aggregation: its sender (actor), object, content. */
 export interface PollOffer {
   /** The notification sender WebID (`as:actor`) — the ONLY attendee it can vote as. */
@@ -478,20 +519,35 @@ export async function aggregatePollRsvps(
   offers: readonly PollOffer[],
   fetchImpl?: typeof fetch,
 ): Promise<Rsvp[]> {
-  // Keep only Offers for THIS poll whose response resource lives in the ACTOR's
-  // OWN pod (same origin) — the origin binding is the impersonation guard.
-  const relevant = offers.filter((o) => {
-    if (o.object !== pollUrl || !o.actor || !o.content || !/^https?:/i.test(o.content)) return false;
-    return sameOrigin(o.content, o.actor);
-  });
+  // Candidate Offers: for THIS poll, with an actor + an http(s) content URL.
+  const candidates = offers.filter(
+    (o): o is PollOffer & { actor: string; content: string } =>
+      o.object === pollUrl && !!o.actor && !!o.content && /^https?:/i.test(o.content),
+  );
   // De-dupe by (actor, content) — repeated/retried Offers must not refetch.
-  const byPair = new Map<string, PollOffer>();
-  for (const o of relevant) byPair.set(`${o.actor}|${o.content}`, o);
+  const byPair = new Map<string, PollOffer & { actor: string; content: string }>();
+  for (const o of candidates) byPair.set(`${o.actor}|${o.content}`, o);
+
+  // Resolve each distinct actor's storages ONCE (the impersonation guard binds
+  // the response resource to a pod the actor actually controls).
+  const actors = [...new Set([...byPair.values()].map((o) => o.actor))];
+  const storagesByActor = new Map<string, string[]>();
+  await Promise.all(
+    actors.map(async (a) => {
+      storagesByActor.set(a, await actorStorages(a, fetchImpl));
+    }),
+  );
+
   const fetched = await Promise.all(
     [...byPair.values()].map(async (o) => {
+      // The response must belong to the actor (same WebID origin OR within one of
+      // the actor's advertised pim:storage roots) — else it is a forgery attempt.
+      if (!contentBelongsToActor(o.content, o.actor, storagesByActor.get(o.actor) ?? [])) {
+        return [] as Rsvp[];
+      }
       try {
         // Bind to the sender: only RSVPs FOR this poll BY this actor survive.
-        return await readRsvpResourceAt(o.content as string, pollUrl, o.actor as string, fetchImpl);
+        return await readRsvpResourceAt(o.content, pollUrl, o.actor, fetchImpl);
       } catch {
         return [] as Rsvp[];
       }

@@ -124,6 +124,107 @@ export class ItemReadError extends PodDataError {
   }
 }
 
+/**
+ * A recipient's WebID profile advertises no `ldp:inbox`, so there is nowhere to
+ * deliver a cross-pod notification. A clean, recoverable condition (the UI shows
+ * "this person's pod doesn't advertise an inbox"), NOT a security failure.
+ */
+export class NoInboxError extends PodDataError {
+  readonly webId: string;
+  constructor(webId: string) {
+    super(`This person's pod doesn't advertise an inbox to deliver to (${webId}).`);
+    this.name = "NoInboxError";
+    this.webId = webId;
+  }
+}
+
+/**
+ * A discovered cross-pod target URL (an LDN inbox) failed the strict outbound
+ * validator and MUST NOT be POSTed to. This is the cross-pod analogue of
+ * `pod-scope`'s SEC-1 guard: the auth-patched global `fetch` attaches the user's
+ * DPoP-bound access token + a proof minted for the REQUESTED url on a 401 retry,
+ * so POSTing to a localhost / private-range / metadata / credentials-bearing
+ * host would leak that token+proof to an attacker-chosen origin (a
+ * confused-deputy / SSRF). Fail closed — never POST when this is thrown.
+ *
+ * Carries a machine-readable {@link reason} so a security review (and tests) can
+ * assert exactly WHY a target was rejected without parsing the message.
+ */
+export type InvalidTargetReason =
+  | "not-absolute"
+  | "bad-scheme"
+  | "has-credentials"
+  | "blocked-host";
+
+export class InvalidTargetError extends PodDataError {
+  readonly target: string;
+  readonly reason: InvalidTargetReason;
+  constructor(target: string, reason: InvalidTargetReason) {
+    super(`That inbox address isn't safe to send to (${reason}): ${target}`);
+    this.name = "InvalidTargetError";
+    this.target = target;
+    this.reason = reason;
+  }
+}
+
+/** A cross-pod notification POST was rejected by the recipient's inbox. */
+export class NotificationSendError extends PodDataError {
+  readonly inbox: string;
+  /** HTTP status the recipient inbox answered with. */
+  readonly status: number;
+  constructor(inbox: string, status: number) {
+    super(`Could not deliver the notification (${status}) to ${inbox}.`);
+    this.name = "NotificationSendError";
+    this.inbox = inbox;
+    this.status = status;
+  }
+}
+
+/**
+ * An inbox/chat URL passed to a read/mark/dismiss op is not a direct child of the
+ * expected container. A confused-deputy guard (like {@link PodDataError}'s
+ * `OutOfScopeError` for the productivity store): a crafted URL must never make
+ * the app act on an arbitrary resource with the user's credentials. Fail closed.
+ */
+export class InboxScopeError extends PodDataError {
+  readonly url: string;
+  readonly container: string;
+  constructor(url: string, container: string) {
+    super(`Refusing to act on a resource outside the inbox container: ${url}`);
+    this.name = "InboxScopeError";
+    this.url = url;
+    this.container = container;
+  }
+}
+
+/**
+ * A chat container/message URL is outside the user's own pods, or a message is
+ * not a direct child of its chat container. Confused-deputy guard on the
+ * `?url=` param (and on minted message URLs). Fail closed before any I/O.
+ */
+export class ChatScopeError extends PodDataError {
+  readonly url: string;
+  readonly scope: string;
+  constructor(url: string, scope: string) {
+    super(`Refusing to act on a chat resource outside your own pods: ${url}`);
+    this.name = "ChatScopeError";
+    this.url = url;
+    this.scope = scope;
+  }
+}
+
+/**
+ * A chat message failed input validation (e.g. empty content). Distinct from
+ * {@link ChatScopeError} so callers / telemetry never misclassify a trivial
+ * empty-input case as a security scope violation.
+ */
+export class ChatMessageError extends PodDataError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatMessageError";
+  }
+}
+
 /** A pod delete (DELETE) was rejected by the server. */
 export class ResourceDeleteError extends PodDataError {
   readonly url: string;

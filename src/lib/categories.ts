@@ -55,6 +55,8 @@ const SCHEMA_HTTP = "http://schema.org/";
 const VCARD = "http://www.w3.org/2006/vcard/ns#";
 const FOAF = "http://xmlns.com/foaf/0.1/";
 const BOOKMARK = "http://www.w3.org/2002/01/bookmark#";
+const SIOC = "http://rdfs.org/sioc/ns#";
+const AS = "https://www.w3.org/ns/activitystreams#";
 
 /**
  * The canonical category list. Order within each tier is the display order.
@@ -203,6 +205,9 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${FOAF}OnlineAccount`,
       // File imports: chat history (WhatsApp).
       `${SCHEMA}Message`,
+      // First-party Chat (Wave 6) stores messages as sioc:Note / AS2.0 Note.
+      `${SIOC}Note`,
+      `${AS}Note`,
     ],
   },
 ] as const;

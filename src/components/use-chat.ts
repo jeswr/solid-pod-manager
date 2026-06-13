@@ -27,11 +27,15 @@ export function useChat(containerUrl: string | undefined): UseChat {
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
   // Scope against ALL of the user's own pods (not just the active one), so a chat
-  // saved/invited in another of the user's storages is still in scope.
+  // saved/invited in another of the user's storages is still in scope. Memoise on
+  // a STABLE string key (not the array reference) so a freshly-built
+  // profile.storages each render doesn't re-create the chat / re-trigger loads.
+  const storageKey = (profile?.storages ?? []).join("|") || (activeStorage ?? "");
   const storages = useMemo(() => {
     const all = profile?.storages ?? [];
     return all.length > 0 ? all : activeStorage ? [activeStorage] : [];
-  }, [profile?.storages, activeStorage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageKey]);
 
   const { chat, outOfScope } = useMemo(() => {
     if (status !== "logged-in" || !webId || storages.length === 0 || !containerUrl) {

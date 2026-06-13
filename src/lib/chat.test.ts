@@ -148,13 +148,15 @@ describe("Chat direct-child scope guard branches (confused-deputy)", () => {
   it("skips nested-path, %2f, query and fragment member URLs in a listing", async () => {
     const NESTED = "https://alice.example/chat/team/sub/x.ttl";
     const ENCODED = "https://alice.example/chat/team/a%2fb.ttl";
+    const QUERY = "https://alice.example/chat/team/x.ttl?q=1";
+    const FRAGMENT = "https://alice.example/chat/team/x.ttl#frag";
     const requested: string[] = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       requested.push(url);
       if (url === CONTAINER) {
         return ttl(
-          `@prefix ldp: <http://www.w3.org/ns/ldp#> . <${CONTAINER}> ldp:contains <${NESTED}>, <${ENCODED}> .`,
+          `@prefix ldp: <http://www.w3.org/ns/ldp#> . <${CONTAINER}> ldp:contains <${NESTED}>, <${ENCODED}>, <${QUERY}>, <${FRAGMENT}> .`,
         );
       }
       return new Response("nf", { status: 404 });
@@ -164,6 +166,8 @@ describe("Chat direct-child scope guard branches (confused-deputy)", () => {
     expect(msgs).toEqual([]); // nothing in-scope
     expect(requested).not.toContain(NESTED);
     expect(requested).not.toContain(ENCODED);
+    expect(requested).not.toContain(QUERY);
+    expect(requested).not.toContain(FRAGMENT);
   });
 
   it("chatContainerUrl falls back to a random slug for an empty channel name", () => {

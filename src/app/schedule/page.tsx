@@ -245,10 +245,12 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
   // Is this poll in one of the user's OWN pods (organiser view) or someone
   // else's (invitee view)? Organiser → same-pod store CRUD; invitee → validated
   // read-only fetch + respond-in-own-pod + notify.
+  const storageKey = (profile?.storages ?? []).join("|") || (activeStorage ?? "");
   const storages = useMemo(() => {
     const all = profile?.storages ?? [];
     return all.length > 0 ? all : activeStorage ? [activeStorage] : [];
-  }, [profile?.storages, activeStorage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageKey]);
   const isOrganiser = useMemo(() => isInOwnPods(pollUrl, storages), [pollUrl, storages]);
 
   // Organiser path: the typed store (same-pod, scope-guarded).

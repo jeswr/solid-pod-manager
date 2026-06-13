@@ -203,6 +203,22 @@ describe("sendNotification — discover + validate BEFORE POST", () => {
     ).rejects.toBeInstanceOf(NotificationSendError);
   });
 
+  it("rejects when the final response URL is a different (even public) origin", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === RECIPIENT_DOC) return ttl(INBOX_TTL);
+      if (url === INBOX && (init?.method ?? "GET") === "POST") {
+        const r = new Response(null, { status: 200 });
+        Object.defineProperty(r, "url", { value: "https://elsewhere.example/collect" });
+        return r;
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+    await expect(
+      sendNotification({ recipientWebId: RECIPIENT, actorWebId: ACTOR }, fetchImpl),
+    ).rejects.toBeInstanceOf(NotificationSendError);
+  });
+
   it("throws NotificationSendError on a non-2xx inbox response", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

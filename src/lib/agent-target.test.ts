@@ -197,6 +197,24 @@ describe("discoverInbox — discovery is ONLY from the profile graph", () => {
     await expect(discoverInbox(WEBID, failing)).resolves.toBeUndefined();
   });
 
+  it("returns undefined (never throws) for a malformed ldp:inbox (literal object)", async () => {
+    const body = `
+      @prefix ldp: <http://www.w3.org/ns/ldp#> .
+      <${WEBID}> ldp:inbox "not-a-node" .`;
+    await expect(discoverInbox(WEBID, profileFetch(body))).resolves.toBeUndefined();
+  });
+
+  it("returns undefined for an opaque-redirect on the discovery GET (browser semantics)", async () => {
+    // Mirrors the real browser: redirect:manual yields an opaque-redirect that
+    // freshRdf cannot parse → discovery collapses to undefined (never follows it).
+    const fetchImpl = (async () => {
+      const r = new Response(null, { status: 0 });
+      Object.defineProperty(r, "type", { value: "opaqueredirect" });
+      return r;
+    }) as unknown as typeof fetch;
+    await expect(discoverInbox(WEBID, fetchImpl)).resolves.toBeUndefined();
+  });
+
   it("ignores an inbox advertised by a DIFFERENT subject (only the WebID's own)", async () => {
     const body = `
       @prefix ldp: <http://www.w3.org/ns/ldp#> .

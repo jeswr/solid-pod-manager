@@ -165,10 +165,18 @@ export async function discoverInbox(
     // refinement could surface a distinct retryable error for non-404 failures.
     return undefined;
   }
-  const inboxes = new InboxAgent(webId, dataset, DataFactory).inboxes;
-  // Zero → no inbox; multiple → ambiguous, refuse to guess (fail closed).
-  if (inboxes.size !== 1) return undefined;
-  const [raw] = [...inboxes];
+  // Read the inbox values defensively — a malformed/malicious profile (e.g.
+  // ldp:inbox pointing at a literal where a NamedNode is expected) must collapse
+  // to `undefined`, never throw a raw term/cardinality error out of discovery.
+  let raw: string | undefined;
+  try {
+    const inboxes = new InboxAgent(webId, dataset, DataFactory).inboxes;
+    // Zero → no inbox; multiple → ambiguous, refuse to guess (fail closed).
+    if (inboxes.size !== 1) return undefined;
+    [raw] = [...inboxes];
+  } catch {
+    return undefined;
+  }
   // Resolve a possibly-relative inbox IRI against the profile DOCUMENT URL
   // (the RDF base), matching how a Solid client resolves relative terms.
   try {

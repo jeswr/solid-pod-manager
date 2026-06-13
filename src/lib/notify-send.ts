@@ -229,11 +229,22 @@ export async function sendNotification(
   if (!res.ok) throw new NotificationSendError(inbox, res.status);
 
   // Defence-in-depth backstop: if the runtime followed a redirect anyway (e.g. an
-  // auth retry that dropped `redirect: "manual"`), the final URL would differ and
-  // could point off-target. Reject unless the final URL is still a valid target.
+  // auth retry that dropped `redirect: "manual"`), the final response URL would
+  // differ from the validated inbox. Enforce that the final URL is BOTH still a
+  // safe target AND on the SAME ORIGIN as the inbox we vetted — so a redirect to
+  // any other origin (even another public https host) is rejected, not just
+  // private ones.
   const finalUrl = res.url;
-  if (finalUrl && !isValidTargetUrl(finalUrl)) {
-    throw new NotificationSendError(finalUrl, res.status);
+  if (finalUrl) {
+    let sameOriginAsInbox = false;
+    try {
+      sameOriginAsInbox = new URL(finalUrl).origin === new URL(inbox).origin;
+    } catch {
+      sameOriginAsInbox = false;
+    }
+    if (!isValidTargetUrl(finalUrl) || !sameOriginAsInbox) {
+      throw new NotificationSendError(finalUrl, res.status);
+    }
   }
   return { inbox };
 }

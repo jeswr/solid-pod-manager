@@ -17,6 +17,7 @@ import type { DatasetCore } from "@rdfjs/types";
 import type { FieldSpec } from "@/lib/forms/field-types";
 import { applyFieldEdits, readFieldValue } from "@/lib/forms/subject-edit";
 import { saveFormEdits, type SaveResult } from "@/lib/forms/write";
+import { shouldRebase } from "@/lib/forms/rebase";
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
@@ -81,20 +82,25 @@ export function useFormEdit(args: UseFormEditArgs): FormEditState {
   // Keep the latest subject/fields available to the rebase effect WITHOUT making
   // them effect dependencies — a parent re-render that merely reallocates the
   // `fields` array (e.g. an auto-form computed inline) must NOT rebase and drop
-  // a locally-saved dataset/ETag.
+  // a locally-saved dataset/ETag (see `shouldRebase`).
   const subjectRef = useRef(subject);
   const fieldsRef = useRef(fields);
   subjectRef.current = subject;
   fieldsRef.current = fields;
+  // The last upstream read we adopted, to decide genuine "fresh read" changes.
+  const upstreamRef = useRef({ dataset: args.dataset, etag: args.etag });
 
   // Rebase ONLY when the parent supplies a genuinely fresh read (a new dataset
   // object or a changed ETag — e.g. after a "changed elsewhere" reload): adopt
   // it as the new baseline and reseed the editor, dropping any unsaved edits
-  // (correct after such a reload). Keyed on dataset/ETag identity alone.
+  // (correct after such a reload).
   useEffect(() => {
-    setDataset(args.dataset);
-    setEtag(args.etag);
-    setValues(seedValues(args.dataset, subjectRef.current, fieldsRef.current));
+    const next = { dataset: args.dataset, etag: args.etag };
+    if (!shouldRebase(upstreamRef.current, next)) return;
+    upstreamRef.current = next;
+    setDataset(next.dataset);
+    setEtag(next.etag);
+    setValues(seedValues(next.dataset, subjectRef.current, fieldsRef.current));
     setFieldErrors({});
     setError(undefined);
     setStatus("idle");

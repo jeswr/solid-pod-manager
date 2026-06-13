@@ -84,3 +84,45 @@ Phase P3 — touched (registration / matcher additions only):
 - `src/components/typed-views/registry.tsx` — binds the three viewers to cards.
 - `src/components/typed-views/source-action.tsx` — maps the `calendar` icon name
   to the Lucide `CalendarDays` component.
+
+SolidOS-parity QUICK WINS (`docs/solidos-feature-parity.md` §3 Phase A — A2/A3/
+A4/A5) — new files:
+
+- `src/lib/literal-format.ts` — A2 pure: human-readable rendering of common RDF
+  literal datatypes (xsd date/dateTime/time/duration/boolean/numbers, language
+  tags) + `looksLikeMarkdown` heuristic. Unknown/unparsable → raw lexical value
+  (never loses data). Uses `Intl` (locale-overridable for deterministic tests).
+- `src/lib/literal-format.test.ts`
+- `src/lib/typed-views/view-modes.ts` — A3 pure: which view modes a resource
+  offers (typed / data / table / source), the initial mode (always `typed` when
+  a typed view exists → no-raw-RDF-by-default), and whether to show the tray.
+- `src/lib/typed-views/view-modes.test.ts`
+- `src/lib/typed-views/table-of-class.ts` — A5 pure: `buildClassTable` (all
+  instances of an `rdf:type` → columns/rows model, member-capped) +
+  `dominantTabulatableClass` (the class with >= 2 instances) + `classesInDataset`.
+- `src/lib/typed-views/table-of-class.test.ts`
+- `src/components/typed-views/rdf-table.tsx` — the generic raw-triples table,
+  extracted from `resource-viewer.tsx` for reuse by the view-switcher's "Data"
+  mode and the under-the-hood panel. Now humanises literals via `formatLiteral`
+  (A2) with a subtle language chip; IRIs stay `safeLinkHref`-gated (SEC-2).
+- `src/components/typed-views/view-switcher.tsx` — A3 segmented tray; renders the
+  pure `view-modes` options, maps icon names to Lucide, reports the chosen mode.
+- `src/components/typed-views/under-the-hood.tsx` — A4 collapsed-by-default
+  `<details>` panel: URI / content-type / size + raw triples (reuses
+  `RdfViewer`); accepts caller-owned `actions` (e.g. the existing Delete).
+- `src/components/typed-views/class-table.tsx` — A5 accessible instances table;
+  literals humanised (A2), IRIs `safeLinkHref`-gated, "showing N of M" cap note.
+
+SolidOS-parity QUICK WINS — touched:
+
+- `src/lib/resource-view.ts` — `PropertyValue` now carries `datatype`/`language`
+  from the parsed literal (enables A2 formatting); `termValue` reads them.
+- `src/lib/resource-view.test.ts` — assertion relaxed to `toMatchObject` for the
+  new datatype field.
+- `src/components/resource-viewer.tsx` — now a client component: the `rdf` kind
+  renders the typed card by default with the A3 switcher tray (typed ↔ data ↔
+  table ↔ source) and the always-available A4 under-the-hood panel; the `text`
+  kind renders Markdown (A2) for `text/markdown` and markdown-ish `text/plain`.
+  Extracted `RdfViewer` to `rdf-table.tsx`.
+- `src/components/typed-views/registry.tsx` — adds `viewMetaFor(resource)`
+  reporting `{ hasTypedView, source, tableClass }` for the switcher.

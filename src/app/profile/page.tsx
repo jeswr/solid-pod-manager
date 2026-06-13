@@ -37,10 +37,14 @@ export default function ProfilePage() {
   const { data, loading, error, reload } = useEditableProfile();
 
   const [form, setForm] = useState<EditableProfile>({ name: "" });
+  const [etag, setEtag] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (data) setForm(data.profile);
+    if (data) {
+      setForm(data.profile);
+      setEtag(data.etag);
+    }
   }, [data]);
 
   const set = <K extends keyof EditableProfile>(key: K, value: string) =>
@@ -62,7 +66,8 @@ export default function ProfilePage() {
     }
     setSaving(true);
     try {
-      await saveProfile({ webId, edit: form });
+      const { etag: next } = await saveProfile({ webId, edit: form, etag });
+      setEtag(next);
       toast.success("Profile saved", { description: "This is how others see you." });
     } catch (err) {
       if (err instanceof ResourceWriteError && err.status === 412) {

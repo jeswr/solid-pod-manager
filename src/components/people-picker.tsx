@@ -61,6 +61,8 @@ export function PeoplePicker({
   const inputId = useId();
   const [query, setQuery] = useState("");
   const [resolving, setResolving] = useState(false);
+  // Friendly labels learned by resolving pasted WebIDs (so chips show a name).
+  const [resolvedLabels, setResolvedLabels] = useState<Record<string, string>>({});
   const { data: people, loading } = usePeople();
 
   const selected = useMemo(() => new Set(value), [value]);
@@ -70,12 +72,13 @@ export function PeoplePicker({
     return filterPeople(all, query).filter((o) => !selected.has(o.webId));
   }, [people, query, selected]);
 
-  // Labels for the selected chips: prefer the known option's label.
+  // Labels for the selected chips: prefer the known option's label, then any
+  // label resolved from a pasted WebID, else the raw WebID.
   const labelFor = useMemo(() => {
     const map = new Map<string, string>();
     for (const o of people ?? []) map.set(o.webId, o.label);
-    return (webId: string) => map.get(webId) ?? webId;
-  }, [people]);
+    return (webId: string) => map.get(webId) ?? resolvedLabels[webId] ?? webId;
+  }, [people, resolvedLabels]);
 
   const queryIsNewWebId =
     looksLikeWebId(query) &&
@@ -97,8 +100,13 @@ export function PeoplePicker({
     if (!looksLikeWebId(webId)) return;
     setResolving(true);
     try {
-      // Resolve for a friendly label (best-effort); the WebID is what we add.
-      await resolveWebIdOption(webId);
+      // Resolve for a friendly label (best-effort) and remember it so the chip
+      // shows the person's name rather than the raw WebID. The WebID is the
+      // value we add regardless of whether resolution succeeds.
+      const option = await resolveWebIdOption(webId);
+      if (option.label && option.label !== webId) {
+        setResolvedLabels((prev) => ({ ...prev, [webId]: option.label }));
+      }
     } finally {
       setResolving(false);
     }

@@ -12,15 +12,17 @@ const BOB = "https://bob.example/profile/card#me";
 const CAROL = "https://carol.example/profile/card#me";
 
 describe("looksLikeWebId", () => {
-  it("accepts absolute http(s) URLs with a dotted host", () => {
+  it("accepts absolute http(s) URLs, including loopback/dev hosts", () => {
     expect(looksLikeWebId(BOB)).toBe(true);
     expect(looksLikeWebId("http://example.org/")).toBe(true);
     expect(looksLikeWebId("  https://x.io/me#me  ")).toBe(true);
+    // local CSS dev WebID — must be accepted (no dotted host required)
+    expect(looksLikeWebId("http://localhost:3000/alice/profile/card#me")).toBe(true);
   });
-  it("rejects names and non-URLs", () => {
+  it("rejects names and non-http(s) URLs", () => {
     expect(looksLikeWebId("Bob Smith")).toBe(false);
     expect(looksLikeWebId("bob@example.com")).toBe(false);
-    expect(looksLikeWebId("localhost")).toBe(false);
+    expect(looksLikeWebId("localhost")).toBe(false); // no scheme
     expect(looksLikeWebId("ftp://x.org")).toBe(false);
   });
 });

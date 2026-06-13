@@ -203,27 +203,37 @@ export async function fetchEditableProfile(
 }
 
 /**
- * Save edited profile fields back to the card with a read-modify-write.
+ * Save edited profile fields back to the card with a read-modify-write that
+ * detects concurrent edits.
  *
- * Re-reads the document fresh (revalidated) so unrelated triples are preserved
- * and the ETag is current, applies the edits, then conditionally PUTs with
- * `If-Match`. A 412 (someone else edited the card) or 403 (no write access)
- * surfaces as `ResourceWriteError` with `.status` — the UI re-reads on 412 and
- * explains the permission case on 403.
+ * Re-reads the document fresh so the write preserves every triple this app
+ * does not own, then conditionally PUTs with `If-Match` set to the **ETag the
+ * editor loaded** (`opts.etag`) — NOT the just-re-read ETag. That distinction
+ * is what makes a concurrent edit fail: if another client changed the card
+ * after this editor opened, the loaded ETag no longer matches the server's and
+ * the PUT returns 412 instead of silently clobbering their change. A 412
+ * (concurrent edit) or 403 (no write access) surfaces as `ResourceWriteError`
+ * with `.status` — the UI re-reads on 412 and explains permissions on 403.
+ *
+ * When `opts.etag` is absent (e.g. the card had no ETag), the re-read ETag is
+ * used as a best-effort guard.
  *
  * @param fetchImpl - test-only override; omit in production.
  */
 export async function saveProfile(opts: {
   webId: string;
   edit: EditableProfile;
+  /** The ETag from the read the editor was working against (concurrency guard). */
+  etag?: string | null;
   fetchImpl?: typeof fetch;
 }): Promise<{ etag: string | null }> {
   const { webId, edit, fetchImpl } = opts;
   const docUrl = profileDocUrl(webId);
-  const { dataset, etag } = await freshRdf(docUrl, fetchImpl);
+  const { dataset, etag: freshEtag } = await freshRdf(docUrl, fetchImpl);
   applyEditableProfile(webId, dataset, edit);
   return writeResource(docUrl, dataset, {
-    etag,
+    // Prefer the caller's loaded ETag so a change since load triggers a 412.
+    etag: opts.etag !== undefined ? opts.etag : freshEtag,
     fetchImpl,
     prefixes: PROFILE_PREFIXES,
   });

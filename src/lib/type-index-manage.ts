@@ -134,10 +134,17 @@ export async function addRegistration(opts: {
   fetchImpl?: typeof fetch;
 }): Promise<{ added: boolean; subject: string }> {
   const { indexUrl, registration, fetchImpl } = opts;
-  const { container, instance, forClass } = registration;
-  if (Boolean(container) === Boolean(instance)) {
+  const { instance, forClass } = registration;
+  if (Boolean(registration.container) === Boolean(instance)) {
     throw new TypeError("Provide exactly one of container or instance.");
   }
+  // `solid:instanceContainer` targets MUST be container URLs (trailing slash).
+  // Normalise here so a missing slash never mints a broken registration.
+  const container = registration.container
+    ? registration.container.endsWith("/")
+      ? registration.container
+      : `${registration.container}/`
+    : undefined;
 
   const { dataset, etag } = await freshRdf(indexUrl, fetchImpl);
   const index = new TypeIndexDataset(dataset, DataFactory);

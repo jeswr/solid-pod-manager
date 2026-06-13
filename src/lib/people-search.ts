@@ -24,16 +24,18 @@ export interface PersonOption {
 }
 
 /**
- * Does this string look like a usable WebID? An absolute http(s) URL — we do
- * not require a fragment (some WebIDs are document-rooted), but we reject
- * obvious non-URLs so a name query does not masquerade as a WebID.
+ * Does this string look like a usable WebID? Any absolute http(s) URL with a
+ * hostname — we do not require a fragment (some WebIDs are document-rooted) nor
+ * a dotted host, so `http://localhost:3000/alice/profile/card#me` and other
+ * loopback/dev WebIDs are accepted (the local CSS flow uses them). We only
+ * reject strings that are not http(s) URLs, so a name query does not
+ * masquerade as a WebID.
  */
 export function looksLikeWebId(query: string): boolean {
   const q = query.trim();
   if (!/^https?:\/\//i.test(q)) return false;
   try {
-    const u = new URL(q);
-    return Boolean(u.hostname) && u.hostname.includes(".");
+    return Boolean(new URL(q).hostname);
   } catch {
     return false;
   }

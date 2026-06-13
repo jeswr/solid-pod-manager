@@ -9,6 +9,7 @@ import {
   profileDocUrl,
   type EditableProfile,
 } from "./profile-edit.js";
+import { ResourceWriteError } from "./errors.js";
 import { createMemoryPod, TEST_WEBID, TEST_PROFILE_DOC } from "./integrations/core/testing.js";
 
 const WEBID = "https://alice.example/profile/card#me";
@@ -136,15 +137,31 @@ describe("saveProfile / fetchEditableProfile round-trip (I/O)", () => {
     expect(raw).toContain("oidcIssuer");
   });
 
-  it("surfaces a 412 as ResourceWriteError when the ETag is stale", async () => {
+  it("fails with a 412 when the loaded ETag is stale (concurrent edit guard)", async () => {
     const pod = createMemoryPod();
-    // Prime: one save bumps the version so a hand-built stale write fails.
-    await saveProfile({ webId: TEST_WEBID, edit: { name: "v2" }, fetchImpl: pod.fetch });
-    // A second concurrent save reading the same fresh etag still succeeds —
-    // staleness is exercised at the writeResource layer (covered there); here
-    // we assert a clean second save round-trips.
-    await expect(
-      saveProfile({ webId: TEST_WEBID, edit: { name: "v3" }, fetchImpl: pod.fetch }),
-    ).resolves.toBeTruthy();
+
+    // The editor loads the card at its current ETag.
+    const { etag: loadedEtag } = await fetchEditableProfile(TEST_WEBID, pod.fetch);
+
+    // Someone else edits the card meanwhile, bumping its version/ETag.
+    await saveProfile({
+      webId: TEST_WEBID,
+      edit: { name: "Edited elsewhere" },
+      fetchImpl: pod.fetch,
+    });
+
+    // Our save with the now-stale loaded ETag must fail (not silently clobber).
+    const err = await saveProfile({
+      webId: TEST_WEBID,
+      edit: { name: "My change" },
+      etag: loadedEtag,
+      fetchImpl: pod.fetch,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ResourceWriteError);
+    expect((err as ResourceWriteError).status).toBe(412);
+
+    // The other client's edit survived — we did not overwrite it.
+    const after = await fetchEditableProfile(TEST_WEBID, pod.fetch);
+    expect(after.profile.name).toBe("Edited elsewhere");
   });
 });

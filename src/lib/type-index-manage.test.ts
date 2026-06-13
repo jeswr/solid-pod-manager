@@ -120,6 +120,18 @@ describe("addRegistration", () => {
     expect(after.registrations.some((r) => r.forClass === CONTACT)).toBe(true);
   });
 
+  it("normalises a container target to a trailing slash", async () => {
+    const pod = indexPod({ [PUBLIC_INDEX]: PUBLIC_TTL });
+    await addRegistration({
+      indexUrl: PUBLIC_INDEX,
+      registration: { forClass: CONTACT, container: "https://alice.example/contacts" }, // no slash
+      fetchImpl: pod.fetch,
+    });
+    const after = await listAllRegistrations(WEBID, profileDataset(), pod.fetch);
+    const ct = after.registrations.find((r) => r.forClass === CONTACT);
+    expect(ct?.container).toBe("https://alice.example/contacts/");
+  });
+
   it("is idempotent for an identical entry", async () => {
     const pod = indexPod({ [PUBLIC_INDEX]: PUBLIC_TTL });
     const res = await addRegistration({

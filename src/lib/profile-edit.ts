@@ -215,8 +215,9 @@ export async function fetchEditableProfile(
  * (concurrent edit) or 403 (no write access) surfaces as `ResourceWriteError`
  * with `.status` — the UI re-reads on 412 and explains permissions on 403.
  *
- * When `opts.etag` is absent (e.g. the card had no ETag), the re-read ETag is
- * used as a best-effort guard.
+ * When `opts.etag` is absent OR `null` (the card carried no ETag), the
+ * re-read ETag is used as a best-effort guard rather than writing
+ * unconditionally.
  *
  * @param fetchImpl - test-only override; omit in production.
  */
@@ -232,8 +233,10 @@ export async function saveProfile(opts: {
   const { dataset, etag: freshEtag } = await freshRdf(docUrl, fetchImpl);
   applyEditableProfile(webId, dataset, edit);
   return writeResource(docUrl, dataset, {
-    // Prefer the caller's loaded ETag so a change since load triggers a 412.
-    etag: opts.etag !== undefined ? opts.etag : freshEtag,
+    // Prefer the caller's loaded ETag so a change since load triggers a 412;
+    // fall back to the re-read ETag (best-effort) when none was loaded — never
+    // write unconditionally.
+    etag: opts.etag ?? freshEtag,
     fetchImpl,
     prefixes: PROFILE_PREFIXES,
   });

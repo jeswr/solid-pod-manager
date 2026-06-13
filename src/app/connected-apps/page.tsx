@@ -22,8 +22,12 @@ import {
   type ConnectedApp,
 } from "@/components/use-permissions";
 import { allGrants, describeModes } from "@/lib/permissions";
+import { TrustedAppsSection } from "@/components/trusted-apps-section";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+
+/** Stable empty fallback so the section's `apps` identity never churns. */
+const EMPTY_APPS: ConnectedApp[] = [];
 
 export default function ConnectedAppsPage() {
   const { data: apps, loading, error, reload } = useConnectedApps();
@@ -133,6 +137,18 @@ export default function ConnectedAppsPage() {
         <ShieldCheck className="size-4 shrink-0 text-primary" aria-hidden="true" />
         Your own access to your data never depends on any of these grants.
       </p>
+
+      {/* Trusted-apps reconciliation: the live `acl:origin` trust, with revoke
+          through the same backend. The section renders its own leading divider
+          and returns null (no dangling divider) when no origins are present. */}
+      {!loading && !error ? (
+        // Pass the STABLE apps snapshot (so the section's own optimistic-hide
+        // state clears only on a real reload, not every parent re-render) PLUS
+        // the parent's `removed` set, so an app hidden by "Revoke all" up here
+        // is also hidden in the trusted-apps section until the reload completes
+        // (roborev).
+        <TrustedAppsSection apps={apps ?? EMPTY_APPS} parentRemoved={removed} reload={reload} />
+      ) : null}
     </div>
   );
 }

@@ -31,9 +31,12 @@ import {
   winningOption,
   readPollAt,
   respondToPoll,
+  aggregatePollRsvps,
   type Poll,
+  type Rsvp,
   type RsvpResponse,
 } from "@/lib/schedule";
+import { useInbox } from "@/components/use-inbox";
 import { sendNotification } from "@/lib/notify-send";
 import { isInOwnPods } from "@/lib/pod-scope";
 import { fromDateTimeLocal, formatDateTime } from "@/lib/format";
@@ -273,8 +276,48 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
   }, [isOrganiser, pollUrl, foreignNonce]);
 
   const [saving, setSaving] = useState(false);
+  // The invitee's own just-submitted RSVPs, shown optimistically (the organiser's
+  // poll the invitee reads won't reflect them — they live in the invitee's pod +
+  // a notification to the organiser, who aggregates them on their side).
+  const [myOptimistic, setMyOptimistic] = useState<Rsvp[]>([]);
 
-  const poll = isOrganiser ? owned.data?.data : foreign.data;
+  // Organiser-side aggregation: pull RSVP Offers for this poll out of the
+  // organiser's own inbox and merge the linked responses into the tally.
+  const inbox = useInbox();
+  const [aggregated, setAggregated] = useState<Rsvp[] | undefined>(undefined);
+  const basePoll = isOrganiser ? owned.data?.data : foreign.data;
+  useEffect(() => {
+    if (!isOrganiser || !basePoll) {
+      setAggregated(undefined);
+      return;
+    }
+    let cancelled = false;
+    const offers = (inbox.data ?? [])
+      .filter((n) => n.type.includes("Offer"))
+      .map((n) => ({ object: n.object, content: n.content }));
+    aggregatePollRsvps(basePoll, pollUrl, offers)
+      .then((rsvps) => {
+        if (!cancelled) setAggregated(rsvps);
+      })
+      .catch(() => {
+        if (!cancelled) setAggregated(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOrganiser, basePoll, pollUrl, inbox.data]);
+
+  // The poll as displayed: base + organiser-aggregated (organiser) or base +
+  // optimistic own response (invitee), so the UI reflects the action taken.
+  const poll = useMemo<Poll | undefined>(() => {
+    if (!basePoll) return undefined;
+    if (isOrganiser) return aggregated ? { ...basePoll, rsvps: aggregated } : basePoll;
+    if (myOptimistic.length === 0) return basePoll;
+    const byKey = new Map<string, Rsvp>();
+    for (const r of [...basePoll.rsvps, ...myOptimistic]) byKey.set(`${r.attendee}|${r.option}`, r);
+    return { ...basePoll, rsvps: [...byKey.values()] };
+  }, [basePoll, isOrganiser, aggregated, myOptimistic]);
+
   const loading = isOrganiser ? owned.loading : foreign.loading;
   const error = isOrganiser ? owned.error : foreign.error;
   const reload = isOrganiser ? owned.reload : () => setForeignNonce((n) => n + 1);
@@ -296,6 +339,8 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
           { attendee: webId, option, response },
         ];
         await store.update(pollUrl, { ...poll, rsvps }, owned.data.etag);
+        toast.success("RSVP saved");
+        reload();
       } else {
         // Invitee: write the RSVP to OUR OWN pod + notify the organiser. Never
         // writes to the organiser's pod (no cross-pod write surface).
@@ -312,9 +357,14 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
           response,
           pollName: poll.name,
         });
+        // Reflect the invitee's own response locally (the organiser's poll we
+        // read won't show it — the organiser aggregates it on their side).
+        setMyOptimistic((prev) => [
+          ...prev.filter((r) => !(r.attendee === webId && r.option === option)),
+          { attendee: webId, option, response },
+        ]);
+        toast.success("Response sent to the organiser");
       }
-      toast.success("RSVP saved");
-      reload();
     } catch {
       toast.error("Could not save your RSVP. Please try again.");
     } finally {

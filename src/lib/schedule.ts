@@ -47,7 +47,6 @@ import { sendNotification } from "./notify-send.js";
 import { writeResource } from "./pod-data.js";
 import {
   createStore,
-  toSlug,
   type ProductivityStore,
   type StoredItem,
   type StoreConfig,
@@ -363,14 +362,18 @@ export async function respondToPoll(
   },
   fetchImpl?: typeof fetch,
 ): Promise<{ responseUrl: string }> {
-  // 1. Same-pod write: a small RsvpAction resource in the attendee's own pod.
+  // 1. Same-pod write: one RsvpAction resource per (poll, attendee) in the
+  //    attendee's own pod. The name is DETERMINISTIC in the poll URL so a
+  //    re-vote OVERWRITES in place (no orphan response files accumulate).
   const container = new URL(RESPONSES_SLUG, args.podRoot).toString();
-  const slug = toSlug(args.pollName) || "poll";
-  const rand = Math.random().toString(36).slice(2, 8);
-  const responseUrl = `${container}${slug}-${rand}.ttl`;
+  const key = stableKey(args.pollUrl);
+  const responseUrl = `${container}rsvp-${key}.ttl`;
+  // Normalise the option once and reuse for both the write and the notification
+  // (so a bad option can't write successfully then throw building the summary).
+  const optDate = new Date(args.option);
+  const optionIso = Number.isNaN(optDate.getTime()) ? args.option : optDate.toISOString();
   const store = new Store();
   const node = DataFactory.namedNode(`${responseUrl}#it`);
-  const optDate = new Date(args.option);
   store.add(DataFactory.quad(node, DataFactory.namedNode(RDF_TYPE), DataFactory.namedNode(RSVP_ACTION)));
   store.add(
     DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}object`), DataFactory.namedNode(args.pollUrl)),
@@ -382,10 +385,7 @@ export async function respondToPoll(
     DataFactory.quad(
       node,
       DataFactory.namedNode(`${SCHEMA}startDate`),
-      DataFactory.literal(
-        Number.isNaN(optDate.getTime()) ? args.option : optDate.toISOString(),
-        DataFactory.namedNode("http://www.w3.org/2001/XMLSchema#dateTime"),
-      ),
+      DataFactory.literal(optionIso, DataFactory.namedNode("http://www.w3.org/2001/XMLSchema#dateTime")),
     ),
   );
   store.add(
@@ -394,18 +394,83 @@ export async function respondToPoll(
   await writeResource(responseUrl, store, { fetchImpl, prefixes: PREFIXES });
 
   // 2. Notify the organiser (strict-validated cross-pod). Best-effort: the RSVP
-  //    is already persisted in the attendee's pod even if delivery fails.
+  //    is already persisted in the attendee's pod even if delivery fails. The
+  //    `content` carries the response resource URL so the organiser can fetch +
+  //    aggregate it (see {@link aggregatePollRsvps}).
   await sendNotification(
     {
       recipientWebId: args.organizerWebId,
       actorWebId: args.attendeeWebId,
       type: "Offer",
       object: args.pollUrl,
-      summary: `RSVP ${args.response} for ${optDate.toISOString()}`,
+      summary: `RSVP ${args.response} for ${optionIso}`,
       content: responseUrl,
     },
     fetchImpl,
   );
 
   return { responseUrl };
+}
+
+/** A short, stable, URI-safe key derived from a URL (for deterministic names). */
+function stableKey(url: string): string {
+  let h = 0;
+  for (let i = 0; i < url.length; i++) {
+    h = (Math.imul(31, h) + url.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * Organiser-side aggregation (closes the cross-pod RSVP loop).
+ *
+ * Given the organiser's inbox notifications, pick the `Offer`s whose `object` is
+ * THIS poll, fetch each one's response resource (the `content` URL) read-only —
+ * STRICT-validated via {@link readRsvpResourceAt}, since that URL is
+ * attacker-influenceable — and merge the resulting RSVPs into the poll's own.
+ * Same-origin duplicates collapse last-wins (sorted by notification recency by
+ * the caller). Failures on individual responses are skipped.
+ *
+ * @returns the poll's `rsvps` augmented with the aggregated cross-pod responses.
+ */
+export async function aggregatePollRsvps(
+  poll: Poll,
+  pollUrl: string,
+  offers: readonly { object?: string; content?: string }[],
+  fetchImpl?: typeof fetch,
+): Promise<Rsvp[]> {
+  const responseUrls = new Set<string>();
+  for (const o of offers) {
+    if (o.object === pollUrl && o.content && /^https?:/i.test(o.content)) {
+      responseUrls.add(o.content);
+    }
+  }
+  const fetched = await Promise.all(
+    [...responseUrls].map(async (url) => {
+      try {
+        return await readRsvpResourceAt(url, fetchImpl);
+      } catch {
+        return [] as Rsvp[];
+      }
+    }),
+  );
+  // Merge: poll's own rsvps first, then aggregated; last-wins per (attendee, option).
+  const byKey = new Map<string, Rsvp>();
+  for (const r of [...poll.rsvps, ...fetched.flat()]) {
+    byKey.set(`${r.attendee}|${r.option}`, r);
+  }
+  return [...byKey.values()];
+}
+
+/**
+ * Read an RSVP response resource that lives in ANOTHER agent's pod, read-only.
+ * Same SSRF guard as {@link readPollAt}: validate the URL + redirect:manual.
+ */
+export async function readRsvpResourceAt(
+  url: string,
+  fetchImpl?: typeof fetch,
+): Promise<Rsvp[]> {
+  assertValidTargetUrl(url);
+  const { dataset } = await freshRdf(url, noFollowFetch(fetchImpl));
+  return readRsvps(dataset);
 }

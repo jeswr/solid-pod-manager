@@ -8,6 +8,8 @@ import {
   winningOption,
   readPollAt,
   respondToPoll,
+  aggregatePollRsvps,
+  readRsvpResourceAt,
   POLL_CLASS,
   type Poll,
   type Rsvp,
@@ -214,5 +216,93 @@ describe("respondToPoll — same-pod write + notify organiser", () => {
     expect(calls.some((c) => c.method === "PUT" && c.url.startsWith("https://carol.example/"))).toBe(
       false,
     );
+  });
+
+  it("re-voting overwrites in place (deterministic response URL per poll)", async () => {
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      if (String(input) === ORG_DOC) {
+        return new Response(
+          `@prefix ldp: <http://www.w3.org/ns/ldp#> . <${CAROL}> ldp:inbox <${ORG_INBOX}> .`,
+          { status: 200, headers: { "content-type": "text/turtle" } },
+        );
+      }
+      return new Response(null, { status: 201 });
+    }) as unknown as typeof fetch;
+    const base = {
+      pollUrl: POLL_URL,
+      organizerWebId: CAROL,
+      attendeeWebId: BOB,
+      podRoot: ATTENDEE_POD,
+      option: OPT_A,
+      pollName: "x",
+    };
+    const a = await respondToPoll({ ...base, response: "yes" }, fetchImpl);
+    const b = await respondToPoll({ ...base, response: "no" }, fetchImpl);
+    expect(a.responseUrl).toBe(b.responseUrl); // same resource → overwrite, no orphans
+  });
+});
+
+describe("aggregatePollRsvps — organiser-side loop closure", () => {
+  const POLL_URL = "https://carol.example/schedule/p1.ttl";
+  const BOB_RESP = "https://bob.example/schedule-responses/rsvp-x.ttl";
+
+  it("merges RSVPs from validated Offer-linked response resources", async () => {
+    const respDs = buildPoll(BOB_RESP, {
+      name: "",
+      options: [],
+      invitees: [],
+      rsvps: [{ attendee: BOB, option: OPT_A, response: "yes" }],
+    });
+    // buildPoll stamps an Event; we want a bare RsvpAction doc, so craft via
+    // respondToPoll's shape instead — reuse readRsvpResourceAt over a hand TTL.
+    void respDs;
+    const respTtl = `
+      @prefix schema: <https://schema.org/> .
+      <${BOB_RESP}#it> a schema:RsvpAction ;
+        schema:object <${POLL_URL}> ;
+        schema:attendee <${BOB}> ;
+        schema:startDate "${OPT_A}"^^<http://www.w3.org/2001/XMLSchema#dateTime> ;
+        schema:rsvpResponse schema:RsvpResponseYes .`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.redirect).toBe("manual"); // validated read-only
+      if (String(input) === BOB_RESP) {
+        return new Response(respTtl, { status: 200, headers: { "content-type": "text/turtle" } });
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const poll: Poll = { name: "p", options: [OPT_A], invitees: [BOB], rsvps: [], organizer: CAROL };
+    const merged = await aggregatePollRsvps(
+      poll,
+      POLL_URL,
+      [{ object: POLL_URL, content: BOB_RESP }],
+      fetchImpl,
+    );
+    expect(merged).toEqual([{ attendee: BOB, option: OPT_A, response: "yes" }]);
+  });
+
+  it("ignores Offers for a different poll and refuses unsafe response URLs", async () => {
+    const fetchImpl = vi.fn(async () => new Response("x", { status: 200 })) as unknown as typeof fetch;
+    const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
+    // Offer for another poll → skipped; unsafe content URL → never fetched.
+    const merged = await aggregatePollRsvps(
+      poll,
+      POLL_URL,
+      [
+        { object: "https://carol.example/schedule/OTHER.ttl", content: BOB_RESP },
+        { object: POLL_URL, content: "https://127.0.0.1/steal.ttl" },
+      ],
+      fetchImpl,
+    );
+    expect(merged).toEqual([]); // nothing aggregated
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("readRsvpResourceAt refuses an unsafe URL before fetching", async () => {
+    const fetchImpl = vi.fn(async () => new Response("x", { status: 200 })) as unknown as typeof fetch;
+    await expect(readRsvpResourceAt("https://10.0.0.1/x.ttl", fetchImpl)).rejects.toBeInstanceOf(
+      InvalidTargetError,
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

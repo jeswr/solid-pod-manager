@@ -15,19 +15,30 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { permissionsBackend, type ConnectedApp } from "@/components/use-permissions";
+import {
+  permissionsBackend,
+  type ConnectedApp,
+  type ConnectedAppsModel,
+} from "@/components/use-permissions";
 import { reconcileTrustedApps, originLabel } from "@/lib/trusted-apps";
 
 export function TrustedAppsSection({
   apps,
   parentRemoved,
   reload,
+  getFreshModel,
 }: {
   /** The STABLE apps snapshot from the data source (not a per-render filter). */
   apps: ConnectedApp[];
   /** Apps optimistically revoked by the parent's "Revoke all" — also hidden. */
   parentRemoved: ReadonlySet<string>;
   reload: () => void;
+  /**
+   * Re-discover the Connected-apps model FRESH (uncached). Revokes source their
+   * grants from here, never the cached `apps` prop, so an origin's access is
+   * removed against current ACL state.
+   */
+  getFreshModel: () => Promise<ConnectedAppsModel>;
 }) {
   const origins = reconcileTrustedApps(apps);
   const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
@@ -52,9 +63,15 @@ export function TrustedAppsSection({
     setBusy((b) => new Set(b).add(origin.origin));
     setRemoved((r) => new Set(r).add(origin.origin));
     try {
-      // The origin IS the agentId for an `acl:origin`-named subject; revoke
-      // through the existing backend (atomic per ACL doc, fail-closed).
-      await permissionsBackend.revokeGrants(origin.origin, origin.grants);
+      // SECURITY: revoke against FRESH ACL state, never the cached `apps` snapshot
+      // this row was rendered from — re-discover the live model and take this
+      // origin's CURRENT grants. The origin IS the agentId for an `acl:origin`
+      // subject; the backend write is atomic per ACL doc and fail-closed.
+      const fresh = await getFreshModel();
+      const freshOrigin = reconcileTrustedApps(fresh.apps).find(
+        (o) => o.origin === origin.origin,
+      );
+      await permissionsBackend.revokeGrants(origin.origin, freshOrigin?.grants ?? []);
       toast.success(`${originLabel(origin.origin)} can no longer access your data.`);
       reload();
     } catch {

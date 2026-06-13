@@ -1,9 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
 import { freshRdf } from "@/lib/rdf-read";
 import { useSession } from "@/components/session-provider";
-import { useResourceNotifications } from "@/components/use-resource-notifications";
+import { useSwrRead } from "@/components/use-swr-read";
 import { discoverRegistrations } from "@/lib/type-index";
 import {
   listCategoryItems,
@@ -19,40 +18,39 @@ export interface AsyncState<T> {
   loading: boolean;
 }
 
+/** AsyncState plus the SWR background-revalidation flag. */
+export interface RevalidatableState<T> extends AsyncState<T> {
+  /** True while a background revalidation refreshes a shown (cached) value. */
+  revalidating: boolean;
+}
+
+/** The uncached type-index discovery chain (profile → registrations). */
+async function loadCategorySummaries(webId: string): Promise<CategorySummary[]> {
+  // The profile carries the type-index links — fetch it (public read,
+  // revalidated: a just-bootstrapped index link must not be cache-hidden).
+  const { dataset } = await freshRdf(webId);
+  const { locations } = await discoverRegistrations(webId, dataset);
+  return summariseCategories(locations);
+}
+
 /**
  * Discover the user's data categories from their Type Index.
  *
- * Production paths pass NO `fetch` to the data layer — the auth-patched global
- * runs (AGENTS.md §Reading data). Re-runs when the active WebID changes.
+ * Stale-while-revalidate (SWR): on re-mount the last-known categories render
+ * INSTANTLY (Home/My-data no longer spin) while a background revalidation
+ * refreshes them; the profile is watched so a type-index change invalidates the
+ * cache. Production paths pass NO `fetch` to the data layer — the auth-patched
+ * global runs (AGENTS.md §Reading data).
  */
-export function useCategorySummaries(): AsyncState<CategorySummary[]> {
-  const { webId, status } = useSession();
-  const [state, setState] = useState<AsyncState<CategorySummary[]>>({ loading: true });
-
-  useEffect(() => {
-    if (status !== "logged-in" || !webId) return;
-    let cancelled = false;
-    setState({ loading: true });
-
-    (async () => {
-      // The profile carries the type-index links — fetch it (public read,
-      // revalidated: a just-bootstrapped index link must not be cache-hidden).
-      const { dataset } = await freshRdf(webId);
-      const { locations } = await discoverRegistrations(webId, dataset);
-      if (cancelled) return;
-      setState({ loading: false, data: summariseCategories(locations) });
-    })().catch((e: unknown) => {
-      if (!cancelled) {
-        setState({ loading: false, error: e instanceof Error ? e : new Error(String(e)) });
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [webId, status]);
-
-  return state;
+export function useCategorySummaries(): RevalidatableState<CategorySummary[]> {
+  const { webId } = useSession();
+  const { data, error, loading, revalidating } = useSwrRead<CategorySummary[]>(
+    "category-summaries",
+    loadCategorySummaries,
+    // Watch the profile doc: a type-index link change there invalidates this.
+    { topicUrl: webId },
+  );
+  return { data, error, loading, revalidating };
 }
 
 /** A single category summary, looked up by its route id. */
@@ -69,53 +67,37 @@ export function useCategorySummary(
 }
 
 /**
- * List the items inside a category. Re-fetches when the summary or session
- * changes. Production paths pass no `fetch` (auth-patched global runs).
+ * List the items inside a category, with SWR caching keyed by the category id.
+ * On re-mount the last-known items render INSTANTLY while a background
+ * revalidation refreshes them; the category's container is watched so an
+ * edit/add/delete elsewhere invalidates the cache. Production paths pass no
+ * `fetch` (auth-patched global runs).
+ *
+ * A `summary` with no data (or none at all) has nothing to list — those resolve
+ * to `[]` synchronously without a fetch (and without a cache entry).
  */
 export function useCategoryItems(
   summary: CategorySummary | undefined,
-): AsyncState<PodItem[]> & { reload: () => void } {
-  const { status } = useSession();
-  const [state, setState] = useState<AsyncState<PodItem[]>>({ loading: true });
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-
-  useEffect(() => {
-    if (status !== "logged-in") return;
-    if (!summary) {
-      setState({ loading: false, data: [] });
-      return;
-    }
-    if (!summary.hasData) {
-      setState({ loading: false, data: [] });
-      return;
-    }
-    let cancelled = false;
-    setState({ loading: true });
-    listCategoryItems(summary)
-      .then((items) => {
-        if (!cancelled) setState({ loading: false, data: items });
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) {
-          setState({
-            loading: false,
-            error: e instanceof Error ? e : new Error(String(e)),
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [summary, status, nonce]);
-
-  // Live updates (progressive enhancement): watch the category's container so an
-  // edit/add/delete elsewhere refreshes this list. Falls back silently to manual
-  // reload when the server has no notifications. Subscribe to the first container
-  // location; a single-`instance` category has no container to watch (topicUrl
-  // undefined → no subscription), which is fine — those are point resources.
+): RevalidatableState<PodItem[]> & { reload: () => void } {
+  const hasData = Boolean(summary?.hasData);
+  // A single-`instance` category has no container to watch (point resource).
   const topicUrl = summary?.locations.find((l) => l.container)?.container;
-  useResourceNotifications(topicUrl, reload);
 
-  return { ...state, reload };
+  // Cache key per category id so two mounts of the same category share a value;
+  // the no-data/no-summary cases never touch the cache (key stays empty).
+  const key = hasData && summary ? `category-items:${summary.category.id}` : "";
+
+  const { data, error, loading, revalidating, reload } = useSwrRead<PodItem[]>(
+    key,
+    // Only invoked when hasData (key non-empty) — list the live items.
+    () => (summary ? listCategoryItems(summary) : Promise.resolve([])),
+    { topicUrl },
+  );
+
+  // No data to list: resolve to an empty list with no spinner, matching the
+  // previous behaviour exactly (no fetch, no cache entry).
+  if (!hasData) {
+    return { loading: false, revalidating: false, data: [], reload };
+  }
+  return { data, error, loading, revalidating, reload };
 }

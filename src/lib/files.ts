@@ -182,22 +182,55 @@ export interface RawResource {
 }
 
 /**
- * List a container's direct children. A thin pass-through over
- * `pod-data.listContainer` (QLever-backed; folders-first, name-sorted) so the
- * files UI imports only from here. A 404/403 surfaces as the underlying
- * `RdfFetchError` for the caller to branch on (missing vs forbidden).
+ * True iff `url` is a DIRECT child of `container` (one path segment deeper,
+ * same origin) — i.e. a member the listing could legitimately point at. A
+ * container's own `ldp:contains` is attacker-influenceable, so we never trust a
+ * member that is cross-origin or not directly under the listed container (SEC-1:
+ * row actions call the authenticated fetch on `item.url`, which must never reach
+ * outside the pod). Pure.
+ */
+export function isDirectChild(url: string, container: string): boolean {
+  let u: URL;
+  let c: URL;
+  try {
+    u = new URL(url);
+    c = new URL(asContainerUrl(container));
+  } catch {
+    return false;
+  }
+  if (u.origin !== c.origin) return false;
+  if (!u.pathname.startsWith(c.pathname)) return false;
+  const rest = u.pathname.slice(c.pathname.length);
+  if (rest === "") return false; // the container itself, not a child
+  // A child resource has no further "/"; a child container ends in exactly one.
+  const trimmed = rest.endsWith("/") ? rest.slice(0, -1) : rest;
+  return trimmed.length > 0 && !trimmed.includes("/");
+}
+
+/**
+ * List a container's direct children. Wraps `pod-data.listContainer`
+ * (QLever-backed; folders-first, name-sorted) AND filters out any member that
+ * is not a direct, same-origin descendant of the listed container — a hostile
+ * `ldp:contains` pointing at an external/foreign URL must never become a clickable
+ * row whose actions fire the DPoP-authenticated fetch (SEC-1). A 404/403 surfaces
+ * as the underlying `RdfFetchError` for the caller to branch on.
  */
 export async function listFolder(
   container: string,
   fetchImpl?: typeof fetch,
 ): Promise<PodItem[]> {
-  return listContainer(container, fetchImpl);
+  const items = await listContainer(container, fetchImpl);
+  return items.filter((item) => isDirectChild(item.url, container));
 }
 
 /**
- * Read a resource's raw bytes as text, keeping its content-type and ETag for a
- * conditional write. Used by the source editor (load) and download. Uses the
- * auth-patched global fetch unless a test `fetchImpl` is supplied.
+ * Read a resource's body as DECODED TEXT, keeping its content-type and ETag for
+ * a later conditional write. This is the SOURCE-EDITOR path only — it decodes
+ * the body as a string, which is correct for text/RDF but would corrupt binary
+ * content. For download / copy / rename of arbitrary (possibly binary)
+ * resources, use {@link readBytes}, which preserves the exact bytes.
+ *
+ * Uses the auth-patched global fetch unless a test `fetchImpl` is supplied.
  *
  * @throws ItemReadError on any non-2xx (branch on `.status`; 404 = not found,
  *   403/401 = forbidden).
@@ -213,6 +246,38 @@ export async function readRaw(
   return {
     url,
     text,
+    contentType: res.headers.get("content-type") ?? undefined,
+    etag: res.headers.get("etag"),
+  };
+}
+
+/** A resource's exact bytes (download / copy / rename — never decoded as text). */
+export interface RawBytes {
+  url: string;
+  blob: Blob;
+  contentType: string | undefined;
+  etag: string | null;
+}
+
+/**
+ * Read a resource's EXACT BYTES (as a `Blob`), preserving content for any media
+ * type — images, PDFs, audio, video, and text alike. This is the byte-exact
+ * path for download, copy, and rename, so a binary resource is never mangled by
+ * a text decode/re-encode round-trip.
+ *
+ * @throws ItemReadError on any non-2xx.
+ */
+export async function readBytes(
+  url: string,
+  fetchImpl?: typeof fetch,
+): Promise<RawBytes> {
+  const f = fetchImpl ?? fetch;
+  const res = await f(url, { headers: { accept: "*/*", "cache-control": "no-cache" } });
+  if (!res.ok) throw new ItemReadError(url, res.status);
+  const blob = await res.blob();
+  return {
+    url,
+    blob,
     contentType: res.headers.get("content-type") ?? undefined,
     etag: res.headers.get("etag"),
   };
@@ -302,7 +367,12 @@ export async function uploadFile(
   file: File,
   opts: { overwrite?: boolean; fetchImpl?: typeof fetch } = {},
 ): Promise<{ url: string }> {
-  const url = childResourceUrl(container, fileBaseName(file.name), fileExtension(file.name));
+  // Slug the WHOLE file name (it already carries its extension), so a
+  // multi-extension name like `archive.tar.gz` keeps `.tar.gz` rather than
+  // losing the final segment. `toFileSlug` preserves dots.
+  const slug = toFileSlug(file.name);
+  if (!slug) throw new Error("That file name can't be used.");
+  const url = `${asContainerUrl(container)}${slug}`;
   await writeRaw(url, file, {
     contentType: file.type || guessContentType(file.name) || "application/octet-stream",
     createOnly: !opts.overwrite,
@@ -346,9 +416,11 @@ export async function copyResource(
   to: string,
   fetchImpl?: typeof fetch,
 ): Promise<{ url: string }> {
-  const src = await readRaw(from, fetchImpl);
-  await writeRaw(to, src.text, {
-    contentType: src.contentType,
+  // Byte-exact: read the source as a Blob (never a text decode) so binary
+  // resources — images, PDFs, audio — copy without corruption.
+  const src = await readBytes(from, fetchImpl);
+  await writeRaw(to, src.blob, {
+    contentType: src.contentType ?? src.blob.type ?? "application/octet-stream",
     createOnly: true,
     fetchImpl,
   });

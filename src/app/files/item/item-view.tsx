@@ -29,7 +29,7 @@ import {
   deleteEntry,
   nameFromUrl,
   parentContainer,
-  readRaw,
+  readBytes,
 } from "@/lib/files";
 import { ResourceDeleteError } from "@/lib/errors";
 import { viewerKindLabel } from "@/lib/viewers";
@@ -201,10 +201,7 @@ function DownloadButton({ url, name }: { url: string; name: string }) {
   async function download() {
     setBusy(true);
     try {
-      const raw = await readRaw(url);
-      const blob = new Blob([raw.text], {
-        type: raw.contentType ?? "application/octet-stream",
-      });
+      const { blob } = await readBytes(url);
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;

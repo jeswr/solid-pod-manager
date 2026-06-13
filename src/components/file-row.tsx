@@ -33,7 +33,7 @@ import {
   isContainerUrl,
   nameFromUrl,
   parentContainer,
-  readRaw,
+  readBytes,
   renameResource,
   childResourceUrl,
 } from "@/lib/files";
@@ -128,12 +128,10 @@ function RowActions({
   async function download() {
     setDownloading(true);
     try {
-      // Authenticated GET (the resource may be private), then a Blob download —
-      // a bare <a download> would fetch unauthenticated and 401.
-      const raw = await readRaw(item.url);
-      const blob = new Blob([raw.text], {
-        type: raw.contentType ?? "application/octet-stream",
-      });
+      // Authenticated, byte-exact GET (the resource may be private and/or
+      // binary), then a Blob download — a bare <a download> would fetch
+      // unauthenticated and 401, and a text round-trip would corrupt binaries.
+      const { blob } = await readBytes(item.url);
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;

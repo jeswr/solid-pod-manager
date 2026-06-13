@@ -3,12 +3,14 @@ import { describe, it, expect } from "vitest";
 import {
   asContainerUrl,
   isContainerUrl,
+  isDirectChild,
   parentContainer,
   breadcrumbs,
   toFileSlug,
   childResourceUrl,
   childContainerUrl,
   readRaw,
+  readBytes,
   writeRaw,
   createContainer,
   uploadFile,
@@ -67,6 +69,26 @@ describe("path helpers", () => {
   it("decodes percent-encoded segments in breadcrumb labels", () => {
     const trail = breadcrumbs("https://alice.example/My%20Docs/", POD);
     expect(trail.at(-1)?.label).toBe("My Docs");
+  });
+});
+
+describe("isDirectChild (SEC-1 listing guard)", () => {
+  const C = "https://alice.example/docs/";
+  it("accepts a direct child resource or container", () => {
+    expect(isDirectChild("https://alice.example/docs/a.ttl", C)).toBe(true);
+    expect(isDirectChild("https://alice.example/docs/sub/", C)).toBe(true);
+  });
+  it("rejects the container itself", () => {
+    expect(isDirectChild(C, C)).toBe(false);
+  });
+  it("rejects a grandchild (not direct)", () => {
+    expect(isDirectChild("https://alice.example/docs/sub/x.ttl", C)).toBe(false);
+  });
+  it("rejects a cross-origin member (hostile ldp:contains)", () => {
+    expect(isDirectChild("https://evil.example/x.ttl", C)).toBe(false);
+  });
+  it("rejects a sibling outside the container", () => {
+    expect(isDirectChild("https://alice.example/other/a.ttl", C)).toBe(false);
   });
 });
 
@@ -233,6 +255,17 @@ describe("uploadFile", () => {
     expect(ct).toBe("text/turtle");
   });
 
+  it("preserves a multi-extension file name (.tar.gz not truncated)", async () => {
+    let url = "";
+    const fetchImpl: typeof fetch = async (input) => {
+      url = String(input);
+      return new Response(null, { status: 201 });
+    };
+    const file = new File(["x"], "Backup Archive.tar.gz", { type: "application/gzip" });
+    await uploadFile("https://alice.example/", file, { fetchImpl });
+    expect(url).toBe("https://alice.example/backup-archive.tar.gz");
+  });
+
   it("can overwrite when asked (no create-only guard)", async () => {
     let headers: Record<string, string> = {};
     const fetchImpl: typeof fetch = async (_i, init) => {
@@ -261,7 +294,7 @@ describe("deleteEntry", () => {
 });
 
 describe("copyResource", () => {
-  it("reads the source and writes it create-only to the destination", async () => {
+  it("reads source bytes and writes them create-only to the destination", async () => {
     const calls: { method: string; url: string; body?: unknown }[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       const method = init?.method ?? "GET";
@@ -281,7 +314,32 @@ describe("copyResource", () => {
     );
     const put = calls.find((c) => c.method === "PUT");
     expect(put?.url).toBe("https://alice.example/copy/a.txt");
-    expect(put?.body).toBe("hello world");
+    // Byte-exact: the destination body is a Blob, content preserved.
+    expect(put?.body).toBeInstanceOf(Blob);
+    expect(await (put?.body as Blob).text()).toBe("hello world");
+  });
+
+  it("preserves binary bytes (no text round-trip corruption)", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]); // PNG-ish, invalid UTF-8
+    let putBody: unknown;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      const method = init?.method ?? "GET";
+      if (method === "GET") {
+        return new Response(bytes, {
+          status: 200,
+          headers: { "content-type": "image/png", etag: '"v1"' },
+        });
+      }
+      putBody = init?.body;
+      return new Response(null, { status: 201 });
+    };
+    await copyResource(
+      "https://alice.example/a.png",
+      "https://alice.example/copy/a.png",
+      fetchImpl,
+    );
+    const out = new Uint8Array(await (putBody as Blob).arrayBuffer());
+    expect(Array.from(out)).toEqual(Array.from(bytes));
   });
 });
 
@@ -379,5 +437,45 @@ describe("listFolder", () => {
     // Folder sorts before the file.
     expect(items[0]?.isContainer).toBe(true);
     expect(items.map((i) => i.url)).toContain("https://alice.example/docs/z.ttl");
+  });
+
+  it("filters out a hostile cross-origin ldp:contains member (SEC-1)", async () => {
+    const ttl = `
+      @prefix ldp: <http://www.w3.org/ns/ldp#> .
+      <https://alice.example/docs/> a ldp:Container ;
+        ldp:contains <https://alice.example/docs/ok.ttl>,
+                     <https://evil.example/steal.ttl>,
+                     <https://alice.example/other/sibling.ttl> .
+    `;
+    const fetchImpl: typeof fetch = async () =>
+      new Response(ttl, { status: 200, headers: { "content-type": "text/turtle" } });
+    const items = await listFolder("https://alice.example/docs/", fetchImpl);
+    const urls = items.map((i) => i.url);
+    expect(urls).toContain("https://alice.example/docs/ok.ttl");
+    expect(urls).not.toContain("https://evil.example/steal.ttl");
+    expect(urls).not.toContain("https://alice.example/other/sibling.ttl");
+  });
+});
+
+describe("readBytes (byte-exact path)", () => {
+  it("returns the body as a Blob without a text decode", async () => {
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0x00, 0x01]); // not valid UTF-8
+    const fetchImpl: typeof fetch = async () =>
+      new Response(bytes, {
+        status: 200,
+        headers: { "content-type": "image/jpeg", etag: '"v1"' },
+      });
+    const r = await readBytes("https://alice.example/p.jpg", fetchImpl);
+    expect(r.contentType).toBe("image/jpeg");
+    expect(r.etag).toBe('"v1"');
+    const out = new Uint8Array(await r.blob.arrayBuffer());
+    expect(Array.from(out)).toEqual(Array.from(bytes));
+  });
+
+  it("throws ItemReadError on a non-2xx", async () => {
+    const fetchImpl: typeof fetch = async () => new Response(null, { status: 404 });
+    await expect(readBytes("https://alice.example/p.jpg", fetchImpl)).rejects.toSatisfy(
+      (e: unknown) => e instanceof ItemReadError && e.status === 404,
+    );
   });
 });

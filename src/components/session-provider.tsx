@@ -44,6 +44,7 @@ import {
   type SessionStore,
 } from "@/lib/session-persistence";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
+import { readCache } from "@/lib/swr-cache";
 
 type Status = "loading" | "logged-out" | "authenticating" | "logged-in";
 
@@ -313,8 +314,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         pendingWebIdRef.current = id;
         activeIssuerRef.current = issuer;
 
+        // Account switch (logging into a different WebID without an explicit
+        // logout): clear the read cache so the new account never renders the
+        // previous one's cached models. Per-WebID keying already prevents a
+        // cross-account read; this also frees the old partition.
+        setWebId((prev) => {
+          if (prev && prev !== id) readCache.clearWebId(prev);
+          return id;
+        });
         const p = await fetchProfile(id);
-        setWebId(id);
         setProfile(p);
         setActive(p.storages[0]);
         setStatus("logged-in");
@@ -398,6 +406,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, [getController]);
 
   const logout = useCallback(() => {
+    // Drop every cached read model so a logged-out (or next) user is never
+    // shown the previous account's data from the SWR read cache. The cache is
+    // a render-speed optimization only; clearing it here is the security
+    // boundary for the read snapshots (writes already re-read fresh).
+    readCache.clearAll();
     setWebId(undefined);
     setProfile(undefined);
     setActive(undefined);

@@ -49,7 +49,8 @@ export default function GrantPage() {
 function GrantScreen() {
   const params = useSearchParams();
   const router = useRouter();
-  const { ctx, data: apps, loading, error, reload } = useConnectedApps();
+  const { ctx, data: apps, loading, error, reload, getFreshModel } =
+    useConnectedApps();
 
   const clientId = params.get("client") ?? undefined;
   const reason = params.get("reason") ?? undefined;
@@ -142,12 +143,22 @@ function GrantScreen() {
   async function accept() {
     if (!ctx) return;
     setBusy(true);
+    // SECURITY: grant against a FRESH context (owner WebID / pod root /
+    // category targets, re-discovered live) rather than the cached snapshot
+    // the offered list was rendered from. Falls back to the rendered ctx only
+    // if the fresh read fails, so a grant is never silently dropped.
+    let writeCtx = ctx;
+    try {
+      writeCtx = (await getFreshModel()).ctx;
+    } catch {
+      // keep rendered ctx — the write is still authoritative under If-Match.
+    }
     const granted: string[] = [];
     const failed: string[] = [];
     for (const { category, grantable } of offered) {
       if (!checked.has(category.id) || grantable === 0) continue;
       try {
-        await permissionsBackend.grant(ctx, clientId as string, category.id, modes);
+        await permissionsBackend.grant(writeCtx, clientId as string, category.id, modes);
         granted.push(category.label.toLowerCase());
       } catch {
         failed.push(category.label.toLowerCase());

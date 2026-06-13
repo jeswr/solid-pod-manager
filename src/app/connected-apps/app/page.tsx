@@ -19,11 +19,12 @@ import { categoryIcon } from "@/components/category-icon";
 import { EmptyState, ErrorState } from "@/components/states";
 import { AppHomepageLink, ModeBadges } from "@/components/permissions-ui";
 import {
+  freshGrantsForAgent,
+  freshGrantsForCategory,
   permissionsBackend,
   useConnectedApp,
 } from "@/components/use-permissions";
 import {
-  allGrants,
   describeModes,
   type CategoryAccess,
 } from "@/lib/permissions";
@@ -44,7 +45,7 @@ function ConnectedAppDetail() {
   // `?id=` is the app's agent id URL (URLSearchParams decodes it). A missing
   // id falls through to the "no access" empty state below.
   const agentId = useSearchParams().get("id") ?? "";
-  const { app, ctx, loading, error, reload } = useConnectedApp(agentId);
+  const { app, loading, error, reload, getFreshModel } = useConnectedApp(agentId);
   const router = useRouter();
 
   // Optimistic per-category removals (rolled back on failure).
@@ -61,33 +62,41 @@ function ConnectedAppDetail() {
     const label = access.category.label.toLowerCase();
     setRemovedCategories((r) => new Set(r).add(categoryId));
     try {
-      await permissionsBackend.revokeGrants(app.agentId, access.grants);
+      // SECURITY: revoke against FRESH ACL state, never the (possibly cached)
+      // rendered snapshot — a grant added after the cache was written must
+      // still be revoked. getFreshModel re-discovers live; the backend write
+      // is independently authoritative under If-Match.
+      const fresh = await getFreshModel();
+      const grants = freshGrantsForCategory(fresh, app.agentId, categoryId);
+      await permissionsBackend.revokeGrants(app.agentId, grants);
       toast.success(
         `${app.name} can no longer ${describeModes(access.modes)} your ${label}.`,
         {
           description: "You can grant access again anytime.",
-          action: ctx
-            ? {
-                label: "Undo",
-                onClick: () => {
-                  permissionsBackend
-                    .grant(ctx, app.agentId, categoryId, access.modes)
-                    .then(() => {
-                      // Un-hide the optimistically removed row before reloading.
-                      setRemovedCategories((r) => {
-                        const next = new Set(r);
-                        next.delete(categoryId);
-                        return next;
-                      });
-                      toast.success(`${app.name} can access your ${label} again.`);
-                      reload();
-                    })
-                    .catch(() => {
-                      toast.error(`Couldn't restore access to your ${label}.`);
-                    });
-                },
-              }
-            : undefined,
+          action: {
+            label: "Undo",
+            onClick: () => {
+              // Re-grant against a FRESH context too (the owner WebID / pod
+              // root / category targets, re-discovered live).
+              getFreshModel()
+                .then((m) =>
+                  permissionsBackend.grant(m.ctx, app.agentId, categoryId, access.modes),
+                )
+                .then(() => {
+                  // Un-hide the optimistically removed row before reloading.
+                  setRemovedCategories((r) => {
+                    const next = new Set(r);
+                    next.delete(categoryId);
+                    return next;
+                  });
+                  toast.success(`${app.name} can access your ${label} again.`);
+                  reload();
+                })
+                .catch(() => {
+                  toast.error(`Couldn't restore access to your ${label}.`);
+                });
+            },
+          },
         },
       );
       reload();
@@ -107,7 +116,10 @@ function ConnectedAppDetail() {
     if (!app) return;
     setBusy(true);
     try {
-      await permissionsBackend.revokeGrants(app.agentId, allGrants(app));
+      // SECURITY: revoke against FRESH grants (see revokeCategory).
+      const fresh = await getFreshModel();
+      const grants = freshGrantsForAgent(fresh, app.agentId);
+      await permissionsBackend.revokeGrants(app.agentId, grants);
       toast.success(`${app.name} can no longer access anything in your pod.`, {
         description: "You can grant access again anytime.",
       });

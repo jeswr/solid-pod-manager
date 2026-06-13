@@ -17,11 +17,12 @@ import {
   categoriesPhrase,
 } from "@/components/permissions-ui";
 import {
+  freshGrantsForAgent,
   permissionsBackend,
   useConnectedApps,
   type ConnectedApp,
 } from "@/components/use-permissions";
-import { allGrants, describeModes } from "@/lib/permissions";
+import { describeModes } from "@/lib/permissions";
 import { TrustedAppsSection } from "@/components/trusted-apps-section";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -30,7 +31,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 const EMPTY_APPS: ConnectedApp[] = [];
 
 export default function ConnectedAppsPage() {
-  const { data: apps, loading, error, reload } = useConnectedApps();
+  const { data: apps, loading, error, revalidating, reload, getFreshModel } =
+    useConnectedApps();
   // Optimistic removals: hide immediately, restore on failure.
   const [removed, setRemoved] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
@@ -41,7 +43,11 @@ export default function ConnectedAppsPage() {
     setBusy((b) => new Set(b).add(app.agentId));
     setRemoved((r) => new Set(r).add(app.agentId));
     try {
-      await permissionsBackend.revokeGrants(app.agentId, allGrants(app));
+      // SECURITY: revoke against FRESH grants, never the (possibly cached)
+      // rendered snapshot. getFreshModel re-discovers live before we act.
+      const fresh = await getFreshModel();
+      const grants = freshGrantsForAgent(fresh, app.agentId);
+      await permissionsBackend.revokeGrants(app.agentId, grants);
       toast.success(`${app.name} can no longer access your data.`, {
         description: "You can grant access again anytime.",
       });
@@ -75,6 +81,21 @@ export default function ConnectedAppsPage() {
           The apps that can read or write your data — and exactly which
           categories each one can touch. One-click revoke, any time.
         </p>
+        {/* SWR affordance: this list may briefly show a cached snapshot while
+            it re-checks who has access. Security-sensitive, so say so. */}
+        {revalidating && !loading ? (
+          <p
+            className="mt-1 inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+            role="status"
+            aria-live="polite"
+          >
+            <span
+              aria-hidden="true"
+              className="size-1.5 animate-pulse rounded-full bg-muted-foreground"
+            />
+            Refreshing access…
+          </p>
+        ) : null}
       </header>
 
       {error ? (
@@ -147,7 +168,12 @@ export default function ConnectedAppsPage() {
         // the parent's `removed` set, so an app hidden by "Revoke all" up here
         // is also hidden in the trusted-apps section until the reload completes
         // (roborev).
-        <TrustedAppsSection apps={apps ?? EMPTY_APPS} parentRemoved={removed} reload={reload} />
+        <TrustedAppsSection
+          apps={apps ?? EMPTY_APPS}
+          parentRemoved={removed}
+          reload={reload}
+          getFreshModel={getFreshModel}
+        />
       ) : null}
     </div>
   );

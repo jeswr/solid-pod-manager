@@ -41,4 +41,33 @@ describe("sourceActionFor", () => {
   it("is case-insensitive on the host", () => {
     expect(sourceActionFor("https://OPEN.SPOTIFY.COM/track/x")?.id).toBe("spotify");
   });
+
+  it("matches a Google Calendar htmlLink (www.google.com/calendar/event?…)", () => {
+    const m = sourceActionFor("https://www.google.com/calendar/event?eid=abc");
+    expect(m?.id).toBe("google-calendar");
+    expect(m?.label).toBe("Open in Google Calendar");
+    expect(m?.icon).toBe("calendar");
+  });
+
+  it("matches the calendar.google.com host form", () => {
+    expect(sourceActionFor("https://calendar.google.com/calendar/u/0/r/eventedit/x")?.id).toBe(
+      "google-calendar",
+    );
+  });
+
+  it("does not treat a non-calendar google.com path as a calendar source", () => {
+    expect(sourceActionFor("https://www.google.com/search?q=x")).toBeUndefined();
+  });
+
+  it("matches a Google Photos productUrl", () => {
+    expect(sourceActionFor("https://photos.google.com/lr/photo/AGj1epU8f9k2mNq")?.id).toBe(
+      "google-photos",
+    );
+  });
+
+  it("matches a Pinterest pin page", () => {
+    const m = sourceActionFor("https://www.pinterest.com/pin/813034246246243478/");
+    expect(m?.id).toBe("pinterest");
+    expect(m?.label).toBe("Open in Pinterest");
+  });
 });

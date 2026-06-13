@@ -50,3 +50,37 @@ Phase P2 — touched (registration / follow-up note only):
 - `src/lib/integrations/spotify/adapter.ts` — comment-only FOLLOW-UP note that a
   one-line `album.images[0].url` → `schema:image` change would populate real
   cover art (no behaviour change made).
+
+Phase P3 (Photos / Events / Bookmarks viewers) — new files:
+
+- `src/lib/typed-views/photo-view.ts` — `schema:ImageObject`/`Photograph`
+  matcher + extractor (title/contentUrl/width/height/source). Grounded in
+  `MediaItem` (`integrations/core/vocab.ts`) as written by `google-photos` and
+  `pinterest` adapters; excludes `schema:VideoObject` from the photo grid.
+- `src/lib/typed-views/photo-view.test.ts`
+- `src/lib/typed-views/event-view.ts` — `schema:Event` matcher + extractor
+  (title/start/end/location/description/source). Grounded in `CalendarEvent`
+  (`google-calendar` adapter). Keeps raw ISO dates; the card formats them.
+- `src/lib/typed-views/event-view.test.ts`
+- `src/lib/typed-views/bookmark-view.ts` — `bookmark:Bookmark` /
+  `bookmark:recalls` matcher + extractor (title/href/host). Targets the generic
+  interop shape (no integration writes bookmarks today); accepts `schema:url`
+  and dc/dct/rdfs title fallbacks; `safeLinkHref`-gates the outbound link.
+- `src/lib/typed-views/bookmark-view.test.ts`
+- `src/components/typed-views/photo-grid.tsx` — thumbnail grid (remote
+  `schema:contentUrl`, `safeLinkHref`-gated) + caption + source action.
+- `src/components/typed-views/event-card.tsx` — date/location/title cards;
+  locale formatting of the ISO dates via `Intl` in the render layer.
+- `src/components/typed-views/bookmark-card.tsx` — favicon (host-keyed) + title
+  + host + Open action.
+
+Phase P3 — touched (registration / matcher additions only):
+
+- `src/lib/typed-views/select.ts` — registers `photoViewer`/`eventViewer`/
+  `bookmarkViewer` in `TYPED_VIEWERS` (priority 60).
+- `src/lib/typed-views/sources.ts` — adds Google Calendar / Google Photos /
+  Pinterest matchers to the source-action table.
+- `src/lib/typed-views/sources.test.ts` — coverage for the new matchers.
+- `src/components/typed-views/registry.tsx` — binds the three viewers to cards.
+- `src/components/typed-views/source-action.tsx` — maps the `calendar` icon name
+  to the Lucide `CalendarDays` component.

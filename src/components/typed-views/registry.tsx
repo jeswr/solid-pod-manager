@@ -12,8 +12,14 @@ import type { TypedViewer } from "@/lib/typed-views/types";
 import { selectTypedViewer, buildViewerContext } from "@/lib/typed-views/select";
 import { contactsViewer, type ContactsModel } from "@/lib/typed-views/contacts-view";
 import { musicViewer, type MusicModel } from "@/lib/typed-views/music-view";
+import { photoViewer, type PhotoModel } from "@/lib/typed-views/photo-view";
+import { eventViewer, type EventModel } from "@/lib/typed-views/event-view";
+import { bookmarkViewer, type BookmarkModel } from "@/lib/typed-views/bookmark-view";
 import { ContactsCardList } from "@/components/typed-views/contacts-card";
 import { MusicCardList } from "@/components/typed-views/music-card";
+import { PhotoGrid } from "@/components/typed-views/photo-grid";
+import { EventCardList } from "@/components/typed-views/event-card";
+import { BookmarkCardList } from "@/components/typed-views/bookmark-card";
 
 /** A React card for a viewer's model. */
 type CardComponent<M> = (props: { model: M; url: string }) => ReactNode;
@@ -45,6 +51,9 @@ function entry<M>(e: TypedViewEntry<M>): RenderableEntry {
 const ENTRIES: Record<string, RenderableEntry> = {
   [contactsViewer.id]: entry<ContactsModel>({ viewer: contactsViewer, card: ContactsCardList }),
   [musicViewer.id]: entry<MusicModel>({ viewer: musicViewer, card: MusicCardList }),
+  [photoViewer.id]: entry<PhotoModel>({ viewer: photoViewer, card: PhotoGrid }),
+  [eventViewer.id]: entry<EventModel>({ viewer: eventViewer, card: EventCardList }),
+  [bookmarkViewer.id]: entry<BookmarkModel>({ viewer: bookmarkViewer, card: BookmarkCardList }),
 };
 
 /**

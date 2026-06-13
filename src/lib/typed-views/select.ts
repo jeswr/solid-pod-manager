@@ -16,6 +16,9 @@ import type { DatasetCore, Quad } from "@rdfjs/types";
 import type { TypedViewer, ViewerContext } from "./types.js";
 import { contactsViewer } from "./contacts-view.js";
 import { musicViewer } from "./music-view.js";
+import { photoViewer } from "./photo-view.js";
+import { eventViewer } from "./event-view.js";
+import { bookmarkViewer } from "./bookmark-view.js";
 
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
@@ -23,9 +26,16 @@ const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
  * The registered viewers, highest specificity first (registration order is the
  * tie-break for equal priorities). New viewers are added here — one line each.
  * Contacts and Music share priority 70 but target disjoint shapes (vcard vs
- * schema music), so the tie-break never decides between them in practice.
+ * schema music); Photo/Event/Bookmark sit at 60. All target disjoint shapes, so
+ * the tie-break never decides between them in practice.
  */
-export const TYPED_VIEWERS: readonly TypedViewer[] = [contactsViewer, musicViewer];
+export const TYPED_VIEWERS: readonly TypedViewer[] = [
+  contactsViewer,
+  musicViewer,
+  photoViewer,
+  eventViewer,
+  bookmarkViewer,
+];
 
 /** Collect every `rdf:type` IRI on any subject in the dataset (precompute). */
 export function collectTypes(dataset: DatasetCore): Set<string> {

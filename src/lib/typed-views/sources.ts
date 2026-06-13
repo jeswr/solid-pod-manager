@@ -56,6 +56,42 @@ const MATCHERS: readonly SourceMatcher[] = [
     action: { id: "spotify", label: "Open in Spotify", icon: "external-link", brand: "spotify" },
     hrefFromResource: (u) => u,
   },
+  {
+    // Google Calendar writes `htmlLink` — historically `www.google.com/calendar/event?…`
+    // and `calendar.google.com/…` (google-calendar/adapter.ts → schema:url).
+    test: (h, url) =>
+      h === "calendar.google.com" ||
+      ((h === "www.google.com" || h === "google.com") && url.pathname.startsWith("/calendar")),
+    action: {
+      id: "google-calendar",
+      label: "Open in Google Calendar",
+      icon: "calendar",
+      brand: "google",
+    },
+    hrefFromResource: (u) => u,
+  },
+  {
+    // Google Photos writes `productUrl` = `photos.google.com/…` (google-photos/adapter.ts).
+    test: (h) => h === "photos.google.com",
+    action: {
+      id: "google-photos",
+      label: "Open in Google Photos",
+      icon: "external-link",
+      brand: "google",
+    },
+    hrefFromResource: (u) => u,
+  },
+  {
+    // Pinterest writes the pin page `pinterest.com/pin/…` (pinterest/adapter.ts).
+    test: (h) => h === "pinterest.com" || h.endsWith(".pinterest.com"),
+    action: {
+      id: "pinterest",
+      label: "Open in Pinterest",
+      icon: "external-link",
+      brand: "pinterest",
+    },
+    hrefFromResource: (u) => u,
+  },
 ];
 
 /**

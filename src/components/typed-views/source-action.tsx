@@ -7,13 +7,14 @@
  * to Lucide components here (same pattern as `category-icon.tsx`), keeping
  * `lib/` DOM-free. The `href` was already gated by `safeLinkHref` upstream.
  */
-import { ExternalLink, type LucideIcon } from "lucide-react";
+import { CalendarDays, ExternalLink, type LucideIcon } from "lucide-react";
 import type { SourceMatch } from "@/lib/typed-views/sources";
 import { Button } from "@/components/ui/button";
 
 /** Map an icon name (from the pure layer) to a Lucide component. */
 const ICONS: Record<string, LucideIcon> = {
   "external-link": ExternalLink,
+  calendar: CalendarDays,
 };
 
 /** A button/link that opens the resource on its source platform, in a new tab. */

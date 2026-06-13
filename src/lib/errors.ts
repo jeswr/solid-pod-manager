@@ -197,6 +197,22 @@ export class InboxScopeError extends PodDataError {
   }
 }
 
+/**
+ * A chat container/message URL is outside the user's own pods, or a message is
+ * not a direct child of its chat container. Confused-deputy guard on the
+ * `?url=` param (and on minted message URLs). Fail closed before any I/O.
+ */
+export class ChatScopeError extends PodDataError {
+  readonly url: string;
+  readonly scope: string;
+  constructor(url: string, scope: string) {
+    super(`Refusing to act on a chat resource outside your own pods: ${url}`);
+    this.name = "ChatScopeError";
+    this.url = url;
+    this.scope = scope;
+  }
+}
+
 /** A pod delete (DELETE) was rejected by the server. */
 export class ResourceDeleteError extends PodDataError {
   readonly url: string;

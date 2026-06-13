@@ -32,3 +32,21 @@ Touched (wire-in only, not net-new files):
   `LoadedResource` for the `rdf` kind (no extra fetch).
 - `src/components/resource-viewer.tsx` — the `"rdf"` branch tries the typed-view
   registry first, then falls back to the generic `RdfViewer` triple table.
+
+Phase P2 (Music / liked-songs viewer) — new files:
+
+- `src/lib/typed-views/music-view.ts` — `schema:MusicRecording`/`MusicPlaylist`
+  matcher + extractor (title/artist/album/duration/source) and
+  `humanizeDuration`. Reads `schema:image`/`schema:thumbnailUrl` *if present*
+  (none imported today) and degrades to a music-note icon.
+- `src/lib/typed-views/music-view.test.ts`
+- `src/components/typed-views/music-card.tsx` — cover-art rows + "Open in
+  Spotify" action; icon fallback when no art triple exists.
+
+Phase P2 — touched (registration / follow-up note only):
+
+- `src/lib/typed-views/select.ts` — registers `musicViewer` in `TYPED_VIEWERS`.
+- `src/components/typed-views/registry.tsx` — binds the music viewer to its card.
+- `src/lib/integrations/spotify/adapter.ts` — comment-only FOLLOW-UP note that a
+  one-line `album.images[0].url` → `schema:image` change would populate real
+  cover art (no behaviour change made).

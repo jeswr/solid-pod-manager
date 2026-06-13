@@ -11,7 +11,9 @@ import type { LoadedResource } from "@/components/use-resource";
 import type { TypedViewer } from "@/lib/typed-views/types";
 import { selectTypedViewer, buildViewerContext } from "@/lib/typed-views/select";
 import { contactsViewer, type ContactsModel } from "@/lib/typed-views/contacts-view";
+import { musicViewer, type MusicModel } from "@/lib/typed-views/music-view";
 import { ContactsCardList } from "@/components/typed-views/contacts-card";
+import { MusicCardList } from "@/components/typed-views/music-card";
 
 /** A React card for a viewer's model. */
 type CardComponent<M> = (props: { model: M; url: string }) => ReactNode;
@@ -42,6 +44,7 @@ function entry<M>(e: TypedViewEntry<M>): RenderableEntry {
  */
 const ENTRIES: Record<string, RenderableEntry> = {
   [contactsViewer.id]: entry<ContactsModel>({ viewer: contactsViewer, card: ContactsCardList }),
+  [musicViewer.id]: entry<MusicModel>({ viewer: musicViewer, card: MusicCardList }),
 };
 
 /**

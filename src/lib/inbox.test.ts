@@ -53,6 +53,36 @@ describe("parseInboxNotification", () => {
     );
     expect(parseInboxNotification(N1, store)).toBeUndefined();
   });
+
+  it("parses object/target/content/published fields", async () => {
+    const { Parser, Store } = await import("n3");
+    const ttlBody = `
+      @prefix as: <https://www.w3.org/ns/activitystreams#> .
+      <${N1}#it> a as:Invite ;
+        as:actor <${WEBID}> ;
+        as:object <https://alice.example/schedule/p.ttl> ;
+        as:target <https://bob.example/x> ;
+        as:content "Join us" ;
+        as:published "2026-06-13T12:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .`;
+    const n = parseInboxNotification(N1, new Store(new Parser().parse(ttlBody)));
+    expect(n?.type).toBe("Invite");
+    expect(n?.object).toBe("https://alice.example/schedule/p.ttl");
+    expect(n?.target).toBe("https://bob.example/x");
+    expect(n?.content).toBe("Join us");
+    expect(n?.published).toBe("2026-06-13T12:00:00.000Z");
+  });
+
+  it("falls back to the #it subject for a typeless payload carrying as:actor", async () => {
+    const { Parser, Store } = await import("n3");
+    // No rdf:type, but an as:actor on the conventional #it subject.
+    const ttlBody = `
+      @prefix as: <https://www.w3.org/ns/activitystreams#> .
+      <${N1}#it> as:actor <${WEBID}> ; as:summary "ping" .`;
+    const n = parseInboxNotification(N1, new Store(new Parser().parse(ttlBody)));
+    expect(n?.actor).toBe(WEBID);
+    expect(n?.summary).toBe("ping");
+    expect(n?.type).toBe("Notification"); // no as: type → generic label
+  });
 });
 
 describe("Inbox.list", () => {

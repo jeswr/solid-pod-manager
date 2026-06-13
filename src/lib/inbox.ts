@@ -18,7 +18,7 @@
  * {@link InboxNotification} shape.
  */
 import { RdfFetchError } from "@jeswr/fetch-rdf";
-import { TermWrapper } from "@rdfjs/wrapper";
+import { LiteralFrom, NamedNodeFrom, OptionalAs, TermWrapper } from "@rdfjs/wrapper";
 import { DataFactory, Store } from "n3";
 import { ActivityDoc } from "./notify-send.js";
 import { discoverInbox } from "./agent-target.js";
@@ -265,24 +265,20 @@ export class Inbox {
 
 /**
  * A writable read-marker doc: records `as:read true` plus an `as:object` linking
- * back to the notification it marks. Built via typed accessors (no hand Turtle).
+ * back to the notification it marks. Written via TYPED `@rdfjs/wrapper`
+ * accessors (house rule: never inline `DataFactory.quad` / hand-build triples).
  */
 class MutableReadMarker extends TermWrapper {
+  set read(v: boolean | undefined) {
+    OptionalAs.object(this, READ_PREDICATE, v, LiteralFrom.boolean);
+  }
+  /** `as:object` — the notification this marker refers to. */
+  set marks(v: string | undefined) {
+    OptionalAs.object(this, `${AS}object`, v, NamedNodeFrom.string);
+  }
   markRead(notificationUrl: string): void {
-    this.dataset.add(
-      DataFactory.quad(
-        DataFactory.namedNode(this.value),
-        DataFactory.namedNode(READ_PREDICATE),
-        DataFactory.literal("true", DataFactory.namedNode("http://www.w3.org/2001/XMLSchema#boolean")),
-      ),
-    );
-    this.dataset.add(
-      DataFactory.quad(
-        DataFactory.namedNode(this.value),
-        DataFactory.namedNode(`${AS}object`),
-        DataFactory.namedNode(notificationUrl),
-      ),
-    );
+    this.read = true;
+    this.marks = notificationUrl;
   }
 }
 

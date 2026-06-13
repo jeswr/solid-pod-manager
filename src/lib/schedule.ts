@@ -174,17 +174,65 @@ export function parsePoll(
 /** RSVPs are modelled as `schema:RsvpAction` subjects linked to the poll. */
 const RSVP_ACTION = `${SCHEMA}RsvpAction`;
 
-/** Typed view of one RSVP action subject. */
+/**
+ * Typed view of one `schema:RsvpAction` subject — read AND write through
+ * `@rdfjs/wrapper` accessors (house rule: never inline `DataFactory.quad`).
+ */
 class RsvpDoc extends TermWrapper {
+  get types(): Set<string> {
+    return SetFrom.subjectPredicate(this, RDF_TYPE, NamedNodeAs.string, NamedNodeFrom.string);
+  }
+  mark(): this {
+    this.types.add(RSVP_ACTION);
+    return this;
+  }
+  /** `schema:object` — the poll this RSVP is for. Named `forPoll` because
+   *  `TermWrapper` already defines an `object` term getter. */
+  get forPoll(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${SCHEMA}object`, NamedNodeAs.string);
+  }
+  set forPoll(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}object`, v, NamedNodeFrom.string);
+  }
   get attendee(): string | undefined {
     return OptionalFrom.subjectPredicate(this, `${SCHEMA}attendee`, NamedNodeAs.string);
+  }
+  set attendee(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}attendee`, v, NamedNodeFrom.string);
   }
   get option(): Date | undefined {
     return OptionalFrom.subjectPredicate(this, `${SCHEMA}startDate`, LiteralAs.date);
   }
+  set option(v: Date | undefined) {
+    OptionalAs.object(this, `${SCHEMA}startDate`, v, LiteralFrom.dateTime);
+  }
   get response(): string | undefined {
     return OptionalFrom.subjectPredicate(this, `${SCHEMA}rsvpResponse`, NamedNodeAs.string);
   }
+  set response(v: string | undefined) {
+    OptionalAs.object(this, `${SCHEMA}rsvpResponse`, v, NamedNodeFrom.string);
+  }
+}
+
+/**
+ * Write one RSVP action into `store` at `subject`, linked to `pollSubject`, via
+ * typed accessors. Centralises the RsvpAction shape used by both `buildPoll`
+ * (aggregated copy in the organiser's poll) and `respondToPoll` (the invitee's
+ * own-pod response). `TermWrapper`'s `object` getter is reserved, so the doc
+ * exposes the poll link as `object` setter (mapped to `schema:object`).
+ */
+function writeRsvpAction(
+  store: Store,
+  subject: string,
+  pollSubject: string,
+  rsvp: Rsvp,
+): void {
+  const optDate = new Date(rsvp.option);
+  const doc = new RsvpDoc(subject, store, DataFactory).mark();
+  doc.forPoll = pollSubject;
+  doc.attendee = rsvp.attendee;
+  doc.option = Number.isNaN(optDate.getTime()) ? undefined : optDate;
+  doc.response = RSVP_IRI[rsvp.response];
 }
 
 /**
@@ -225,29 +273,12 @@ export function buildPoll(itemUrl: string, poll: Poll): Store {
   const invitees = doc.invitees;
   for (const inv of poll.invitees) if (isWebId(inv)) invitees.add(inv);
 
-  // RSVP actions: one subject per (attendee, option), typed accessors only.
+  // RSVP actions: one subject per (attendee, option), via typed accessors only.
   let i = 0;
   for (const r of poll.rsvps) {
     if (!isWebId(r.attendee)) continue;
-    const optDate = new Date(r.option);
-    if (Number.isNaN(optDate.getTime())) continue;
-    const rsvpSubject = `${itemUrl}#rsvp-${i++}`;
-    const node = DataFactory.namedNode(rsvpSubject);
-    store.add(DataFactory.quad(node, DataFactory.namedNode(RDF_TYPE), DataFactory.namedNode(RSVP_ACTION)));
-    store.add(DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}object`), DataFactory.namedNode(subject)));
-    store.add(
-      DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}attendee`), DataFactory.namedNode(r.attendee)),
-    );
-    store.add(
-      DataFactory.quad(
-        node,
-        DataFactory.namedNode(`${SCHEMA}startDate`),
-        DataFactory.literal(optDate.toISOString(), DataFactory.namedNode("http://www.w3.org/2001/XMLSchema#dateTime")),
-      ),
-    );
-    store.add(
-      DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}rsvpResponse`), DataFactory.namedNode(RSVP_IRI[r.response])),
-    );
+    if (Number.isNaN(new Date(r.option).getTime())) continue;
+    writeRsvpAction(store, `${itemUrl}#rsvp-${i++}`, subject, r);
   }
   return store;
 }
@@ -376,24 +407,12 @@ export async function respondToPoll(
   const optDate = new Date(args.option);
   const optionIso = Number.isNaN(optDate.getTime()) ? args.option : optDate.toISOString();
   const store = new Store();
-  const node = DataFactory.namedNode(`${responseUrl}#it`);
-  store.add(DataFactory.quad(node, DataFactory.namedNode(RDF_TYPE), DataFactory.namedNode(RSVP_ACTION)));
-  store.add(
-    DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}object`), DataFactory.namedNode(args.pollUrl)),
-  );
-  store.add(
-    DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}attendee`), DataFactory.namedNode(args.attendeeWebId)),
-  );
-  store.add(
-    DataFactory.quad(
-      node,
-      DataFactory.namedNode(`${SCHEMA}startDate`),
-      DataFactory.literal(optionIso, DataFactory.namedNode("http://www.w3.org/2001/XMLSchema#dateTime")),
-    ),
-  );
-  store.add(
-    DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}rsvpResponse`), DataFactory.namedNode(RSVP_IRI[args.response])),
-  );
+  // Typed RsvpAction write (house rule: no inline DataFactory.quad).
+  writeRsvpAction(store, `${responseUrl}#it`, args.pollUrl, {
+    attendee: args.attendeeWebId,
+    option: optionIso,
+    response: args.response,
+  });
   await writeResource(responseUrl, store, { fetchImpl, prefixes: PREFIXES });
 
   // 2. Notify the organiser (strict-validated cross-pod). Best-effort: the RSVP
@@ -591,11 +610,10 @@ export async function readRsvpResourceAt(
   const out: Rsvp[] = [];
   for (const q of dataset.match(null, DataFactory.namedNode(RDF_TYPE), DataFactory.namedNode(RSVP_ACTION))) {
     const doc = new RsvpDoc(q.subject.value, dataset, DataFactory);
-    const object = OptionalFrom.subjectPredicate(doc, `${SCHEMA}object`, NamedNodeAs.string);
     const attendee = doc.attendee;
     const option = doc.option;
     const response = doc.response ? RSVP_FROM_IRI[doc.response] : undefined;
-    if (object !== expectedPoll) continue; // RSVP must be for THIS poll
+    if (doc.forPoll !== expectedPoll) continue; // RSVP must be for THIS poll
     if (!attendee || attendee !== expectedAttendee) continue; // and BY the sender
     if (!option || !response) continue;
     out.push({ attendee, option: option.toISOString(), response });

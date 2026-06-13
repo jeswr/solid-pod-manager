@@ -208,8 +208,15 @@ describe("discoverInbox — discovery is ONLY from the profile graph", () => {
     // Mirrors the real browser: redirect:manual yields an opaque-redirect that
     // freshRdf cannot parse → discovery collapses to undefined (never follows it).
     const fetchImpl = (async () => {
-      const r = new Response(null, { status: 0 });
+      // The Fetch API forbids `new Response(null, { status: 0 })` (the
+      // constructor only accepts 200–599), so build a valid Response and
+      // override the readonly fields to match real opaque-redirect semantics
+      // (type "opaqueredirect", status 0, ok false) — this exercises the
+      // redirect-not-followed path rather than a constructor throw.
+      const r = new Response(null, { status: 200 });
       Object.defineProperty(r, "type", { value: "opaqueredirect" });
+      Object.defineProperty(r, "status", { value: 0 });
+      Object.defineProperty(r, "ok", { value: false });
       return r;
     }) as unknown as typeof fetch;
     await expect(discoverInbox(WEBID, fetchImpl)).resolves.toBeUndefined();

@@ -44,6 +44,7 @@ function ContactEditor() {
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [note, setNote] = useState("");
+  const [contactWebId, setContactWebId] = useState("");
   const [etag, setEtag] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -54,6 +55,7 @@ function ContactEditor() {
       setEmail(item.data.email ?? "");
       setPhone(item.data.phone ?? "");
       setNote(item.data.note ?? "");
+      setContactWebId(item.data.webId ?? "");
       setEtag(item.etag);
     }
   }, [item]);
@@ -69,11 +71,18 @@ function ContactEditor() {
     }
     setSaving(true);
     try {
+      const webIdValue = contactWebId.trim();
+      if (webIdValue && !/^https?:\/\//i.test(webIdValue)) {
+        toast.error("A WebID must be a full web address (https://…).");
+        setSaving(false);
+        return;
+      }
       const contact: Contact = {
         fn: fn.trim(),
         email: email.trim() || undefined,
         phone: phone.trim() || undefined,
         note: note.trim() || undefined,
+        webId: webIdValue || undefined,
       };
       if (isNew) {
         const { url: created } = await store.create(contact, fn);
@@ -175,6 +184,23 @@ function ContactEditor() {
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder="How you know them, anything to remember…"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="contact-webid">
+              WebID (optional)
+              <span className="ml-1.5 font-normal text-muted-foreground">
+                — their Solid address, so you can pick them when sharing
+              </span>
+            </Label>
+            <Input
+              id="contact-webid"
+              type="url"
+              inputMode="url"
+              value={contactWebId}
+              onChange={(e) => setContactWebId(e.target.value)}
+              placeholder="https://them.example/profile/card#me"
             />
           </div>
 

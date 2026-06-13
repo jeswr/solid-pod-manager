@@ -53,6 +53,12 @@ export interface Contact {
   phone?: string;
   /** Free-text note — `vcard:note`. */
   note?: string;
+  /**
+   * The contact's WebID, if known — `vcard:url` (the Solid contacts
+   * convention). Lets a contact be selected in the people-picker and feed
+   * sharing/group membership. Bare IRI, no scheme stripping.
+   */
+  webId?: string;
 }
 
 /** Typed `@rdfjs/wrapper` view of a single contact's subject. */
@@ -89,6 +95,13 @@ export class ContactDoc extends TermWrapper {
   }
   set note(v: string | undefined) {
     OptionalAs.object(this, `${VCARD}note`, v, LiteralFrom.string);
+  }
+  /** The contact's WebID — `vcard:url` (a NamedNode IRI). */
+  get webId(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${VCARD}url`, NamedNodeAs.string);
+  }
+  set webId(v: string | undefined) {
+    OptionalAs.object(this, `${VCARD}url`, v, NamedNodeFrom.string);
   }
 }
 
@@ -135,6 +148,7 @@ export function parseContact(
     email: stripScheme(doc.emailUri),
     phone: stripScheme(doc.phoneUri),
     note: doc.note,
+    webId: doc.webId,
   };
 }
 
@@ -146,6 +160,7 @@ export function buildContact(itemUrl: string, contact: Contact): Store {
   doc.emailUri = toMailto(contact.email);
   doc.phoneUri = toTel(contact.phone);
   doc.note = contact.note || undefined;
+  doc.webId = contact.webId?.trim() || undefined;
   return store;
 }
 

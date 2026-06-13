@@ -367,18 +367,52 @@ export async function uploadFile(
   file: File,
   opts: { overwrite?: boolean; fetchImpl?: typeof fetch } = {},
 ): Promise<{ url: string }> {
-  // Slug the WHOLE file name (it already carries its extension), so a
-  // multi-extension name like `archive.tar.gz` keeps `.tar.gz` rather than
-  // losing the final segment. `toFileSlug` preserves dots.
-  const slug = toFileSlug(file.name);
-  if (!slug) throw new Error("That file name can't be used.");
-  const url = `${asContainerUrl(container)}${slug}`;
+  const fileName = uploadFileName(file.name);
+  const url = `${asContainerUrl(container)}${fileName}`;
   await writeRaw(url, file, {
     contentType: file.type || guessContentType(file.name) || "application/octet-stream",
     createOnly: !opts.overwrite,
     fetchImpl: opts.fetchImpl,
   });
   return { url };
+}
+
+/**
+ * Derive the storage file name for an uploaded file: slug the BASE name (with
+ * the length cap applied to the base alone) and re-attach the FULL extension
+ * chain, so a long name never truncates mid-extension and a multi-part
+ * extension like `.tar.gz` is preserved. Throws on a name that slugs to empty.
+ *
+ * `archive.tar.gz` → `archive.tar.gz`; a 200-char base keeps its `.gz`.
+ */
+export function uploadFileName(name: string): string {
+  const ext = extensionChain(name); // "" or ".tar.gz"
+  const base = ext ? name.slice(0, name.length - ext.length) : name;
+  const baseSlug = toFileSlug(base);
+  // The extension chain is slugged segment-by-segment so each part stays clean
+  // (and a leading "." is kept), without the 64-char cap eating it.
+  const extSlug = ext
+    ? `.${ext.slice(1).split(".").map((e) => toFileSlug(e)).filter(Boolean).join(".")}`
+    : "";
+  const combined = `${baseSlug}${extSlug === "." ? "" : extSlug}`;
+  const final = combined.replace(/^[-.]+|[-.]+$/g, "");
+  if (!final) throw new Error("That file name can't be used.");
+  return final;
+}
+
+/**
+ * The full leading-dot extension chain of a file name: `archive.tar.gz` →
+ * `.tar.gz`, `photo.jpg` → `.jpg`, `noext` → `""`. A dot-file with no real
+ * extension (`.gitignore`) yields `""`. Pure.
+ */
+export function extensionChain(name: string): string {
+  // Ignore a leading dot (dot-file) when locating the first extension dot.
+  const stripped = name.replace(/^\.+/, "");
+  const dot = stripped.indexOf(".");
+  if (dot < 0) return "";
+  // Map the index back onto the original name.
+  const offset = name.length - stripped.length;
+  return name.slice(offset + dot);
 }
 
 /**

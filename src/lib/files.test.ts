@@ -23,6 +23,8 @@ import {
   fileExtension,
   guessContentType,
   listFolder,
+  uploadFileName,
+  extensionChain,
 } from "./files.js";
 import { ResourceWriteError, ResourceDeleteError, ItemReadError } from "./errors.js";
 
@@ -134,6 +136,31 @@ describe("file name helpers", () => {
     expect(guessContentType("x.ttl")).toBe("text/turtle");
     expect(guessContentType("x.png")).toBe("image/png");
     expect(guessContentType("x.unknown")).toBeUndefined();
+  });
+  it("extracts the full extension chain", () => {
+    expect(extensionChain("archive.tar.gz")).toBe(".tar.gz");
+    expect(extensionChain("photo.jpg")).toBe(".jpg");
+    expect(extensionChain("noext")).toBe("");
+    expect(extensionChain(".gitignore")).toBe(""); // dot-file, no real extension
+  });
+});
+
+describe("uploadFileName", () => {
+  it("preserves a multi-part extension chain", () => {
+    expect(uploadFileName("Backup Archive.tar.gz")).toBe("backup-archive.tar.gz");
+  });
+  it("keeps the extension even when the base is very long (no truncation)", () => {
+    const longBase = "a".repeat(200);
+    const out = uploadFileName(`${longBase}.gz`);
+    expect(out.endsWith(".gz")).toBe(true);
+    // Base capped (toFileSlug caps at 64), extension intact.
+    expect(out.length).toBeLessThan(longBase.length);
+  });
+  it("handles a name with no extension", () => {
+    expect(uploadFileName("README")).toBe("readme");
+  });
+  it("throws on a name that slugs to empty", () => {
+    expect(() => uploadFileName("!!!")).toThrow();
   });
 });
 

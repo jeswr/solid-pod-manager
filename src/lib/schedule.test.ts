@@ -397,6 +397,32 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
     expect(requested).not.toContain(LOOPBACK_RESP); // blocked by the final target guard
   });
 
+  it("does not follow a WebID-doc redirect to a private host during storage discovery", async () => {
+    // A malicious actor's profile 303s to a loopback host. safeRedirectFetch must
+    // re-validate the hop and refuse — the loopback URL is never requested, and
+    // storage resolves empty so a bob-hosted content (different origin) is dropped.
+    const EVIL = "https://idp.example/eve#me";
+    const EVIL_DOC = "https://idp.example/eve";
+    const requested: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requested.push(url);
+      if (url === EVIL_DOC) {
+        return new Response(null, { status: 303, headers: { location: "http://127.0.0.1/eve" } });
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+    const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
+    const merged = await aggregatePollRsvps(
+      poll,
+      POLL_URL,
+      [{ actor: EVIL, object: POLL_URL, content: BOB_RESP }],
+      fetchImpl,
+    );
+    expect(merged).toEqual([]);
+    expect(requested).not.toContain("http://127.0.0.1/eve"); // redirect to private refused
+  });
+
   it("ignores Offers for a different poll and never fetches an unsafe response URL", async () => {
     const requested: string[] = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {

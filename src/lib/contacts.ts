@@ -96,7 +96,15 @@ export class ContactDoc extends TermWrapper {
 export function stripScheme(uri: string | undefined): string | undefined {
   if (!uri) return undefined;
   const m = /^(?:mailto|tel):(.*)$/i.exec(uri);
-  return m ? decodeURIComponent(m[1]) : uri;
+  if (!m) return uri;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    // Malformed percent-encoding (e.g. an imported value like `bad%ZZ@y.z`) must
+    // not throw — that would make the whole contact fail to parse and vanish
+    // from the list. Fall back to the raw scheme-stripped value.
+    return m[1];
+  }
 }
 
 /** Wrap a bare email in a `mailto:` IRI; `undefined`/empty passes through. */

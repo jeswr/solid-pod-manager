@@ -15,6 +15,9 @@ import {
   IdCard,
   UsersRound,
   CircleDot,
+  Inbox,
+  MessagesSquare,
+  CalendarClock,
 } from "lucide-react";
 
 export interface NavItem {
@@ -46,4 +49,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/bookmarks", label: "Bookmarks", icon: Bookmark },
   { href: "/issues", label: "Issues", icon: CircleDot },
   { href: "/people", label: "People", icon: UsersRound },
+  // Wave 6 cross-pod collaboration — receive notifications, chat, and schedule.
+  { href: "/inbox", label: "Inbox", icon: Inbox },
+  { href: "/chat", label: "Chat", icon: MessagesSquare },
+  { href: "/schedule", label: "Schedule", icon: CalendarClock },
 ] as const;

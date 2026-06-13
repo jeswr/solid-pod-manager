@@ -292,9 +292,13 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
       return;
     }
     let cancelled = false;
+    // Offers oldest→newest so last-wins reflects the most recent response; bind
+    // each to its sender (actor) so aggregation can't be ballot-stuffed.
     const offers = (inbox.data ?? [])
       .filter((n) => n.type.includes("Offer"))
-      .map((n) => ({ object: n.object, content: n.content }));
+      .slice()
+      .sort((a, b) => (a.published ?? "").localeCompare(b.published ?? ""))
+      .map((n) => ({ actor: n.actor, object: n.object, content: n.content }));
     aggregatePollRsvps(basePoll, pollUrl, offers)
       .then((rsvps) => {
         if (!cancelled) setAggregated(rsvps);
@@ -334,11 +338,16 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
     try {
       if (isOrganiser && store && owned.data) {
         // Organiser RSVPing on their own poll: same-pod update (last-wins upsert).
+        // IMPORTANT: base the write on the CANONICAL poll (owned.data.data), NOT
+        // the aggregated view — otherwise foreign (cross-pod) RSVPs would get
+        // persisted into the organiser's own poll resource. Aggregated votes stay
+        // a read-time overlay only.
+        const canonical = owned.data.data;
         const rsvps = [
-          ...poll.rsvps.filter((r) => !(r.attendee === webId && r.option === option)),
+          ...canonical.rsvps.filter((r) => !(r.attendee === webId && r.option === option)),
           { attendee: webId, option, response },
         ];
-        await store.update(pollUrl, { ...poll, rsvps }, owned.data.etag);
+        await store.update(pollUrl, { ...canonical, rsvps }, owned.data.etag);
         toast.success("RSVP saved");
         reload();
       } else {

@@ -246,23 +246,18 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
   const POLL_URL = "https://carol.example/schedule/p1.ttl";
   const BOB_RESP = "https://bob.example/schedule-responses/rsvp-x.ttl";
 
-  it("merges RSVPs from validated Offer-linked response resources", async () => {
-    const respDs = buildPoll(BOB_RESP, {
-      name: "",
-      options: [],
-      invitees: [],
-      rsvps: [{ attendee: BOB, option: OPT_A, response: "yes" }],
-    });
-    // buildPoll stamps an Event; we want a bare RsvpAction doc, so craft via
-    // respondToPoll's shape instead — reuse readRsvpResourceAt over a hand TTL.
-    void respDs;
-    const respTtl = `
+  function rsvpTtl(opts: { subject: string; object: string; attendee: string; option: string }): string {
+    return `
       @prefix schema: <https://schema.org/> .
-      <${BOB_RESP}#it> a schema:RsvpAction ;
-        schema:object <${POLL_URL}> ;
-        schema:attendee <${BOB}> ;
-        schema:startDate "${OPT_A}"^^<http://www.w3.org/2001/XMLSchema#dateTime> ;
+      <${opts.subject}#it> a schema:RsvpAction ;
+        schema:object <${opts.object}> ;
+        schema:attendee <${opts.attendee}> ;
+        schema:startDate "${opts.option}"^^<http://www.w3.org/2001/XMLSchema#dateTime> ;
         schema:rsvpResponse schema:RsvpResponseYes .`;
+  }
+
+  it("merges RSVPs from validated Offer-linked response resources", async () => {
+    const respTtl = rsvpTtl({ subject: BOB_RESP, object: POLL_URL, attendee: BOB, option: OPT_A });
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(init?.redirect).toBe("manual"); // validated read-only
       if (String(input) === BOB_RESP) {
@@ -275,22 +270,55 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
     const merged = await aggregatePollRsvps(
       poll,
       POLL_URL,
-      [{ object: POLL_URL, content: BOB_RESP }],
+      [{ actor: BOB, object: POLL_URL, content: BOB_RESP }],
       fetchImpl,
     );
     expect(merged).toEqual([{ attendee: BOB, option: OPT_A, response: "yes" }]);
   });
 
+  it("anti-ballot-stuffing: drops a response whose attendee != the Offer sender", async () => {
+    // Bob's Offer links a resource that claims CAROL voted — must be rejected.
+    const spoof = rsvpTtl({ subject: BOB_RESP, object: POLL_URL, attendee: CAROL, option: OPT_A });
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === BOB_RESP) {
+        return new Response(spoof, { status: 200, headers: { "content-type": "text/turtle" } });
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+    const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
+    const merged = await aggregatePollRsvps(
+      poll,
+      POLL_URL,
+      [{ actor: BOB, object: POLL_URL, content: BOB_RESP }],
+      fetchImpl,
+    );
+    expect(merged).toEqual([]); // CAROL-impersonation rejected
+  });
+
+  it("drops a response whose schema:object is a different poll", async () => {
+    const wrongPoll = rsvpTtl({
+      subject: BOB_RESP,
+      object: "https://carol.example/schedule/OTHER.ttl",
+      attendee: BOB,
+      option: OPT_A,
+    });
+    const fetchImpl = vi.fn(async () =>
+      new Response(wrongPoll, { status: 200, headers: { "content-type": "text/turtle" } }),
+    ) as unknown as typeof fetch;
+    const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
+    const merged = await aggregatePollRsvps(poll, POLL_URL, [{ actor: BOB, object: POLL_URL, content: BOB_RESP }], fetchImpl);
+    expect(merged).toEqual([]);
+  });
+
   it("ignores Offers for a different poll and refuses unsafe response URLs", async () => {
     const fetchImpl = vi.fn(async () => new Response("x", { status: 200 })) as unknown as typeof fetch;
     const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
-    // Offer for another poll → skipped; unsafe content URL → never fetched.
     const merged = await aggregatePollRsvps(
       poll,
       POLL_URL,
       [
-        { object: "https://carol.example/schedule/OTHER.ttl", content: BOB_RESP },
-        { object: POLL_URL, content: "https://127.0.0.1/steal.ttl" },
+        { actor: BOB, object: "https://carol.example/schedule/OTHER.ttl", content: BOB_RESP },
+        { actor: BOB, object: POLL_URL, content: "https://127.0.0.1/steal.ttl" },
       ],
       fetchImpl,
     );
@@ -300,9 +328,9 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
 
   it("readRsvpResourceAt refuses an unsafe URL before fetching", async () => {
     const fetchImpl = vi.fn(async () => new Response("x", { status: 200 })) as unknown as typeof fetch;
-    await expect(readRsvpResourceAt("https://10.0.0.1/x.ttl", fetchImpl)).rejects.toBeInstanceOf(
-      InvalidTargetError,
-    );
+    await expect(
+      readRsvpResourceAt("https://10.0.0.1/x.ttl", POLL_URL, BOB, fetchImpl),
+    ).rejects.toBeInstanceOf(InvalidTargetError);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

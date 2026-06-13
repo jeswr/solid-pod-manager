@@ -412,43 +412,66 @@ export async function respondToPoll(
   return { responseUrl };
 }
 
-/** A short, stable, URI-safe key derived from a URL (for deterministic names). */
+/**
+ * A stable, URI-safe, COLLISION-FREE key for a poll URL (for deterministic
+ * response filenames so a re-vote overwrites in place). We encode the full URL
+ * (not a narrow hash) so two distinct polls can never collide onto one response
+ * resource: lower-case base16 of the UTF-8 bytes, capped to keep names sane —
+ * with a short hash suffix guaranteeing uniqueness even past the cap.
+ */
 function stableKey(url: string): string {
+  const bytes = new TextEncoder().encode(url);
+  let hex = "";
+  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+  // Cap the readable prefix but append a hash of the FULL url so distinct urls
+  // sharing a prefix still differ.
   let h = 0;
-  for (let i = 0; i < url.length; i++) {
-    h = (Math.imul(31, h) + url.charCodeAt(i)) | 0;
-  }
-  return (h >>> 0).toString(36);
+  for (let i = 0; i < url.length; i++) h = (Math.imul(31, h) + url.charCodeAt(i)) | 0;
+  return `${hex.slice(0, 48)}-${(h >>> 0).toString(36)}`;
+}
+
+/** An inbox Offer relevant to aggregation: its sender (actor), object, content. */
+export interface PollOffer {
+  /** The notification sender WebID (`as:actor`) — the ONLY attendee it can vote as. */
+  actor?: string;
+  /** `as:object` — the poll IRI the Offer is about. */
+  object?: string;
+  /** `as:content` — the response resource URL in the sender's pod. */
+  content?: string;
 }
 
 /**
  * Organiser-side aggregation (closes the cross-pod RSVP loop).
  *
- * Given the organiser's inbox notifications, pick the `Offer`s whose `object` is
- * THIS poll, fetch each one's response resource (the `content` URL) read-only —
- * STRICT-validated via {@link readRsvpResourceAt}, since that URL is
- * attacker-influenceable — and merge the resulting RSVPs into the poll's own.
- * Same-origin duplicates collapse last-wins (sorted by notification recency by
- * the caller). Failures on individual responses are skipped.
+ * For each `Offer` whose `object` is THIS poll, fetch its response resource (the
+ * `content` URL) read-only — STRICT-validated via {@link readRsvpResourceAt},
+ * since that URL is attacker-influenceable — and merge the resulting RSVPs.
  *
- * @returns the poll's `rsvps` augmented with the aggregated cross-pod responses.
+ * INTEGRITY (anti-ballot-stuffing): a response resource is fully attacker-hosted
+ * (the invitee controls its bytes), so we DO NOT trust its `schema:attendee`
+ * blindly. Each aggregated RSVP is BOUND to the notification SENDER: we keep
+ * only RSVPs whose `attendee === offer.actor` (so an invitee can vote as
+ * themselves but never impersonate another attendee) AND whose `object` (the
+ * RSVP's `schema:object`, re-read here) equals `pollUrl`. Duplicate
+ * `(attendee, option)` pairs collapse last-wins; the caller passes offers in the
+ * order it wants to win (most-recent last for last-wins).
+ *
+ * @returns the poll's `rsvps` augmented with the validated aggregated responses.
  */
 export async function aggregatePollRsvps(
   poll: Poll,
   pollUrl: string,
-  offers: readonly { object?: string; content?: string }[],
+  offers: readonly PollOffer[],
   fetchImpl?: typeof fetch,
 ): Promise<Rsvp[]> {
-  const responseUrls = new Set<string>();
-  for (const o of offers) {
-    if (o.object === pollUrl && o.content && /^https?:/i.test(o.content)) {
-      responseUrls.add(o.content);
-    }
-  }
+  const relevant = offers.filter(
+    (o) => o.object === pollUrl && o.actor && o.content && /^https?:/i.test(o.content),
+  );
   const fetched = await Promise.all(
-    [...responseUrls].map(async (url) => {
+    relevant.map(async (o) => {
       try {
-        return await readRsvpResourceAt(url, fetchImpl);
+        // Bind to the sender: only RSVPs FOR this poll BY this actor survive.
+        return await readRsvpResourceAt(o.content as string, pollUrl, o.actor as string, fetchImpl);
       } catch {
         return [] as Rsvp[];
       }
@@ -465,12 +488,31 @@ export async function aggregatePollRsvps(
 /**
  * Read an RSVP response resource that lives in ANOTHER agent's pod, read-only.
  * Same SSRF guard as {@link readPollAt}: validate the URL + redirect:manual.
+ *
+ * INTEGRITY: returns ONLY the RSVPs whose `schema:object` equals `expectedPoll`
+ * AND whose `schema:attendee` equals `expectedAttendee` (the Offer's sender), so
+ * an attacker-hosted document cannot inject votes for other people or other
+ * polls. The `schema:object` is re-read here (it is not part of {@link Rsvp}).
  */
 export async function readRsvpResourceAt(
   url: string,
+  expectedPoll: string,
+  expectedAttendee: string,
   fetchImpl?: typeof fetch,
 ): Promise<Rsvp[]> {
   assertValidTargetUrl(url);
   const { dataset } = await freshRdf(url, noFollowFetch(fetchImpl));
-  return readRsvps(dataset);
+  const out: Rsvp[] = [];
+  for (const q of dataset.match(null, DataFactory.namedNode(RDF_TYPE), DataFactory.namedNode(RSVP_ACTION))) {
+    const doc = new RsvpDoc(q.subject.value, dataset, DataFactory);
+    const object = OptionalFrom.subjectPredicate(doc, `${SCHEMA}object`, NamedNodeAs.string);
+    const attendee = doc.attendee;
+    const option = doc.option;
+    const response = doc.response ? RSVP_FROM_IRI[doc.response] : undefined;
+    if (object !== expectedPoll) continue; // RSVP must be for THIS poll
+    if (!attendee || attendee !== expectedAttendee) continue; // and BY the sender
+    if (!option || !response) continue;
+    out.push({ attendee, option: option.toISOString(), response });
+  }
+  return out;
 }

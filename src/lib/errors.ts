@@ -180,6 +180,23 @@ export class NotificationSendError extends PodDataError {
   }
 }
 
+/**
+ * An inbox/chat URL passed to a read/mark/dismiss op is not a direct child of the
+ * expected container. A confused-deputy guard (like {@link PodDataError}'s
+ * `OutOfScopeError` for the productivity store): a crafted URL must never make
+ * the app act on an arbitrary resource with the user's credentials. Fail closed.
+ */
+export class InboxScopeError extends PodDataError {
+  readonly url: string;
+  readonly container: string;
+  constructor(url: string, container: string) {
+    super(`Refusing to act on a resource outside the inbox container: ${url}`);
+    this.name = "InboxScopeError";
+    this.url = url;
+    this.container = container;
+  }
+}
+
 /** A pod delete (DELETE) was rejected by the server. */
 export class ResourceDeleteError extends PodDataError {
   readonly url: string;

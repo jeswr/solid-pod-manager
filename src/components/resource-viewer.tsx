@@ -9,6 +9,7 @@ import { ViewSwitcher } from "@/components/typed-views/view-switcher";
 import { ClassTable } from "@/components/typed-views/class-table";
 import { SourceActionButton } from "@/components/typed-views/source-action";
 import { UnderTheHood } from "@/components/typed-views/under-the-hood";
+import { EditableTypedView } from "@/components/forms/editable-typed-view";
 import { Markdown } from "@/components/markdown";
 import { looksLikeMarkdown } from "@/lib/literal-format";
 import { buildClassTable } from "@/lib/typed-views/table-of-class";
@@ -31,13 +32,16 @@ import { Card, CardContent } from "@/components/ui/card";
 export function ResourceViewer({
   resource,
   actions,
+  onReload,
 }: {
   resource: LoadedResource;
   actions?: ReactNode;
+  /** Re-fetch the resource (used by inline editing to recover from a stale ETag). */
+  onReload?: () => void;
 }) {
   switch (resource.viewer.kind) {
     case "rdf":
-      return <RdfResourceView resource={resource} actions={actions} />;
+      return <RdfResourceView resource={resource} actions={actions} onReload={onReload} />;
     case "image":
       return (
         <figure className="overflow-hidden rounded-2xl border border-border bg-card">
@@ -81,9 +85,11 @@ export function ResourceViewer({
 function RdfResourceView({
   resource,
   actions,
+  onReload,
 }: {
   resource: LoadedResource;
   actions?: ReactNode;
+  onReload?: () => void;
 }) {
   const typed = useMemo(() => selectTypedView(resource), [resource]);
   const meta = useMemo(() => viewMetaFor(resource), [resource]);
@@ -91,6 +97,9 @@ function RdfResourceView({
     hasTypedView: typed != null,
     hasSource: meta.source != null,
     hasClassTable: meta.tableClass != null,
+    // Any RDF resource we could load (and therefore are authorised to read) is
+    // offered an inline editor; a write that lacks permission surfaces 403.
+    canEdit: resource.dataset != null,
   };
   const options = viewModeOptions(inputs);
   const [mode, setMode] = useState<ViewMode>(() => initialViewMode(inputs));
@@ -117,6 +126,7 @@ function RdfResourceView({
 
       {mode === "typed" && typed}
       {mode === "data" && <RdfViewer groups={resource.properties ?? []} />}
+      {mode === "edit" && <EditableTypedView resource={resource} onReload={onReload} />}
       {mode === "table" && classTable && <ClassTable model={classTable} />}
       {mode === "source" && meta.source && (
         <Card>

@@ -13,6 +13,7 @@
 import {
   ExternalLink,
   LayoutGrid,
+  Pencil,
   Rows3,
   Table as TableIcon,
   type LucideIcon,
@@ -26,6 +27,7 @@ const ICONS: Record<string, LucideIcon> = {
   table: TableIcon,
   "table-rows": Rows3,
   "external-link": ExternalLink,
+  pencil: Pencil,
 };
 
 /** A segmented tray of view modes; calls `onChange` when the user picks one. */

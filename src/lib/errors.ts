@@ -80,6 +80,24 @@ export class AclWriteError extends PodDataError {
   }
 }
 
+/**
+ * The resource's access-control document uses ACP (`.acr` / Access Control
+ * Policy), not WAC. The per-resource Sharing panel only writes WAC today; it
+ * fails closed here rather than parsing an ACP document as an empty WAC ACL
+ * (which would under-report access) or writing WAC triples into it.
+ */
+export class AcpUnsupportedError extends PodDataError {
+  readonly resourceUrl: string;
+  constructor(resourceUrl: string, options?: { cause?: unknown }) {
+    super(
+      `This resource uses a newer access-control format this view can't edit yet (${resourceUrl}).`,
+      options,
+    );
+    this.name = "AcpUnsupportedError";
+    this.resourceUrl = resourceUrl;
+  }
+}
+
 /** A pod write (PUT) was rejected by the server. */
 export class ResourceWriteError extends PodDataError {
   readonly url: string;

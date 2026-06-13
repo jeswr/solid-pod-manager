@@ -30,6 +30,22 @@ import {
 import { ensureTypeRegistrations } from "./type-index-write.js";
 
 /**
+ * Thrown when an item URL passed to `read`/`update`/`remove` is not inside this
+ * store's own container. A confused-deputy guard: a crafted `?id=` link must
+ * never make the app fetch/PUT/DELETE an arbitrary URL with the user's
+ * credentials (`pod-scope` SEC-1). Fail closed before any I/O.
+ */
+export class OutOfScopeError extends Error {
+  constructor(
+    readonly url: string,
+    readonly container: string,
+  ) {
+    super(`Refusing to act on a resource outside this app's container: ${url}`);
+    this.name = "OutOfScopeError";
+  }
+}
+
+/**
  * A productivity item as the UI consumes it: a stable `url`, its `etag` for
  * conditional writes, and the parsed `data` payload. Generic over the payload
  * `T` so each app names its own fields.
@@ -87,6 +103,50 @@ export class ProductivityStore<T> {
   }
 
   /**
+   * Fail closed unless `url` is a single item *resource* strictly inside this
+   * store's container. Guards every caller-supplied URL (e.g. a `?id=` query
+   * param) before any authenticated I/O so a crafted link can't redirect a
+   * read/write/delete elsewhere.
+   *
+   * Stricter than `isWithinPod`: that treats the container root as in-scope, but
+   * an item operation must never target the container itself or a sub-container
+   * (which `update`/`remove` could otherwise overwrite or delete). So we require
+   * the URL to be within the container, NOT equal to it, and NOT end in `/`.
+   */
+  private assertInContainer(url: string): void {
+    let parsed: URL;
+    let containerUrl: URL;
+    try {
+      parsed = new URL(url);
+      containerUrl = new URL(this.containerUrl);
+    } catch {
+      throw new OutOfScopeError(url, this.containerUrl);
+    }
+    // The store writes one flat resource per item DIRECTLY in the container, so
+    // an item URL must be exactly `<container>/<single-segment>`: same origin,
+    // path prefixed by the container, and the remainder a single non-empty
+    // segment with no (real or encoded) slash. This rejects the container root
+    // (both slash forms), any sub-container, and any nested descendant.
+    // A `?query`/`#fragment` is also rejected: the RDF builders append `#it` to
+    // this URL, so a caller-supplied fragment/query would mint a mismatched
+    // subject (e.g. `item.ttl#x#it`) and miss/clobber the real resource.
+    const containerPath = containerUrl.pathname; // ends in "/"
+    if (
+      parsed.origin !== containerUrl.origin ||
+      !parsed.pathname.startsWith(containerPath) ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      throw new OutOfScopeError(url, this.containerUrl);
+    }
+    const rest = parsed.pathname.slice(containerPath.length);
+    const isDirectChild = rest.length > 0 && !rest.includes("/") && !/%2f/i.test(rest);
+    if (!isDirectChild) {
+      throw new OutOfScopeError(url, this.containerUrl);
+    }
+  }
+
+  /**
    * Mint a fresh, collision-resistant resource URL inside the container.
    * `slugHint` (e.g. a note title) seeds a readable, URI-safe prefix; a random
    * suffix guarantees uniqueness without a round-trip. Never contains `:` (an
@@ -137,6 +197,7 @@ export class ProductivityStore<T> {
    *   underlying `RdfFetchError`; 404 surfaces as `.status === 404`).
    */
   async read(url: string): Promise<StoredItem<T> | undefined> {
+    this.assertInContainer(url);
     let dataset: import("@rdfjs/types").DatasetCore;
     let etag: string | null;
     try {
@@ -179,6 +240,7 @@ export class ProductivityStore<T> {
     data: T,
     etag?: string | null,
   ): Promise<{ etag: string | null }> {
+    this.assertInContainer(url);
     const dataset = this.cfg.build(url, data);
     return writeResource(url, dataset, {
       etag,
@@ -189,6 +251,7 @@ export class ProductivityStore<T> {
 
   /** Delete an item (idempotent — a missing resource resolves to success). */
   async remove(url: string): Promise<void> {
+    this.assertInContainer(url);
     await deleteResource(url, this.fetchImpl);
   }
 

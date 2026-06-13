@@ -118,6 +118,10 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA_HTTP}Event`,
       "http://www.w3.org/2002/12/cal/ical#Vevent",
       "http://www.w3.org/2002/12/cal/icaltzd#Vevent",
+      // First-party Tasks app stores to-dos as iCal VTODO, so they surface under
+      // Calendar alongside events.
+      "http://www.w3.org/2002/12/cal/icaltzd#Vtodo",
+      "http://www.w3.org/2002/12/cal/ical#Vtodo",
     ],
   },
   {

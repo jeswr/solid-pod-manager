@@ -9,6 +9,8 @@ import {
   NotebookPen,
   CalendarDays,
   Users,
+  IdCard,
+  UsersRound,
 } from "lucide-react";
 
 export interface NavItem {
@@ -31,7 +33,9 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/settings", label: "Settings", icon: Settings, primary: true },
   // First-party productivity apps — each reads/writes standard RDF to the pod
   // and is registered in the Type Index, so its data also appears under "My data".
+  { href: "/profile", label: "Profile", icon: IdCard },
   { href: "/notes", label: "Notes", icon: NotebookPen },
   { href: "/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/contacts", label: "Contacts", icon: Users },
+  { href: "/people", label: "People", icon: UsersRound },
 ] as const;

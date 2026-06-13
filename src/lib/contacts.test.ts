@@ -50,6 +50,13 @@ describe("buildContact / parseContact round-trip", () => {
     expect([...ds].some((q) => q.object.value === "mailto:x@y.z")).toBe(true);
   });
 
+  it("preserves a contact WebID (vcard:url) for the people-picker", () => {
+    const webId = "https://ada.example/profile/card#me";
+    const ds = buildContact(url, { fn: "Ada", webId });
+    expect([...ds].some((q) => q.object.value === webId)).toBe(true);
+    expect(parseContact(url, ds)?.webId).toBe(webId);
+  });
+
   it("handles a contact with only a name", () => {
     const ds = buildContact(url, { fn: "Nameless Only" });
     const c = parseContact(url, ds);

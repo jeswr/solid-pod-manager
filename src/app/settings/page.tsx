@@ -1,7 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronRight, Database, Fingerprint, Globe, LogOut, Server } from "lucide-react";
+import {
+  ChevronRight,
+  Database,
+  Fingerprint,
+  Globe,
+  IdCard,
+  ListTree,
+  LogOut,
+  Server,
+} from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { Button } from "@/components/ui/button";
@@ -58,6 +67,34 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle className="text-base">Profile</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <SettingsLink
+            href="/profile"
+            icon={IdCard}
+            title="Edit your profile"
+            description="Your name, photo, and the details others see."
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Advanced</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <SettingsLink
+            href="/settings/type-index"
+            icon={ListTree}
+            title="Type index"
+            description="See and manage where each kind of your data is registered."
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle className="text-base">Domains</CardTitle>
         </CardHeader>
         <CardContent>
@@ -102,6 +139,35 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/** A card-body navigation link to a settings sub-page (shared layout). */
+function SettingsLink({
+  href,
+  icon: Icon,
+  title,
+  description,
+}: {
+  href: string;
+  icon: typeof Database;
+  title: string;
+  description: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="group flex items-start gap-3 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+    >
+      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <span className="min-w-0">
+        <span className="flex items-center gap-1 text-sm font-medium underline-offset-4 group-hover:underline">
+          {title}
+          <ChevronRight className="size-4 text-muted-foreground" aria-hidden="true" />
+        </span>
+        <span className="mt-0.5 block text-sm text-muted-foreground">{description}</span>
+      </span>
+    </Link>
   );
 }
 

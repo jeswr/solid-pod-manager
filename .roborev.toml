@@ -1,0 +1,3 @@
+agent = "codex"
+model = "gpt-5.5"
+review_min_severity = "low"

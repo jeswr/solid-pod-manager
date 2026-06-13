@@ -92,53 +92,6 @@ export function noFollowFetch(fetchImpl?: typeof fetch): typeof fetch {
 }
 
 /**
- * Wrap a fetch so it follows redirects MANUALLY, re-validating each hop's target
- * with {@link assertValidTargetUrl} before issuing the next request, capped at
- * `maxHops` with cycle detection. Use this for reads of an
- * attacker-influenceable URL (e.g. a WebID document whose host came from an
- * inbox notification) that may LEGITIMATELY redirect (WebID dereferencing
- * routinely 303s) but must NEVER be transparently followed to a private host —
- * the auth-patched fetch would otherwise leak the user's token/proof on a
- * redirected 401.
- *
- * The INITIAL url is the caller's responsibility to validate; every redirect
- * Location is validated here. A 3xx without a (resolvable, valid) Location, or
- * exceeding `maxHops`, surfaces the opaque/last response unchanged so the caller
- * fails closed. Only GET/HEAD are followed (a redirected body-bearing method is
- * not replayed).
- */
-export function safeRedirectFetch(fetchImpl?: typeof fetch, maxHops = 5): typeof fetch {
-  const base = fetchImpl ?? fetch;
-  return (async (input: RequestInfo | URL, init?: RequestInit) => {
-    let url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const method = (init?.method ?? "GET").toUpperCase();
-    const seen = new Set<string>();
-    let res = await base(url, { ...init, redirect: "manual" });
-    for (let hop = 0; hop < maxHops; hop++) {
-      const isRedirect =
-        res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400);
-      if (!isRedirect) return res;
-      // Only follow safe, idempotent methods; never replay a POST/PUT/etc.
-      if (method !== "GET" && method !== "HEAD") return res;
-      const location = res.headers.get("location");
-      if (!location) return res; // opaque redirect / no Location → fail closed
-      let next: string;
-      try {
-        next = new URL(location, url).toString();
-      } catch {
-        return res;
-      }
-      assertValidTargetUrl(next); // re-validate EVERY hop before following
-      if (seen.has(next)) return res; // cycle
-      seen.add(next);
-      url = next;
-      res = await base(url, { ...init, redirect: "manual" });
-    }
-    return res; // hop cap exceeded → return last (likely-redirect) response, fail closed
-  }) as typeof fetch;
-}
-
-/**
  * Discover a recipient's LDN inbox from THEIR PROFILE.
  *
  * Fetches the WebID profile document (revalidated, via `freshRdf` like

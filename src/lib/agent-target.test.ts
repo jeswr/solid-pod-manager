@@ -5,7 +5,6 @@ import {
   assertValidTargetUrl,
   discoverInbox,
   resolveInboxTarget,
-  safeRedirectFetch,
 } from "./agent-target.js";
 import { InvalidTargetError, NoInboxError } from "./errors.js";
 
@@ -280,58 +279,5 @@ describe("resolveInboxTarget — discover + validate, fail closed", () => {
     // freshRdf will resolve the absolute inbox; the doc fetch host is bob.example.
     const fetchImpl = profileFetch(body);
     await expect(resolveInboxTarget(WEBID, fetchImpl)).rejects.toBeInstanceOf(InvalidTargetError);
-  });
-});
-
-describe("safeRedirectFetch — validated manual redirect following", () => {
-  it("follows a safe https redirect and returns the final response", async () => {
-    const calls: string[] = [];
-    const base = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      calls.push(url);
-      if (url === "https://a.example/card") {
-        return new Response(null, { status: 303, headers: { location: "https://b.example/card" } });
-      }
-      return new Response("ok", { status: 200 });
-    }) as unknown as typeof fetch;
-    const res = await safeRedirectFetch(base)("https://a.example/card");
-    expect(res.status).toBe(200);
-    expect(calls).toEqual(["https://a.example/card", "https://b.example/card"]);
-  });
-
-  it("refuses (throws) a redirect to a private host and never requests it", async () => {
-    const calls: string[] = [];
-    const base = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      calls.push(url);
-      if (url === "https://a.example/card") {
-        return new Response(null, { status: 307, headers: { location: "http://169.254.169.254/" } });
-      }
-      return new Response("ok", { status: 200 });
-    }) as unknown as typeof fetch;
-    await expect(safeRedirectFetch(base)("https://a.example/card")).rejects.toBeInstanceOf(
-      InvalidTargetError,
-    );
-    expect(calls).not.toContain("http://169.254.169.254/");
-  });
-
-  it("does not replay a POST across a redirect (returns the 3xx as-is)", async () => {
-    const base = vi.fn(async () =>
-      new Response(null, { status: 307, headers: { location: "https://b.example/x" } }),
-    ) as unknown as typeof fetch;
-    const res = await safeRedirectFetch(base)("https://a.example/x", { method: "POST" });
-    expect(res.status).toBe(307); // not followed for a non-idempotent method
-  });
-
-  it("stops at the hop cap (no infinite loop) and fails closed", async () => {
-    const base = vi.fn(async (input: RequestInfo | URL) => {
-      const n = Number(new URL(String(input)).searchParams.get("n") ?? "0");
-      return new Response(null, {
-        status: 303,
-        headers: { location: `https://a.example/c?n=${n + 1}` },
-      });
-    }) as unknown as typeof fetch;
-    const res = await safeRedirectFetch(base, 3)("https://a.example/c?n=0");
-    expect(res.status).toBe(303); // capped, returns last redirect (fail closed)
   });
 });

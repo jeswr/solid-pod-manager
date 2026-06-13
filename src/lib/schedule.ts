@@ -42,7 +42,7 @@ import {
 } from "@rdfjs/wrapper";
 import { DataFactory, Store } from "n3";
 import { freshRdf } from "./rdf-read.js";
-import { assertValidTargetUrl, isValidTargetUrl, noFollowFetch, safeRedirectFetch } from "./agent-target.js";
+import { assertValidTargetUrl, isValidTargetUrl, noFollowFetch } from "./agent-target.js";
 import { sendNotification } from "./notify-send.js";
 import { writeResource } from "./pod-data.js";
 import { readProfile } from "./profile.js";
@@ -444,20 +444,24 @@ function sameOrigin(a: string, b: string): boolean {
 
 /**
  * Resolve the storage roots an actor advertises (`pim:storage`) — the pods they
- * legitimately control. Used to decide whether a response resource really
- * belongs to the actor. The actor WebID is attacker-influenceable (it is the
- * self-asserted `as:actor` of an inbox Offer), so the profile fetch is guarded:
- * the initial host is checked with `isValidTargetUrl`, and because WebID
- * dereferencing routinely 303s we follow redirects via `safeRedirectFetch` which
- * RE-VALIDATES every hop's target with `assertValidTargetUrl` before following
- * (so a malicious profile cannot 303 us to a private host). Returns `[]` on any
- * failure (fail closed — an unresolvable actor contributes no trusted storage).
+ * legitimately control. Used to WIDEN the membership check (a response may live
+ * in the actor's declared storage even on a different origin from the WebID).
  *
- * KNOWN LIMITATION: we read `pim:storage` from the WebID document only, not from
- * extended profile documents linked via `rdfs:seeAlso`/`pim:preferencesFile`. An
- * actor who advertises storage solely in an extended doc would fall back to the
- * same-WebID-origin check; their split-origin vote could be dropped. Acceptable
- * for now (the common case advertises storage on the card).
+ * The actor WebID is attacker-influenceable (it is the self-asserted `as:actor`
+ * of an inbox Offer). We validate the host (`isValidTargetUrl`) and fetch with
+ * `redirect: "manual"` (`noFollowFetch`) so the auth-patched fetch is NEVER
+ * steered to a private host on a malicious 303 — fail closed.
+ *
+ * BROWSER/INTEROP LIMITATION (deliberate, security-first): a browser
+ * `redirect: "manual"` response is OPAQUE (no readable `Location`), so we cannot
+ * safely follow it client-side without DNS-pinning (unavailable in `fetch`).
+ * Therefore an actor whose WebID document 303-redirects, OR who advertises
+ * storage only in an extended profile doc, will not have storage resolved here —
+ * such a response is then accepted ONLY if it is same-origin with the actor's
+ * WebID (see {@link contentBelongsToActor}). This can drop a legitimate
+ * split-origin+redirecting vote, which we accept as the safe tradeoff over the
+ * SSRF that hop-following on an attacker-influenced URL would introduce. Returns
+ * `[]` on any non-200 / failure.
  */
 async function actorStorages(webId: string, fetchImpl?: typeof fetch): Promise<string[]> {
   let docUrl: string;
@@ -468,12 +472,7 @@ async function actorStorages(webId: string, fetchImpl?: typeof fetch): Promise<s
   }
   if (!isValidTargetUrl(docUrl)) return [];
   try {
-    // GET the validated document URL and read storages from the WebID subject
-    // (`pim:storage` hangs off the fragment subject). WebID dereferencing
-    // routinely 303s, so we follow redirects via `safeRedirectFetch`, which
-    // re-validates EVERY hop's target before following — handling legitimate
-    // split-origin/303 profiles without ever being steered to a private host.
-    const { dataset } = await freshRdf(docUrl, safeRedirectFetch(fetchImpl));
+    const { dataset } = await freshRdf(docUrl, noFollowFetch(fetchImpl));
     return readProfile(webId, dataset).storages;
   } catch {
     return [];

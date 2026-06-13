@@ -398,9 +398,10 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
   });
 
   it("does not follow a WebID-doc redirect to a private host during storage discovery", async () => {
-    // A malicious actor's profile 303s to a loopback host. safeRedirectFetch must
-    // re-validate the hop and refuse — the loopback URL is never requested, and
-    // storage resolves empty so a bob-hosted content (different origin) is dropped.
+    // A malicious actor's profile 303s to a loopback host. Storage discovery uses
+    // redirect:manual (noFollowFetch) so the redirect is NOT followed — the
+    // loopback URL is never requested, storage resolves empty, and a bob-hosted
+    // content (different origin from the actor) is therefore dropped.
     const EVIL = "https://idp.example/eve#me";
     const EVIL_DOC = "https://idp.example/eve";
     const requested: string[] = [];

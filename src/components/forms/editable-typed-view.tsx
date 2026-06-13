@@ -58,6 +58,9 @@ export function EditableTypedView({ resource, onReload }: EditableTypedViewProps
               subject={subject.id}
               fields={fields}
               etag={resource.etag ?? null}
+              // A server that emits no ETag can't be edited conditionally; allow
+              // the (unavoidably unconditional) write rather than blocking editing.
+              allowUnconditional={!resource.etag}
               source={viewerFields ? "typed-view" : "auto"}
               onReload={onReload}
             />

@@ -28,6 +28,8 @@ export interface FormRendererProps {
   source?: FormSource;
   /** Re-fetch the resource (called when a save reports a stale ETag). */
   onReload?: () => void;
+  /** Permit an unconditional write when the resource has no ETag (opt-in). */
+  allowUnconditional?: boolean;
   /** Test-only fetch override; **omit in production**. */
   fetchImpl?: typeof fetch;
 }
@@ -46,9 +48,19 @@ export function FormRenderer({
   etag,
   source,
   onReload,
+  allowUnconditional,
   fetchImpl,
 }: FormRendererProps) {
-  const edit = useFormEdit({ url, dataset, subject, fields, etag, onReload, fetchImpl });
+  const edit = useFormEdit({
+    url,
+    dataset,
+    subject,
+    fields,
+    etag,
+    onReload,
+    allowUnconditional,
+    fetchImpl,
+  });
 
   if (fields.length === 0) {
     return (

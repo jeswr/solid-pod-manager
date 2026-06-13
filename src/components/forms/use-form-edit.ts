@@ -12,7 +12,7 @@
  * second edit chains cleanly. On `stale` it asks the caller to reload (via
  * `onReload`); on `forbidden`/`validation`/`error` it surfaces the message.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DatasetCore } from "@rdfjs/types";
 import type { FieldSpec } from "@/lib/forms/field-types";
 import { applyFieldEdits, readFieldValue } from "@/lib/forms/subject-edit";
@@ -30,6 +30,12 @@ export interface UseFormEditArgs {
   etag: string | null;
   /** Called when a save reports `stale` — the caller should re-fetch. */
   onReload?: () => void;
+  /**
+   * Permit an unconditional write when the resource has no ETag (some servers
+   * emit none). Off by default — without an ETag a write can't be made safe, so
+   * the engine refuses unless the caller knowingly opts in.
+   */
+  allowUnconditional?: boolean;
   /** Test-only fetch override; **omit in production**. */
   fetchImpl?: typeof fetch;
 }
@@ -59,7 +65,7 @@ function seedValues(
 }
 
 export function useFormEdit(args: UseFormEditArgs): FormEditState {
-  const { url, subject, fields, fetchImpl, onReload } = args;
+  const { url, subject, fields, fetchImpl, onReload, allowUnconditional } = args;
   // Local baseline (dataset + ETag) we save against. Initialised from props and
   // rebased below whenever the parent supplies a fresh read (e.g. after a stale
   // save triggers a reload), so the next save never reuses a stale ETag.
@@ -72,17 +78,27 @@ export function useFormEdit(args: UseFormEditArgs): FormEditState {
   const [error, setError] = useState<string | undefined>();
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  // Rebase on a fresh read from the parent: adopt the new dataset/ETag and
-  // reseed the editor to the new baseline (dropping any unsaved edits, which is
-  // correct after a "changed elsewhere" reload).
+  // Keep the latest subject/fields available to the rebase effect WITHOUT making
+  // them effect dependencies — a parent re-render that merely reallocates the
+  // `fields` array (e.g. an auto-form computed inline) must NOT rebase and drop
+  // a locally-saved dataset/ETag.
+  const subjectRef = useRef(subject);
+  const fieldsRef = useRef(fields);
+  subjectRef.current = subject;
+  fieldsRef.current = fields;
+
+  // Rebase ONLY when the parent supplies a genuinely fresh read (a new dataset
+  // object or a changed ETag — e.g. after a "changed elsewhere" reload): adopt
+  // it as the new baseline and reseed the editor, dropping any unsaved edits
+  // (correct after such a reload). Keyed on dataset/ETag identity alone.
   useEffect(() => {
     setDataset(args.dataset);
     setEtag(args.etag);
-    setValues(seedValues(args.dataset, subject, fields));
+    setValues(seedValues(args.dataset, subjectRef.current, fieldsRef.current));
     setFieldErrors({});
     setError(undefined);
     setStatus("idle");
-  }, [args.dataset, args.etag, subject, fields]);
+  }, [args.dataset, args.etag]);
 
   const dirty = useMemo(
     () => fields.some((f) => (values[f.id] ?? "") !== (initial[f.id] ?? "")),
@@ -114,6 +130,7 @@ export function useFormEdit(args: UseFormEditArgs): FormEditState {
     }
     const result: SaveResult = await saveFormEdits(url, dataset, subject, fields, changed, {
       etag,
+      allowUnconditional,
       fetchImpl,
     });
 
@@ -139,7 +156,7 @@ export function useFormEdit(args: UseFormEditArgs): FormEditState {
     } else {
       setError(result.message);
     }
-  }, [url, dataset, subject, fields, values, initial, etag, fetchImpl, onReload]);
+  }, [url, dataset, subject, fields, values, initial, etag, allowUnconditional, fetchImpl, onReload]);
 
   return { values, setValue, dirty, status, error, fieldErrors, save, reset };
 }

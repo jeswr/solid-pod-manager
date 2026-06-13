@@ -31,7 +31,7 @@ import { DataFactory, Store } from "n3";
 import { isInOwnPods } from "./pod-scope.js";
 import { toSlug } from "./productivity-store.js";
 import { listContainer, readResource, writeResource } from "./pod-data.js";
-import { ChatScopeError } from "./errors.js";
+import { ChatScopeError, ChatMessageError } from "./errors.js";
 
 const SIOC = "http://rdfs.org/sioc/ns#";
 const DCT = "http://purl.org/dc/terms/";
@@ -99,7 +99,14 @@ function isWebId(value: string | undefined): boolean {
   }
 }
 
-/** Parse a message document into a {@link ChatMessage}, or `undefined` if not one. */
+/**
+ * Parse a message document into a {@link ChatMessage}, or `undefined` if not one.
+ *
+ * INTEROP NOTE: we read the conventional `${url}#it` subject this app writes. A
+ * message authored by another long-chat client that uses the resource URL itself
+ * (or a different fragment) as the subject would not be recognised here. This is
+ * an accepted app-owned-format simplification.
+ */
 export function parseMessage(
   url: string,
   dataset: import("@rdfjs/types").DatasetCore,
@@ -223,7 +230,7 @@ export class Chat {
    */
   async send(content: string): Promise<{ url: string }> {
     const trimmed = content.trim();
-    if (!trimmed) throw new ChatScopeError("(empty message)", this.containerUrl);
+    if (!trimmed) throw new ChatMessageError("A chat message cannot be empty.");
     const rand = Math.random().toString(36).slice(2, 10);
     const url = `${this.containerUrl}${Date.now()}-${rand}.ttl`;
     this.assertInContainer(url);

@@ -11,7 +11,7 @@ import {
   MESSAGE_CLASS,
   type ChatMessage,
 } from "./chat.js";
-import { ChatScopeError } from "./errors.js";
+import { ChatScopeError, ChatMessageError } from "./errors.js";
 
 const STORAGE = "https://alice.example/";
 const WEBID = "https://alice.example/profile/card#me";
@@ -130,9 +130,46 @@ describe("Chat.messages + send", () => {
     expect((put?.headers as Record<string, string>)["if-none-match"]).toBe("*"); // create-only
   });
 
-  it("refuses to send an empty message", async () => {
-    const chat = new Chat(CONTAINER, [STORAGE], WEBID, (async () => new Response(null, { status: 201 })) as unknown as typeof fetch);
-    await expect(chat.send("   ")).rejects.toBeInstanceOf(ChatScopeError);
+  it("refuses to send an empty message (validation, not a scope error)", async () => {
+    const sent = vi.fn(async () => new Response(null, { status: 201 })) as unknown as typeof fetch;
+    const chat = new Chat(CONTAINER, [STORAGE], WEBID, sent);
+    await expect(chat.send("   ")).rejects.toBeInstanceOf(ChatMessageError);
+    expect(sent).not.toHaveBeenCalled();
+  });
+});
+
+describe("Chat direct-child scope guard branches (confused-deputy)", () => {
+  // Reach the private guard via messages() listing: craft a container that
+  // advertises off-child members, and assert they are skipped (not fetched).
+  function ttl(body: string): Response {
+    return new Response(body, { status: 200, headers: { "content-type": "text/turtle" } });
+  }
+
+  it("skips nested-path, %2f, query and fragment member URLs in a listing", async () => {
+    const NESTED = "https://alice.example/chat/team/sub/x.ttl";
+    const ENCODED = "https://alice.example/chat/team/a%2fb.ttl";
+    const requested: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requested.push(url);
+      if (url === CONTAINER) {
+        return ttl(
+          `@prefix ldp: <http://www.w3.org/ns/ldp#> . <${CONTAINER}> ldp:contains <${NESTED}>, <${ENCODED}> .`,
+        );
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+    const c = new Chat(CONTAINER, [STORAGE], WEBID, fetchImpl);
+    const msgs = await c.messages();
+    expect(msgs).toEqual([]); // nothing in-scope
+    expect(requested).not.toContain(NESTED);
+    expect(requested).not.toContain(ENCODED);
+  });
+
+  it("chatContainerUrl falls back to a random slug for an empty channel name", () => {
+    const url = chatContainerUrl(STORAGE, "!!!");
+    expect(url.startsWith("https://alice.example/chat/")).toBe(true);
+    expect(url.endsWith("/")).toBe(true);
   });
 });
 

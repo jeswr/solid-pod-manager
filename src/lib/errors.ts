@@ -213,6 +213,18 @@ export class ChatScopeError extends PodDataError {
   }
 }
 
+/**
+ * A chat message failed input validation (e.g. empty content). Distinct from
+ * {@link ChatScopeError} so callers / telemetry never misclassify a trivial
+ * empty-input case as a security scope violation.
+ */
+export class ChatMessageError extends PodDataError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatMessageError";
+  }
+}
+
 /** A pod delete (DELETE) was rejected by the server. */
 export class ResourceDeleteError extends PodDataError {
   readonly url: string;

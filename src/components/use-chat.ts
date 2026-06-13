@@ -21,25 +21,32 @@ export interface UseChat extends AsyncState<ChatMessage[]> {
 }
 
 export function useChat(containerUrl: string | undefined): UseChat {
-  const { webId, activeStorage, status } = useSession();
+  const { webId, activeStorage, profile, status } = useSession();
   const [state, setState] = useState<AsyncState<ChatMessage[]>>({ loading: true });
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
+  // Scope against ALL of the user's own pods (not just the active one), so a chat
+  // saved/invited in another of the user's storages is still in scope.
+  const storages = useMemo(() => {
+    const all = profile?.storages ?? [];
+    return all.length > 0 ? all : activeStorage ? [activeStorage] : [];
+  }, [profile?.storages, activeStorage]);
+
   const { chat, outOfScope } = useMemo(() => {
-    if (status !== "logged-in" || !webId || !activeStorage || !containerUrl) {
+    if (status !== "logged-in" || !webId || storages.length === 0 || !containerUrl) {
       return { chat: undefined as Chat | undefined, outOfScope: false };
     }
     try {
       return {
-        chat: openChat({ containerUrl, storages: [activeStorage], webId }),
+        chat: openChat({ containerUrl, storages, webId }),
         outOfScope: false,
       };
     } catch (e) {
       if (e instanceof ChatScopeError) return { chat: undefined, outOfScope: true };
       throw e;
     }
-  }, [status, webId, activeStorage, containerUrl]);
+  }, [status, webId, storages, containerUrl]);
 
   useEffect(() => {
     if (!containerUrl) {

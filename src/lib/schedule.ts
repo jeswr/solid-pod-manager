@@ -430,6 +430,15 @@ function stableKey(url: string): string {
   return `${hex.slice(0, 48)}-${(h >>> 0).toString(36)}`;
 }
 
+/** True iff two absolute URLs share an origin (scheme+host+port). */
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
 /** An inbox Offer relevant to aggregation: its sender (actor), object, content. */
 export interface PollOffer {
   /** The notification sender WebID (`as:actor`) — the ONLY attendee it can vote as. */
@@ -447,14 +456,19 @@ export interface PollOffer {
  * `content` URL) read-only — STRICT-validated via {@link readRsvpResourceAt},
  * since that URL is attacker-influenceable — and merge the resulting RSVPs.
  *
- * INTEGRITY (anti-ballot-stuffing): a response resource is fully attacker-hosted
- * (the invitee controls its bytes), so we DO NOT trust its `schema:attendee`
- * blindly. Each aggregated RSVP is BOUND to the notification SENDER: we keep
- * only RSVPs whose `attendee === offer.actor` (so an invitee can vote as
- * themselves but never impersonate another attendee) AND whose `object` (the
- * RSVP's `schema:object`, re-read here) equals `pollUrl`. Duplicate
- * `(attendee, option)` pairs collapse last-wins; the caller passes offers in the
- * order it wants to win (most-recent last for last-wins).
+ * INTEGRITY (anti-ballot-stuffing + anti-impersonation). Both the inbox Offer
+ * (its `as:actor` is self-asserted — anyone can POST to the inbox) AND the
+ * response resource it links (attacker-hosted bytes) are untrusted. We bind on
+ * BOTH ends so a forged vote is impossible unless the attacker actually controls
+ * the victim's pod:
+ *   1. The response resource's ORIGIN must equal the Offer actor's ORIGIN — the
+ *      response must live in the actor's OWN pod. This stops an attacker POSTing
+ *      `actor=<victim>, content=<attacker-pod>` (the actor is forgeable, but the
+ *      attacker cannot host a resource on the victim's origin).
+ *   2. Each kept RSVP must have `schema:attendee === actor` and
+ *      `schema:object === pollUrl` (re-read from the resource).
+ * Duplicate `(attendee, option)` pairs collapse last-wins; the caller passes
+ * offers most-recent-last. Duplicate `(actor, content)` Offers are de-duped.
  *
  * @returns the poll's `rsvps` augmented with the validated aggregated responses.
  */
@@ -464,11 +478,17 @@ export async function aggregatePollRsvps(
   offers: readonly PollOffer[],
   fetchImpl?: typeof fetch,
 ): Promise<Rsvp[]> {
-  const relevant = offers.filter(
-    (o) => o.object === pollUrl && o.actor && o.content && /^https?:/i.test(o.content),
-  );
+  // Keep only Offers for THIS poll whose response resource lives in the ACTOR's
+  // OWN pod (same origin) — the origin binding is the impersonation guard.
+  const relevant = offers.filter((o) => {
+    if (o.object !== pollUrl || !o.actor || !o.content || !/^https?:/i.test(o.content)) return false;
+    return sameOrigin(o.content, o.actor);
+  });
+  // De-dupe by (actor, content) — repeated/retried Offers must not refetch.
+  const byPair = new Map<string, PollOffer>();
+  for (const o of relevant) byPair.set(`${o.actor}|${o.content}`, o);
   const fetched = await Promise.all(
-    relevant.map(async (o) => {
+    [...byPair.values()].map(async (o) => {
       try {
         // Bind to the sender: only RSVPs FOR this poll BY this actor survive.
         return await readRsvpResourceAt(o.content as string, pollUrl, o.actor as string, fetchImpl);

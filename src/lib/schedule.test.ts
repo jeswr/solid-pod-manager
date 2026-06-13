@@ -310,6 +310,21 @@ describe("aggregatePollRsvps — organiser-side loop closure", () => {
     expect(merged).toEqual([]);
   });
 
+  it("anti-impersonation: drops an Offer whose content origin != the actor origin", async () => {
+    // Attacker (bob) POSTs an Offer claiming actor=CAROL but hosts the response
+    // in bob's own pod. The origin binding must reject it WITHOUT fetching.
+    const fetchImpl = vi.fn(async () => new Response("x", { status: 200 })) as unknown as typeof fetch;
+    const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };
+    const merged = await aggregatePollRsvps(
+      poll,
+      POLL_URL,
+      [{ actor: CAROL, object: POLL_URL, content: BOB_RESP }], // CAROL actor, bob-hosted content
+      fetchImpl,
+    );
+    expect(merged).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled(); // origin mismatch → never fetched
+  });
+
   it("ignores Offers for a different poll and refuses unsafe response URLs", async () => {
     const fetchImpl = vi.fn(async () => new Response("x", { status: 200 })) as unknown as typeof fetch;
     const poll: Poll = { name: "p", options: [OPT_A], invitees: [], rsvps: [], organizer: CAROL };

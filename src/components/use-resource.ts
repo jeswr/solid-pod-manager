@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { parseRdf } from "@jeswr/fetch-rdf";
+import type { DatasetCore } from "@rdfjs/types";
 import { useSession } from "@/components/session-provider";
 import { chooseViewer, type ViewerChoice } from "@/lib/viewers";
 import { readResourceProperties, type PropertyGroup } from "@/lib/resource-view";
@@ -16,6 +17,14 @@ export interface LoadedResource {
   text?: string;
   /** Parsed RDF property groups (for the `rdf` kind). */
   properties?: PropertyGroup[];
+  /**
+   * Parsed RDF quads (for the `rdf` kind) — fed to the typed-view registry so a
+   * known shape renders a domain view; absent → generic table only. Already
+   * parsed for `properties`, so no extra fetch (see typed-data-views §4.5).
+   */
+  dataset?: DatasetCore;
+  /** Optional Type-Index category id the resource was discovered under. */
+  categoryId?: string;
 }
 
 /**
@@ -60,6 +69,9 @@ export function useResource(url: string): {
         loaded.text = body;
         const dataset = await parseRdf(body, viewer.mediaType, { baseIRI: url });
         loaded.properties = readResourceProperties(url, dataset);
+        // Keep the parsed dataset so the typed-view registry can select a
+        // domain view (contacts/etc.); no extra fetch — same parse.
+        loaded.dataset = dataset;
       } else if (viewer.kind === "text" && viewer.embeddable) {
         loaded.text = await res.text();
       }

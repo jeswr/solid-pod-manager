@@ -2,14 +2,20 @@ import { Download, ExternalLink, FileQuestion, LinkIcon } from "lucide-react";
 import type { LoadedResource } from "@/components/use-resource";
 import type { PropertyGroup } from "@/lib/resource-view";
 import { safeLinkHref } from "@/lib/pod-scope";
+import { selectTypedView } from "@/components/typed-views/registry";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 /** Render a loaded resource with the viewer chosen by its content type. */
 export function ResourceViewer({ resource }: { resource: LoadedResource }) {
   switch (resource.viewer.kind) {
-    case "rdf":
+    case "rdf": {
+      // Known shape → domain view (contacts, …); otherwise the generic triple
+      // table is the explicit unknown-type fallback (typed-data-views §4.5).
+      const typed = selectTypedView(resource);
+      if (typed) return <>{typed}</>;
       return <RdfViewer groups={resource.properties ?? []} />;
+    }
     case "image":
       return (
         <figure className="overflow-hidden rounded-2xl border border-border bg-card">

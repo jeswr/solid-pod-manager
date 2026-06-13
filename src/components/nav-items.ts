@@ -14,6 +14,7 @@ import {
   Bookmark,
   IdCard,
   UsersRound,
+  CircleDot,
 } from "lucide-react";
 
 export interface NavItem {
@@ -43,5 +44,6 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/calendar", label: "Calendar", icon: CalendarDays },
   { href: "/contacts", label: "Contacts", icon: Users },
   { href: "/bookmarks", label: "Bookmarks", icon: Bookmark },
+  { href: "/issues", label: "Issues", icon: CircleDot },
   { href: "/people", label: "People", icon: UsersRound },
 ] as const;

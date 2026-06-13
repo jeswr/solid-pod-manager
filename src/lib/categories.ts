@@ -181,6 +181,8 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA}DigitalDocument`,
       `${SCHEMA_HTTP}TextDigitalDocument`,
       `${BOOKMARK}Bookmark`,
+      // First-party Issues tracker stores issues as wf:Task.
+      "http://www.w3.org/2005/01/wf/flow#Task",
       // Connected sources: structured collections (Notion databases).
       `${SCHEMA}Dataset`,
       // File imports: reading libraries (Goodreads).

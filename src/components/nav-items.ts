@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Home,
   Database,
+  FolderOpen,
   Plug,
   AppWindow,
   Activity,
@@ -25,6 +26,7 @@ export interface NavItem {
 export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/", label: "Home", icon: Home, primary: true },
   { href: "/my-data", label: "My data", icon: Database, primary: true },
+  { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/connect", label: "Connect", icon: Plug },
   { href: "/connected-apps", label: "Connected apps", icon: AppWindow, primary: true },
   { href: "/activity", label: "Activity", icon: Activity },

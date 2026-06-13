@@ -4,11 +4,19 @@
  * OPTIONS, invite agents (cross-pod, via the SSRF-hardened `sendNotification`),
  * collect RSVP responses, and tally per option.
  *
- * The poll resource lives in the ORGANISER's own pod under `schedule/`, one
- * resource per poll, registered in the Type Index via the shared store engine
- * (so it surfaces under "My data"). Same-pod CRUD for the poll + responses; the
- * only cross-pod surface is inviting an attendee (an inbox notification, strict
- * validated).
+ * COLLABORATION MODEL (security-critical). Every WRITE is SAME-POD:
+ *   - The ORGANISER owns the poll resource in their own pod under `schedule/`
+ *     (one resource per poll, Type-Index registered via the shared store engine,
+ *     so it surfaces under "My data"). Same-pod CRUD.
+ *   - An INVITEE never writes to the organiser's pod (that would be a huge new
+ *     cross-pod-write surface). Instead they (a) READ the organiser's poll
+ *     read-only — validated like any cross-pod target via `agent-target`'s
+ *     `assertValidTargetUrl` + redirect-no-follow, so the auth-patched fetch is
+ *     never steered to a private host — and (b) record their own RSVP, then
+ *     NOTIFY the organiser via the SSRF-hardened `sendNotification` carrying the
+ *     response. The organiser aggregates received RSVPs into their poll.
+ * So the only cross-pod surfaces are: the Invite notification, a validated
+ * read-only GET of the organiser's poll, and the RSVP-back notification.
  *
  * Vocab (schema.org, consistent with `calendar.ts`'s `schema:Event`):
  *   - poll          → `schema:Event` + `schema:name`, `schema:description`,
@@ -33,8 +41,13 @@ import {
   TermWrapper,
 } from "@rdfjs/wrapper";
 import { DataFactory, Store } from "n3";
+import { freshRdf } from "./rdf-read.js";
+import { assertValidTargetUrl, noFollowFetch } from "./agent-target.js";
+import { sendNotification } from "./notify-send.js";
+import { writeResource } from "./pod-data.js";
 import {
   createStore,
+  toSlug,
   type ProductivityStore,
   type StoredItem,
   type StoreConfig,
@@ -152,7 +165,7 @@ export function parsePoll(
     organizer: doc.organizer,
     options,
     invitees: [...doc.invitees],
-    rsvps: readRsvps(subject, dataset),
+    rsvps: readRsvps(dataset),
   };
 }
 
@@ -172,26 +185,22 @@ class RsvpDoc extends TermWrapper {
   }
 }
 
-/** Read every RSVP action attached to the poll (by `schema:object` → poll). */
-function readRsvps(
-  pollSubject: string,
-  dataset: import("@rdfjs/types").DatasetCore,
-): Rsvp[] {
-  const out: Rsvp[] = [];
-  const seen = new Set<string>();
+/**
+ * Read every RSVP action in the dataset, collapsing duplicate
+ * `(attendee, option)` pairs LAST-WINS (consistent with {@link tallyRsvps}).
+ */
+function readRsvps(dataset: import("@rdfjs/types").DatasetCore): Rsvp[] {
+  const byKey = new Map<string, Rsvp>();
   for (const q of dataset.match(null, DataFactory.namedNode(RDF_TYPE), DataFactory.namedNode(RSVP_ACTION))) {
     const doc = new RsvpDoc(q.subject.value, dataset, DataFactory);
     const attendee = doc.attendee;
     const option = doc.option;
     const response = doc.response ? RSVP_FROM_IRI[doc.response] : undefined;
     if (!attendee || !option || !response) continue;
-    const key = `${attendee}|${option.toISOString()}`;
-    if (seen.has(key)) continue; // one RSVP per attendee per option (last wins on write)
-    seen.add(key);
-    out.push({ attendee, option: option.toISOString(), response });
+    const iso = option.toISOString();
+    byKey.set(`${attendee}|${iso}`, { attendee, option: iso, response }); // last wins
   }
-  void pollSubject;
-  return out;
+  return [...byKey.values()];
 }
 
 /**
@@ -304,3 +313,99 @@ export function scheduleStore(opts: {
 
 /** Re-export for the list UI. */
 export type PollItem = StoredItem<Poll>;
+
+// ── Cross-pod respond path (invitee side) ──────────────────────────────────
+
+/** Container in the INVITEE's own pod where their RSVP responses are stored. */
+export const RESPONSES_SLUG = "schedule-responses/";
+
+/**
+ * Read a poll that lives in ANOTHER agent's pod (the organiser's), read-only.
+ *
+ * SECURITY: the poll URL arrives via an Invite notification's `as:object`, so it
+ * is attacker-influenceable. Before fetching it with the auth-patched global
+ * `fetch` we run it through the SAME strict validator the POST path uses
+ * (`assertValidTargetUrl`: https-only, no userinfo, no loopback/private/metadata
+ * host) and force `redirect: "manual"` (via `noFollowFetch`) so a 401/redirect
+ * can't steer our token to a private host. Returns the parsed {@link Poll}.
+ *
+ * @throws InvalidTargetError when the poll URL is not a safe target.
+ */
+export async function readPollAt(
+  pollUrl: string,
+  fetchImpl?: typeof fetch,
+): Promise<Poll | undefined> {
+  assertValidTargetUrl(pollUrl); // fail closed before any authenticated GET
+  const guarded = noFollowFetch(fetchImpl);
+  const { dataset } = await freshRdf(pollUrl, guarded);
+  return parsePoll(pollUrl, dataset);
+}
+
+/**
+ * Record an invitee's RSVP. Every write is SAME-POD: we write the response into
+ * the INVITEE's OWN pod (under {@link RESPONSES_SLUG}) — never to the
+ * organiser's pod — then NOTIFY the organiser via the SSRF-hardened
+ * `sendNotification` so they can aggregate it. The notification carries the poll
+ * IRI (`as:object`), the chosen option + response in the summary, and the
+ * attendee as `as:actor`.
+ *
+ * @returns the URL of the response resource written in the invitee's own pod.
+ */
+export async function respondToPoll(
+  args: {
+    pollUrl: string;
+    organizerWebId: string;
+    attendeeWebId: string;
+    podRoot: string;
+    option: string; // ISO start-time of the chosen option
+    response: RsvpResponse;
+    pollName?: string;
+  },
+  fetchImpl?: typeof fetch,
+): Promise<{ responseUrl: string }> {
+  // 1. Same-pod write: a small RsvpAction resource in the attendee's own pod.
+  const container = new URL(RESPONSES_SLUG, args.podRoot).toString();
+  const slug = toSlug(args.pollName) || "poll";
+  const rand = Math.random().toString(36).slice(2, 8);
+  const responseUrl = `${container}${slug}-${rand}.ttl`;
+  const store = new Store();
+  const node = DataFactory.namedNode(`${responseUrl}#it`);
+  const optDate = new Date(args.option);
+  store.add(DataFactory.quad(node, DataFactory.namedNode(RDF_TYPE), DataFactory.namedNode(RSVP_ACTION)));
+  store.add(
+    DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}object`), DataFactory.namedNode(args.pollUrl)),
+  );
+  store.add(
+    DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}attendee`), DataFactory.namedNode(args.attendeeWebId)),
+  );
+  store.add(
+    DataFactory.quad(
+      node,
+      DataFactory.namedNode(`${SCHEMA}startDate`),
+      DataFactory.literal(
+        Number.isNaN(optDate.getTime()) ? args.option : optDate.toISOString(),
+        DataFactory.namedNode("http://www.w3.org/2001/XMLSchema#dateTime"),
+      ),
+    ),
+  );
+  store.add(
+    DataFactory.quad(node, DataFactory.namedNode(`${SCHEMA}rsvpResponse`), DataFactory.namedNode(RSVP_IRI[args.response])),
+  );
+  await writeResource(responseUrl, store, { fetchImpl, prefixes: PREFIXES });
+
+  // 2. Notify the organiser (strict-validated cross-pod). Best-effort: the RSVP
+  //    is already persisted in the attendee's pod even if delivery fails.
+  await sendNotification(
+    {
+      recipientWebId: args.organizerWebId,
+      actorWebId: args.attendeeWebId,
+      type: "Offer",
+      object: args.pollUrl,
+      summary: `RSVP ${args.response} for ${optDate.toISOString()}`,
+      content: responseUrl,
+    },
+    fetchImpl,
+  );
+
+  return { responseUrl };
+}

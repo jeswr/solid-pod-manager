@@ -9,7 +9,7 @@
  * opens a poll (scope-guarded by the store's assertInContainer); no id shows the
  * list + a "New poll" form.
  */
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { CalendarClock, Check, Loader2, Plus, X } from "lucide-react";
@@ -29,10 +29,13 @@ import {
   scheduleStore,
   tallyRsvps,
   winningOption,
+  readPollAt,
+  respondToPoll,
   type Poll,
   type RsvpResponse,
 } from "@/lib/schedule";
 import { sendNotification } from "@/lib/notify-send";
+import { isInOwnPods } from "@/lib/pod-scope";
 import { fromDateTimeLocal, formatDateTime } from "@/lib/format";
 
 export default function SchedulePage() {
@@ -233,12 +236,49 @@ function NewPoll({ onCreated }: { onCreated: () => void }) {
 }
 
 function PollDetail({ pollUrl }: { pollUrl: string }) {
-  const { webId } = useSession();
+  const { webId, activeStorage, profile } = useSession();
   const store = useStore<Poll>(scheduleStore);
-  const { data: item, loading, error, reload } = useItem(store, pollUrl);
+
+  // Is this poll in one of the user's OWN pods (organiser view) or someone
+  // else's (invitee view)? Organiser → same-pod store CRUD; invitee → validated
+  // read-only fetch + respond-in-own-pod + notify.
+  const storages = useMemo(() => {
+    const all = profile?.storages ?? [];
+    return all.length > 0 ? all : activeStorage ? [activeStorage] : [];
+  }, [profile?.storages, activeStorage]);
+  const isOrganiser = useMemo(() => isInOwnPods(pollUrl, storages), [pollUrl, storages]);
+
+  // Organiser path: the typed store (same-pod, scope-guarded).
+  const owned = useItem(store, isOrganiser ? pollUrl : undefined);
+
+  // Invitee path: validated read-only fetch of the foreign poll.
+  const [foreign, setForeign] = useState<{ loading: boolean; data?: Poll; error?: Error }>({
+    loading: true,
+  });
+  const [foreignNonce, setForeignNonce] = useState(0);
+  useEffect(() => {
+    if (isOrganiser) return;
+    let cancelled = false;
+    setForeign({ loading: true });
+    readPollAt(pollUrl)
+      .then((p) => {
+        if (!cancelled) setForeign({ loading: false, data: p });
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setForeign({ loading: false, error: e instanceof Error ? e : new Error(String(e)) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOrganiser, pollUrl, foreignNonce]);
+
   const [saving, setSaving] = useState(false);
 
-  const poll = item?.data;
+  const poll = isOrganiser ? owned.data?.data : foreign.data;
+  const loading = isOrganiser ? owned.loading : foreign.loading;
+  const error = isOrganiser ? owned.error : foreign.error;
+  const reload = isOrganiser ? owned.reload : () => setForeignNonce((n) => n + 1);
+
   const tallies = useMemo(
     () => (poll ? tallyRsvps(poll.options, poll.rsvps) : []),
     [poll],
@@ -246,16 +286,33 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
   const winner = useMemo(() => winningOption(tallies), [tallies]);
 
   async function rsvp(option: string, response: RsvpResponse) {
-    if (!store || !poll || !webId || !item) return;
+    if (!poll || !webId) return;
     setSaving(true);
     try {
-      // Upsert this attendee's response for the option (last-wins; the tally
-      // collapses duplicates too, but we keep the stored set tidy).
-      const rsvps = [
-        ...poll.rsvps.filter((r) => !(r.attendee === webId && r.option === option)),
-        { attendee: webId, option, response },
-      ];
-      await store.update(pollUrl, { ...poll, rsvps }, item.etag);
+      if (isOrganiser && store && owned.data) {
+        // Organiser RSVPing on their own poll: same-pod update (last-wins upsert).
+        const rsvps = [
+          ...poll.rsvps.filter((r) => !(r.attendee === webId && r.option === option)),
+          { attendee: webId, option, response },
+        ];
+        await store.update(pollUrl, { ...poll, rsvps }, owned.data.etag);
+      } else {
+        // Invitee: write the RSVP to OUR OWN pod + notify the organiser. Never
+        // writes to the organiser's pod (no cross-pod write surface).
+        if (!activeStorage || !poll.organizer) {
+          toast.error("This poll has no organiser to notify.");
+          return;
+        }
+        await respondToPoll({
+          pollUrl,
+          organizerWebId: poll.organizer,
+          attendeeWebId: webId,
+          podRoot: activeStorage,
+          option,
+          response,
+          pollName: poll.name,
+        });
+      }
       toast.success("RSVP saved");
       reload();
     } catch {

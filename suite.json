@@ -1,5 +1,4 @@
 {
-  "$schema": "https://solid.example/suite-tracking/suite.schema.json",
   "id": "solid-pod-manager",
   "kind": "app",
   "name": "Solid Pod Manager",
@@ -9,7 +8,7 @@
   "visibility": "public",
   "stack": {
     "language": "TypeScript",
-    "runtime": "Node >=20",
+    "runtime": "Node >=24",
     "framework": "Next.js 15",
     "ui": "shadcn/ui + Radix + Tailwind 4",
     "rdf": "@jeswr/fetch-rdf ^0.1, @solid/object ^0.6, @rdfjs/wrapper ^0.34, n3 ^2",

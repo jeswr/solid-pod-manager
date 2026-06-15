@@ -178,8 +178,8 @@ export function isAssignedToMe(assignee: string | undefined, myWebId: string): b
  * contact source for a foreign one), decide whether the resource is writable by
  * ONLY that exact owner — so a third party could not have planted the bytes.
  *
- * The spoofable surface is ANY write/append grant to someone OTHER than the
- * expected owner. That includes the obvious BROAD subjects —
+ * The spoofable surface is ANY write/append/CONTROL grant to someone OTHER than
+ * the expected owner. That includes the obvious BROAD subjects —
  *   - `public` (`acl:agentClass foaf:Agent`) — anyone on the web,
  *   - `authenticated` (`acl:AuthenticatedAgent`) — any logged-in agent,
  *   - `group` (`acl:agentGroup`) — a (possibly attacker-controlled) group,
@@ -191,11 +191,20 @@ export function isAssignedToMe(assignee: string | undefined, myWebId: string): b
  * source. So a write/append grant is tolerated ONLY when its subject is exactly
  * the expected owner agent (`{ kind: "agent", id: ownerWebId }`).
  *
- * If ANY effective entry grants `write` OR `append` to a subject that is not
- * EXACTLY the expected owner agent, the resource is NOT owner-write-only (a
- * non-owner could have posted the task) and the claim there is untrusted.
- * Read-only grants to anyone, and any-mode grants (including control) to the
- * owner, are fine — they don't let a non-owner write the bytes.
+ * CONTROL is equally powerful (the bypass `57361b5` missed). In WAC, `acl:Control`
+ * lets the holder READ AND REWRITE the resource's ACL — so a non-owner with ONLY
+ * `control` (no explicit write/append) can simply grant THEMSELVES Write/Append,
+ * plant/modify the task, and even remove the evidence. A `control` grant to a
+ * non-owner is therefore just as spoofable as a write/append one and must
+ * disqualify the resource. So `control` joins write/append in the set of
+ * "powerful" modes that may be held ONLY by the exact owner agent.
+ *
+ * If ANY effective entry grants `write`, `append`, OR `control` to a subject that
+ * is not EXACTLY the expected owner agent, the resource is NOT owner-write-only (a
+ * non-owner could have posted the task — directly, or by first rewriting the ACL)
+ * and the claim there is untrusted. Read-only grants to anyone, and any-mode
+ * grants (including control) to the OWNER, are fine — they don't let a non-owner
+ * write the bytes.
  *
  * Conservative + fail-closed: the caller passes `undefined` for `entries` when
  * the access could not be determined, which this treats as NOT owner-write-only;
@@ -209,8 +218,13 @@ export function isOwnerWriteOnly(
   if (!entries) return false; // access undetermined — fail closed.
   if (!ownerWebId.trim()) return false; // no known owner — fail closed.
   for (const e of entries) {
-    if (!e.modes.includes("write") && !e.modes.includes("append")) continue;
-    // A write/append grant is only OK if it is EXACTLY the expected owner agent.
+    // write/append let a subject post the bytes directly; control lets them
+    // REWRITE the ACL to grant themselves write/append — so control is just as
+    // spoofable for a non-owner and is treated as a powerful mode too.
+    const isPowerful =
+      e.modes.includes("write") || e.modes.includes("append") || e.modes.includes("control");
+    if (!isPowerful) continue;
+    // A powerful grant is only OK if it is EXACTLY the expected owner agent.
     const isOwnerAgent = e.subject.kind === "agent" && e.subject.id === ownerWebId;
     if (!isOwnerAgent) return false;
   }

@@ -222,6 +222,32 @@ function namedAttackerWritableAcl(
       acl:mode acl:Read, acl:Write, acl:Append .`;
 }
 
+/**
+ * A NAMED-ATTACKER-CONTROL-ONLY ACL for `resourceUrl`: the pod owner has control,
+ * and a SPECIFIC OTHER WebID (`attackerWebId`) is granted ONLY `acl:Control` — NO
+ * explicit Write/Append. The bypass `57361b5` missed: with Control, the attacker
+ * can REWRITE this ACL to grant themselves Write/Append, plant/modify the task,
+ * and remove the evidence. So the provenance gate must reject this just like a
+ * named WRITE grant. isOwnerWriteOnly must return FALSE.
+ */
+function namedAttackerControlOnlyAcl(
+  resourceUrl: string,
+  ownerWebId: string,
+  attackerWebId: string,
+): string {
+  return `
+    @prefix acl: <${ACL_NS}> .
+    @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+    <#owner> a acl:Authorization ;
+      acl:accessTo <${resourceUrl}> ;
+      acl:agent <${ownerWebId}> ;
+      acl:mode acl:Read, acl:Write, acl:Control .
+    <#attacker> a acl:Authorization ;
+      acl:accessTo <${resourceUrl}> ;
+      acl:agent <${attackerWebId}> ;
+      acl:mode acl:Control .`;
+}
+
 /** A turtle ACL Response (with an ETag the read path tolerates). */
 function aclRes(body: string): Response {
   return new Response(body, {
@@ -256,7 +282,10 @@ type RouteFn = (url: string) => Response | undefined;
  *     UNLESS the resource is listed in `appendable` (then a WORLD-APPENDABLE ACL
  *     is served, modelling a public inbox — the broad-grant spoof surface), or is
  *     a key in `namedAttackerWritable` (then a NAMED-ATTACKER-WRITABLE ACL is
- *     served, granting that specific WebID Write — the HIGH named-writer spoof).
+ *     served, granting that specific WebID Write — the HIGH named-writer spoof),
+ *     or a key in `namedAttackerControlOnly` (then a NAMED-ATTACKER-CONTROL-ONLY
+ *     ACL is served, granting that specific WebID ONLY Control — the Control-only
+ *     spoof: Control lets them rewrite the ACL to grant themselves Write).
  *   - a resource listed in `acpResources` answers with an ACP `.acr` control
  *     slot, modelling an ACP-backed pod (the MEDIUM finding — must be NON-SILENT).
  * The base route table handles everything else (profiles, indexes, containers).
@@ -266,11 +295,13 @@ function wrapWithAcls(
   appendable: readonly string[] = [],
   opts: {
     namedAttackerWritable?: Readonly<Record<string, string>>;
+    namedAttackerControlOnly?: Readonly<Record<string, string>>;
     acpResources?: readonly string[];
   } = {},
 ): typeof fetch {
   const appendableSet = new Set(appendable);
   const namedAttacker = opts.namedAttackerWritable ?? {};
+  const namedAttackerControl = opts.namedAttackerControlOnly ?? {};
   const acpSet = new Set(opts.acpResources ?? []);
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -288,6 +319,9 @@ function wrapWithAcls(
         const owner = ownerOf(resource);
         const attacker = namedAttacker[resource];
         if (attacker) return aclRes(namedAttackerWritableAcl(resource, owner, attacker));
+        const controlAttacker = namedAttackerControl[resource];
+        if (controlAttacker)
+          return aclRes(namedAttackerControlOnlyAcl(resource, owner, controlAttacker));
         return aclRes(
           appendableSet.has(resource)
             ? worldAppendableAcl(resource, owner)
@@ -573,6 +607,29 @@ describe("isOwnerWriteOnly", () => {
         { subject: { kind: "agent", id: MALLORY }, level: "edit", modes: ["read", "write", "append"], source: "direct" },
       ], ALICE),
     ).toBe(false);
+  });
+
+  it("FALSE when a NAMED AGENT OTHER THAN THE OWNER has ONLY Control (no write/append) — the Control-rewrite bypass", () => {
+    // The bypass `57361b5` missed: Mallory holds ONLY `acl:Control` (NO explicit
+    // Write/Append). In WAC, Control lets her READ AND REWRITE the resource's ACL —
+    // so she can grant HERSELF Write/Append, plant/modify the task, and even remove
+    // the evidence. A non-owner Control grant is therefore just as spoofable as a
+    // write grant and must disqualify the resource even with no current write/append.
+    expect(
+      isOwnerWriteOnly([
+        owner(["read", "write", "control"]),
+        { subject: { kind: "agent", id: MALLORY }, level: "owner", modes: ["control"], source: "direct" },
+      ], ALICE),
+    ).toBe(false);
+    // A BROAD subject holding only Control is equally disqualifying.
+    expect(
+      isOwnerWriteOnly([
+        owner(["read", "write", "control"]),
+        { subject: { kind: "public", id: "" }, level: "owner", modes: ["control"], source: "direct" },
+      ], ALICE),
+    ).toBe(false);
+    // …but the OWNER holding Control is fine (that is exactly the normal case).
+    expect(isOwnerWriteOnly([owner(["read", "control"])], ALICE)).toBe(true);
   });
 
   it("TRUE when the SAME owner agent matches the expected owner WebID exactly (foreign source case)", () => {
@@ -1143,6 +1200,52 @@ describe("discoverAssignedTasks", () => {
     });
     // Under Bob's storage and broad-write-clean, but a named non-owner can write →
     // owner-write-only is FALSE → dropped.
+    expect(tasks).toEqual([]);
+  });
+
+  it("REJECTS a task in a friend's OWN storage whose ACL grants a NAMED ATTACKER ONLY Control (the Control-rewrite bypass)", async () => {
+    // THE BYPASS `57361b5` missed: Bob (authorized) hosts a wf:Task in HIS OWN
+    // verified storage — residence is fine. The task's ACL grants Mallory ONLY
+    // `acl:Control` (NO explicit Write/Append). The pre-fix predicate only looked
+    // at write/append, so it wrongly returned owner-write-only = TRUE and SURFACED
+    // the task. But Control lets Mallory REWRITE this ACL to grant herself Write,
+    // plant/modify the task, and remove the evidence — so the assignment is
+    // spoofable. The fixed predicate (expected owner = Bob) sees a Control grant to
+    // a non-owner agent → owner-write-only FALSE → drops it.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const PLANTED = `${BOB_ISSUES}control-bypass.ttl`;
+    const fetchImpl = wrapWithAcls(
+      (url: string): Response | undefined => {
+        if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+          return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+        }
+        if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, []));
+        if (url === BOB_DOC) {
+          return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+        }
+        if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+          return ttl(indexTtl({ self: "https://bob.example/settings/privateTypeIndex.ttl", issuesContainer: BOB_ISSUES }));
+        }
+        // The container IS within Bob's verified storage (provenance OK).
+        if (url === BOB_ISSUES) return ttl(containerTtl(BOB_ISSUES, [PLANTED]));
+        if (url === PLANTED) return ttl(taskTtl(PLANTED, { title: "Control-bypass by Mallory", assignee: ALICE }));
+        return undefined;
+      },
+      [],
+      // The planted task's ACL grants MALLORY (a named non-owner) ONLY Control.
+      { namedAttackerControlOnly: { [PLANTED]: MALLORY } },
+    );
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [],
+      fetchImpl,
+    });
+    // Under Bob's storage with no write/append to a non-owner, but a named
+    // non-owner holds Control → can rewrite the ACL → owner-write-only is FALSE →
+    // dropped.
     expect(tasks).toEqual([]);
   });
 

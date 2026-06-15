@@ -167,7 +167,24 @@ export default function HomePage() {
           not a fabricated read-log). */}
       <section aria-label="Recent activity" className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Recent activity</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold">Recent activity</h2>
+            {/* Non-blocking SWR affordance: a cached feed is shown while a
+                background refresh runs — say so instead of a full-screen load. */}
+            {activity.revalidating && !activity.loading ? (
+              <span
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+                role="status"
+                aria-live="polite"
+              >
+                <span
+                  aria-hidden="true"
+                  className="size-1.5 animate-pulse rounded-full bg-muted-foreground"
+                />
+                Refreshing…
+              </span>
+            ) : null}
+          </div>
           {(activity.data?.length ?? 0) > 0 ? (
             <Button variant="ghost" size="sm" asChild>
               <Link href="/activity">

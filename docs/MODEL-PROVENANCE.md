@@ -160,3 +160,28 @@ Touched (wire-in only):
   warning toast) wired into every store.
 - `next.config.ts` / `vitest.config.ts` — `.ttl` raw-text import (webpack
   `asset/source` + a Vite transform).
+
+## Offline-first durable read cache — Claude Opus 4.8 (Fable unavailable)
+
+A durable, WebID-scoped, versioned `localStorage` snapshot of the expensive pod
+read models, mirrored by the in-memory SWR cache, so a cold open / app reopen
+paints the last-good value instantly (no loading screen) and revalidates in the
+background. Same shape as `jeswr/solid-issues` `issue-cache.ts`, generalised to
+any `(WebID, key)` model. Fable unavailable at authoring time; upgrade candidate.
+
+New files:
+
+- `src/lib/durable-cache.ts` — the durable snapshot layer (WebID-scoped +
+  versioned + age-bounded + best-effort `localStorage`); injectable `SyncStorage`.
+- `src/lib/durable-cache.test.ts` — WebID-scoping, version/age/mismatch misses,
+  clear-on-logout/account-switch, best-effort error handling.
+
+Touched:
+
+- `src/lib/swr-cache.ts` — `DurableStore` port + `hydrate()`; `set` mirrors to
+  durable, `clearWebId`/`clearAll`/`invalidate` wipe durable too.
+- `src/lib/swr-cache.test.ts` — durable-persistence + cold-open survival tests.
+- `src/components/use-swr-read.ts` — synchronous `hydrate()` seed on mount.
+- `src/components/use-activity.ts` — "Recent activity" routed through `useSwrRead`
+  (was raw fetch-on-mount; now survives navigation + cold open, shared feed).
+- `src/app/page.tsx` — non-blocking "Refreshing…" affordance on Recent activity.

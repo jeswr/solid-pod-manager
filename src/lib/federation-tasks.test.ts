@@ -143,14 +143,19 @@ function aclSlot(resourceUrl: string): string {
   return `${resourceUrl}.acl`;
 }
 
-/** A turtle Response that also advertises its ACL slot via `Link: rel="acl"`. */
-function withAclLink(body: string, resourceUrl: string): Response {
+/**
+ * A turtle Response that also advertises its access-control slot via
+ * `Link: rel="acl"`. The slot is the conventional `<resource>.acl` (WAC) or, for
+ * an ACP-backed resource, `<resource>.acr` (which the WAC backend refuses).
+ */
+function withAclLink(body: string, resourceUrl: string, acp = false): Response {
+  const slot = acp ? `${resourceUrl}.acr` : aclSlot(resourceUrl);
   return new Response(body, {
     status: 200,
     headers: {
       "content-type": "text/turtle",
       etag: '"v1"',
-      link: `<${aclSlot(resourceUrl)}>; rel="acl"`,
+      link: `<${slot}>; rel="acl"`,
     },
   });
 }
@@ -192,6 +197,31 @@ function worldAppendableAcl(resourceUrl: string, ownerWebId: string): string {
       acl:mode acl:Read, acl:Append .`;
 }
 
+/**
+ * A NAMED-ATTACKER-WRITABLE ACL for `resourceUrl`: the pod owner has control, but
+ * a SPECIFIC OTHER WebID (`attackerWebId`, NOT a broad class) is granted Write.
+ * No public/authenticated/group grant is present, so the OLD broad-only predicate
+ * would have wrongly returned TRUE. The owner-WebID-aware predicate must return
+ * FALSE — the named non-owner could have planted the bytes (the HIGH spoof).
+ */
+function namedAttackerWritableAcl(
+  resourceUrl: string,
+  ownerWebId: string,
+  attackerWebId: string,
+): string {
+  return `
+    @prefix acl: <${ACL_NS}> .
+    @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+    <#owner> a acl:Authorization ;
+      acl:accessTo <${resourceUrl}> ;
+      acl:agent <${ownerWebId}> ;
+      acl:mode acl:Read, acl:Control .
+    <#attacker> a acl:Authorization ;
+      acl:accessTo <${resourceUrl}> ;
+      acl:agent <${attackerWebId}> ;
+      acl:mode acl:Read, acl:Write, acl:Append .`;
+}
+
 /** A turtle ACL Response (with an ETag the read path tolerates). */
 function aclRes(body: string): Response {
   return new Response(body, {
@@ -224,18 +254,40 @@ type RouteFn = (url: string) => Response | undefined;
  *   - any leaf task resource (.ttl) GET gains a `Link: rel="acl"` header;
  *   - the conventional `<resource>.acl` slot serves an OWNER-WRITE-ONLY ACL,
  *     UNLESS the resource is listed in `appendable` (then a WORLD-APPENDABLE ACL
- *     is served, modelling a public inbox — the spoof surface).
+ *     is served, modelling a public inbox — the broad-grant spoof surface), or is
+ *     a key in `namedAttackerWritable` (then a NAMED-ATTACKER-WRITABLE ACL is
+ *     served, granting that specific WebID Write — the HIGH named-writer spoof).
+ *   - a resource listed in `acpResources` answers with an ACP `.acr` control
+ *     slot, modelling an ACP-backed pod (the MEDIUM finding — must be NON-SILENT).
  * The base route table handles everything else (profiles, indexes, containers).
  */
-function wrapWithAcls(base: RouteFn, appendable: readonly string[] = []): typeof fetch {
+function wrapWithAcls(
+  base: RouteFn,
+  appendable: readonly string[] = [],
+  opts: {
+    namedAttackerWritable?: Readonly<Record<string, string>>;
+    acpResources?: readonly string[];
+  } = {},
+): typeof fetch {
   const appendableSet = new Set(appendable);
+  const namedAttacker = opts.namedAttackerWritable ?? {};
+  const acpSet = new Set(opts.acpResources ?? []);
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    // ACL slot for a leaf resource: owner-write-only, or world-appendable spoof.
+    // ACP control slot for an ACP-backed resource (modelled as `<resource>.acr`).
+    if (url.endsWith(".acr")) {
+      return aclRes(`
+        @prefix acp: <http://www.w3.org/ns/solid/acp#> .
+        <#policy> a acp:AccessControlResource .`);
+    }
+    // ACL slot for a leaf resource: owner-write-only, world-appendable spoof, or
+    // named-attacker-writable spoof.
     if (url.endsWith(".acl")) {
       const resource = url.slice(0, -".acl".length);
       if (isLeafResource(resource)) {
         const owner = ownerOf(resource);
+        const attacker = namedAttacker[resource];
+        if (attacker) return aclRes(namedAttackerWritableAcl(resource, owner, attacker));
         return aclRes(
           appendableSet.has(resource)
             ? worldAppendableAcl(resource, owner)
@@ -249,9 +301,11 @@ function wrapWithAcls(base: RouteFn, appendable: readonly string[] = []): typeof
     if (!res) return new Response("nf", { status: 404 });
     // Decorate a leaf task resource response with its ACL link so the gate can
     // discover + read its effective access. Containers/indexes are untouched.
+    // An ACP-backed resource advertises an `.acr` slot instead (the WAC backend
+    // then throws AcpUnsupportedError → the gate's NON-SILENT ACP path).
     if (res.status === 200 && isLeafResource(url)) {
       const body = await res.clone().text();
-      return withAclLink(body, url);
+      return withAclLink(body, url, acpSet.has(url));
     }
     return res;
   }) as unknown as typeof fetch;
@@ -465,8 +519,8 @@ describe("isOwnerWriteOnly", () => {
   const owner = (modes: ("read" | "write" | "append" | "control")[]) =>
     ({ subject: { kind: "agent", id: ALICE } as const, level: "owner" as const, modes, source: "direct" as const });
 
-  it("TRUE when only the owner has write (no broad grants)", () => {
-    expect(isOwnerWriteOnly([owner(["read", "write", "control"])])).toBe(true);
+  it("TRUE when only the owner (the expected owner WebID) has write (no other grants)", () => {
+    expect(isOwnerWriteOnly([owner(["read", "write", "control"])], ALICE)).toBe(true);
   });
 
   it("TRUE when public/group have READ only (read does not make it appendable)", () => {
@@ -475,7 +529,7 @@ describe("isOwnerWriteOnly", () => {
         owner(["read", "write", "control"]),
         { subject: { kind: "public", id: "" }, level: "view", modes: ["read"], source: "direct" },
         { subject: { kind: "group", id: "https://g.example/grp#it" }, level: "view", modes: ["read"], source: "inherited" },
-      ]),
+      ], ALICE),
     ).toBe(true);
   });
 
@@ -484,7 +538,7 @@ describe("isOwnerWriteOnly", () => {
       isOwnerWriteOnly([
         owner(["read", "write", "control"]),
         { subject: { kind: "public", id: "" }, level: "add", modes: ["append"], source: "direct" },
-      ]),
+      ], ALICE),
     ).toBe(false);
   });
 
@@ -492,17 +546,62 @@ describe("isOwnerWriteOnly", () => {
     expect(
       isOwnerWriteOnly([
         { subject: { kind: "authenticated", id: "" }, level: "edit", modes: ["read", "write", "append"], source: "direct" },
-      ]),
+      ], ALICE),
     ).toBe(false);
     expect(
       isOwnerWriteOnly([
         { subject: { kind: "group", id: "https://g.example/grp#it" }, level: "edit", modes: ["write"], source: "direct" },
-      ]),
+      ], ALICE),
+    ).toBe(false);
+  });
+
+  it("FALSE when a NAMED AGENT OTHER THAN THE OWNER can write/append (the HIGH spoof surface)", () => {
+    // The container is owner-write-only against a BROAD subject, but it ALSO
+    // grants a third party (Mallory, a specific WebID) Append. Mallory can plant a
+    // task there → the claim is spoofable. Reject even though no broad class can
+    // write and the bytes are under the source's storage.
+    expect(
+      isOwnerWriteOnly([
+        owner(["read", "write", "control"]),
+        { subject: { kind: "agent", id: MALLORY }, level: "add", modes: ["append"], source: "direct" },
+      ], ALICE),
+    ).toBe(false);
+    // And the same for a named-agent WRITE grant.
+    expect(
+      isOwnerWriteOnly([
+        owner(["read", "write", "control"]),
+        { subject: { kind: "agent", id: MALLORY }, level: "edit", modes: ["read", "write", "append"], source: "direct" },
+      ], ALICE),
+    ).toBe(false);
+  });
+
+  it("TRUE when the SAME owner agent matches the expected owner WebID exactly (foreign source case)", () => {
+    // For a foreign source, the expected owner is the FRIEND, and the friend's own
+    // container grants the friend write — that is fine.
+    expect(
+      isOwnerWriteOnly(
+        [{ subject: { kind: "agent", id: BOB }, level: "owner", modes: ["read", "write", "append", "control"], source: "direct" }],
+        BOB,
+      ),
+    ).toBe(true);
+    // …but a write grant to the friend's WebID is NOT owner-write-only when the
+    // EXPECTED owner is someone else (e.g. the resource is in Alice's own pod yet
+    // Bob holds write — a non-owner could write).
+    expect(
+      isOwnerWriteOnly(
+        [{ subject: { kind: "agent", id: BOB }, level: "edit", modes: ["write"], source: "direct" }],
+        ALICE,
+      ),
     ).toBe(false);
   });
 
   it("FALSE (fail-closed) when the access is undetermined (undefined)", () => {
-    expect(isOwnerWriteOnly(undefined)).toBe(false);
+    expect(isOwnerWriteOnly(undefined, ALICE)).toBe(false);
+  });
+
+  it("FALSE (fail-closed) when the expected owner WebID is empty/blank", () => {
+    expect(isOwnerWriteOnly([owner(["read", "write", "control"])], "")).toBe(false);
+    expect(isOwnerWriteOnly([owner(["read", "write", "control"])], "   ")).toBe(false);
   });
 });
 
@@ -1000,5 +1099,98 @@ describe("discoverAssignedTasks", () => {
     expect(tasks.map((t) => t.url)).toEqual([VALID_INSTANCE]);
     const fetched = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
     expect(fetched.some((u) => u.startsWith(EVIL_CONTAINER))).toBe(false);
+  });
+
+  it("REJECTS a task in a friend's OWN storage whose ACL grants a NAMED ATTACKER write (the HIGH spoof)", async () => {
+    // THE HIGH spoof the owner-WebID refinement closes: Bob (authorized) has a
+    // container in HIS OWN verified storage, registered for wf:Task — so the prior
+    // gate (residence + broad-grant owner-write-only) would ACCEPT it. But the
+    // task resource's effective ACL grants WRITE to a SPECIFIC OTHER WebID
+    // (Mallory) — no public/authenticated/group class can write, so the OLD
+    // broad-only predicate returned TRUE. Mallory could plant this task and spoof
+    // an assignment "from Bob". The owner-WebID-aware predicate (expected owner =
+    // Bob) sees a write grant to a non-owner agent → drops it.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const PLANTED = `${BOB_ISSUES}planted.ttl`;
+    const fetchImpl = wrapWithAcls(
+      (url: string): Response | undefined => {
+        if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+          return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+        }
+        if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, []));
+        if (url === BOB_DOC) {
+          return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+        }
+        if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+          return ttl(indexTtl({ self: "https://bob.example/settings/privateTypeIndex.ttl", issuesContainer: BOB_ISSUES }));
+        }
+        // The container IS within Bob's verified storage (provenance OK).
+        if (url === BOB_ISSUES) return ttl(containerTtl(BOB_ISSUES, [PLANTED]));
+        if (url === PLANTED) return ttl(taskTtl(PLANTED, { title: "Planted by Mallory", assignee: ALICE }));
+        return undefined;
+      },
+      [],
+      // The planted task's ACL grants MALLORY (a named non-owner) Write.
+      { namedAttackerWritable: { [PLANTED]: MALLORY } },
+    );
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [],
+      fetchImpl,
+    });
+    // Under Bob's storage and broad-write-clean, but a named non-owner can write →
+    // owner-write-only is FALSE → dropped.
+    expect(tasks).toEqual([]);
+  });
+
+  it("DROPS an ACP-backed pod's task NON-SILENTLY (console.warn, not a silent drop) — the MEDIUM finding", async () => {
+    // Bob (authorized) hosts a valid task for Alice in his own storage, but his
+    // pod uses ACP (.acr) access control, which the WAC-only gate cannot evaluate.
+    // The task must still be dropped (fail closed), but NON-SILENTLY: a warn-level
+    // log naming the ACP skip, so valid ACP-pod tasks don't vanish without trace.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const ACP_TASK = `${BOB_ISSUES}forA.ttl`;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const fetchImpl = wrapWithAcls(
+        (url: string): Response | undefined => {
+          if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+            return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+          }
+          if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, []));
+          if (url === BOB_DOC) {
+            return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+          }
+          if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+            return ttl(indexTtl({ self: "https://bob.example/settings/privateTypeIndex.ttl", issuesContainer: BOB_ISSUES }));
+          }
+          if (url === BOB_ISSUES) return ttl(containerTtl(BOB_ISSUES, [ACP_TASK]));
+          if (url === ACP_TASK) return ttl(taskTtl(ACP_TASK, { title: "Valid but ACP-backed", assignee: ALICE }));
+          return undefined;
+        },
+        [],
+        { acpResources: [ACP_TASK] }, // Bob's task advertises an `.acr` slot.
+      );
+
+      const tasks = await discoverAssignedTasks({
+        myWebId: ALICE,
+        myProfile: readProfile(ALICE, aliceDs),
+        myProfileDataset: aliceDs,
+        contactWebIds: [],
+        fetchImpl,
+      });
+      // Fail closed: ACP can't be evaluated, so the task is dropped…
+      expect(tasks).toEqual([]);
+      // …but NON-SILENTLY — a warn naming the ACP skip + the resource URL.
+      const warned = warn.mock.calls.some(
+        (c) => c.some((a) => typeof a === "string" && a.includes("ACP")) && c.includes(ACP_TASK),
+      );
+      expect(warned).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

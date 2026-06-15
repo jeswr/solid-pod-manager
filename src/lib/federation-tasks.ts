@@ -69,6 +69,7 @@
  * never regex on RDF, never hand-built quads (house rule).
  */
 import { RdfFetchError } from "@jeswr/fetch-rdf";
+import { AcpUnsupportedError } from "./errors.js";
 import { freshRdf } from "./rdf-read.js";
 import { readProfile, type PodProfile } from "./profile.js";
 import { profileDocUrl } from "./profile-edit.js";
@@ -172,35 +173,46 @@ export function isAssignedToMe(assignee: string | undefined, myWebId: string): b
 
 /**
  * OWNER-WRITE-ONLY predicate (pure). Given a resource's EFFECTIVE access entries
- * (as built by {@link WacResourceSharingBackend.read}), decide whether the
- * resource is writable by ONLY the named pod owner — i.e. NOT world- or
- * group-appendable, so a third party could not have planted the bytes.
+ * (as built by {@link WacResourceSharingBackend.read}) and the WebID of the
+ * EXPECTED owner of that storage (the user for an own-pod resource; the friend/
+ * contact source for a foreign one), decide whether the resource is writable by
+ * ONLY that exact owner — so a third party could not have planted the bytes.
  *
- * The spoofable surface is a BROAD write/append grant — anything that lets
- * someone OTHER than the pod owner add or change the bytes:
+ * The spoofable surface is ANY write/append grant to someone OTHER than the
+ * expected owner. That includes the obvious BROAD subjects —
  *   - `public` (`acl:agentClass foaf:Agent`) — anyone on the web,
  *   - `authenticated` (`acl:AuthenticatedAgent`) — any logged-in agent,
  *   - `group` (`acl:agentGroup`) — a (possibly attacker-controlled) group,
- *   - `class` — any other unmodelled `acl:agentClass`.
- * If ANY effective entry grants `write` OR `append` to one of those broad
- * subjects, the resource is NOT owner-write-only (a stranger could have posted
- * the task) and the claim there is untrusted. Named-agent (`agent`) and
- * read-only/control grants don't make a container world-appendable, so they do
- * not, by themselves, defeat owner-write-only.
+ *   - `class` — any other unmodelled `acl:agentClass`,
+ *   - `origin` — a browser-app origin
+ * — but it ALSO includes a NAMED AGENT who is not the owner: if the source's
+ * container grants `acl:agent <mallory>` write/append, Mallory can plant a
+ * `wf:Task` there with `wf:assignee = <you>` and spoof an assignment from the
+ * source. So a write/append grant is tolerated ONLY when its subject is exactly
+ * the expected owner agent (`{ kind: "agent", id: ownerWebId }`).
  *
- * Conservative + fail-closed: the caller passes `undefined` when the access
- * could not be determined, which this treats as NOT owner-write-only.
+ * If ANY effective entry grants `write` OR `append` to a subject that is not
+ * EXACTLY the expected owner agent, the resource is NOT owner-write-only (a
+ * non-owner could have posted the task) and the claim there is untrusted.
+ * Read-only grants to anyone, and any-mode grants (including control) to the
+ * owner, are fine — they don't let a non-owner write the bytes.
+ *
+ * Conservative + fail-closed: the caller passes `undefined` for `entries` when
+ * the access could not be determined, which this treats as NOT owner-write-only;
+ * an empty/absent `ownerWebId` likewise yields `false` (no owner can be trusted
+ * if we don't know who the owner is).
  */
-export function isOwnerWriteOnly(entries: readonly AccessEntry[] | undefined): boolean {
+export function isOwnerWriteOnly(
+  entries: readonly AccessEntry[] | undefined,
+  ownerWebId: string,
+): boolean {
   if (!entries) return false; // access undetermined — fail closed.
+  if (!ownerWebId.trim()) return false; // no known owner — fail closed.
   for (const e of entries) {
-    const broad =
-      e.subject.kind === "public" ||
-      e.subject.kind === "authenticated" ||
-      e.subject.kind === "group" ||
-      e.subject.kind === "class";
-    if (!broad) continue;
-    if (e.modes.includes("write") || e.modes.includes("append")) return false;
+    if (!e.modes.includes("write") && !e.modes.includes("append")) continue;
+    // A write/append grant is only OK if it is EXACTLY the expected owner agent.
+    const isOwnerAgent = e.subject.kind === "agent" && e.subject.id === ownerWebId;
+    if (!isOwnerAgent) return false;
   }
   return true;
 }
@@ -347,31 +359,52 @@ function taskLocations(locations: RegisteredLocation[]): RegisteredLocation[] {
 
 /**
  * Resolve whether `url` is OWNER-WRITE-ONLY — i.e. its effective WAC access does
- * NOT grant write/append to any broad subject (public / authenticated / group /
- * other agentClass). Reads the resource's effective access through the same
- * vetted WAC backend the Sharing panel uses (typed accessors, never hand-parsed
- * triples) and applies the pure {@link isOwnerWriteOnly} predicate.
+ * NOT grant write/append to anyone OTHER than `expectedOwnerWebId` (the agent who
+ * is supposed to own this storage). Reads the resource's effective access through
+ * the same vetted WAC backend the Sharing panel uses (typed accessors, never
+ * hand-parsed triples) and applies the pure {@link isOwnerWriteOnly} predicate
+ * against that expected owner.
  *
  * FAIL CLOSED: any failure to determine the access (ACL discovery/read error,
- * an ACP `.acr` document we don't model, a parse error, an empty/absent ACL,
- * etc.) returns `false` — the task is then dropped by {@link verifyAssignedTask}.
- * An empty effective-access set is also treated as not-determinable rather than
- * "no broad grants" so a server returning no rules can't be read as permissive.
+ * a parse error, an empty/absent ACL, etc.) returns `false` — the task is then
+ * dropped by {@link verifyAssignedTask}. An empty effective-access set is also
+ * treated as not-determinable rather than "no broad grants" so a server
+ * returning no rules can't be read as permissive.
  *
- * @param ownerWebId - the WebID the backend protects (the logged-in user). The
- *   backend only reads access; the owner identity is for its self-lockout guard
- *   and is irrelevant to a read, but it must be a non-empty WebID.
+ * ACP (NON-SILENT, pss provenance gate): the WAC backend cannot evaluate an ACP
+ * `.acr` policy and throws {@link AcpUnsupportedError}. Until full ACP effective-
+ * access evaluation lands in the gate (tracked follow-up: "Federation provenance
+ * gate — evaluate ACP (.acr) effective access so ACP-backed pods aren't dropped"),
+ * we still fail closed (drop the task) but make the drop NON-SILENT: a distinct
+ * `console.warn` says the task was skipped because its pod uses ACP, rather than
+ * the generic unreadable-source debug — so an operator can see ACP-backed pods
+ * are not yet covered, instead of valid tasks vanishing silently.
+ *
+ * @param backendWebId - the WebID the backend constructor requires (the logged-in
+ *   user). The backend only reads access here, so this identity is used purely to
+ *   satisfy its non-empty-WebID guard; the trust decision uses
+ *   `expectedOwnerWebId`, not this.
+ * @param expectedOwnerWebId - the ONLY agent allowed to hold write/append on the
+ *   resource: the user for an own-pod resource, or the friend/contact source for a
+ *   foreign one. A write/append grant to any other subject fails the predicate.
  * @param fetchImpl  - test-only override; **omit in production**.
  */
 async function resolveOwnerWriteOnly(
   url: string,
-  ownerWebId: string,
+  backendWebId: string,
+  expectedOwnerWebId: string,
   fetchImpl?: typeof fetch,
 ): Promise<boolean> {
   let access: ResourceAccess;
   try {
-    access = await new WacResourceSharingBackend(ownerWebId, fetchImpl).read(url);
+    access = await new WacResourceSharingBackend(backendWebId, fetchImpl).read(url);
   } catch (e) {
+    if (e instanceof AcpUnsupportedError) {
+      // NON-SILENT ACP drop: surface that an ACP-backed pod is not yet evaluated
+      // (distinct from a generic unreadable source) rather than dropping silently.
+      logAcpSkipped(url);
+      return false;
+    }
     logSkippedSource(url, e); // access undeterminable — fail closed (not owner-write-only).
     return false;
   }
@@ -379,7 +412,7 @@ async function resolveOwnerWriteOnly(
   // server that returns an empty/absent ACL must not be read as "no broad
   // grants" and thereby trusted.
   if (access.entries.length === 0) return false;
-  return isOwnerWriteOnly(access.entries);
+  return isOwnerWriteOnly(access.entries, expectedOwnerWebId);
 }
 
 /**
@@ -563,9 +596,15 @@ async function readSourceTasks(opts: {
       // per resource) before the pure provenance check. Done per task and
       // isolated under allSettled so one resource's unreadable ACL never poisons
       // a sibling; resolveOwnerWriteOnly already fails closed on any error.
+      //
+      // The EXPECTED OWNER of these bytes is `source`: for an own-pod read that is
+      // the user (`myWebId`); for a foreign source it is that friend/contact's
+      // WebID. Only that exact agent may hold write/append — a write grant to any
+      // OTHER named agent (e.g. `acl:agent <mallory>`) means a non-owner could
+      // have planted the task, so it is rejected even under the source's storage.
       await Promise.allSettled(
         found.map(async ({ url, task }) => {
-          const ownerWriteOnly = await resolveOwnerWriteOnly(url, myWebId, fetchImpl);
+          const ownerWriteOnly = await resolveOwnerWriteOnly(url, myWebId, source, fetchImpl);
           collect(
             verifyAssignedTask({
               url,
@@ -614,5 +653,23 @@ export function openAssignedCount(tasks: readonly AssignedTask[]): number {
 function logSkippedSource(source: string, err: unknown): void {
   if (typeof console !== "undefined" && typeof console.debug === "function") {
     console.debug("[federation-tasks] skipped unreadable source", source, err);
+  }
+}
+
+/**
+ * Log (at `console.warn`) that a task was skipped because its pod uses ACP
+ * (`.acr`) access control, which the provenance gate cannot yet evaluate. Unlike
+ * {@link logSkippedSource} (a debug-level note for a genuinely-broken source),
+ * this is NON-SILENT and visible at warn level: a VALID task from an ACP-backed
+ * pod is being dropped only because ACP effective-access evaluation isn't wired
+ * into the gate yet (tracked follow-up). Surfacing it stops ACP-pod tasks from
+ * vanishing without any trace.
+ */
+function logAcpSkipped(url: string): void {
+  if (typeof console !== "undefined" && typeof console.warn === "function") {
+    console.warn(
+      "[federation-tasks] ACP access not yet evaluated — task skipped (ACP-backed pod, provenance gate cannot verify owner-write-only):",
+      url,
+    );
   }
 }

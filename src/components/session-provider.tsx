@@ -44,6 +44,11 @@ import {
   type SessionStore,
 } from "@/lib/session-persistence";
 import { decideSilentRestore } from "@/lib/session-restore";
+import {
+  loadProfileState,
+  type ProfileLoadResult,
+  type ProfileStatus,
+} from "@/lib/session-profile";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 import { readCache } from "@/lib/swr-cache";
 
@@ -65,6 +70,30 @@ export interface Session {
   profile?: PodProfile;
   /** The storage the user is browsing (chosen when several exist). */
   activeStorage?: string;
+  /**
+   * The state of the (cosmetic) profile/storage load that sits BEHIND a
+   * `logged-in` session. A profile failure never drops `status` below
+   * `logged-in` — the session is real regardless — but it is NOT swallowed: the
+   * shell renders a degraded, retryable banner on `"error"` instead of leaving
+   * storage/profile-dependent surfaces rendering against `undefined` with no
+   * recourse.
+   *
+   *   • "loading" — the profile/storage load is in flight (after restore/login).
+   *   • "ready"   — `profile` is set; `activeStorage` is the chosen storage.
+   *   • "error"   — the load failed; `profile`/`activeStorage` stay undefined,
+   *      {@link profileError} is set, and {@link retryProfile} re-attempts it.
+   *
+   * Outside a `logged-in` session this is `"loading"` (nothing to load yet).
+   */
+  profileStatus: ProfileStatus;
+  /** Why the profile load failed (only when `profileStatus === "error"`). */
+  profileError?: Error;
+  /**
+   * Re-attempt the profile/storage load for the current WebID after a
+   * `profileStatus === "error"`. No-op when there is no logged-in WebID. The
+   * session stays `logged-in` throughout (retry never bounces to login).
+   */
+  retryProfile(): void;
   recentAccounts: RecentAccount[];
   /**
    * Begin login for a WebID OR a bare issuer URL (one smart input). Call
@@ -131,6 +160,21 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [webId, setWebId] = useState<string>();
   const [profile, setProfile] = useState<PodProfile>();
   const [activeStorage, setActive] = useState<string>();
+  // The explicit profile-load lifecycle behind a logged-in session. A profile
+  // failure surfaces here as "error" (with profileError) rather than being
+  // swallowed into a silent undefined-profile state; the session stays
+  // logged-in regardless (see Session.profileStatus).
+  const [profileStatus, setProfileStatus] = useState<ProfileStatus>("loading");
+  const [profileError, setProfileError] = useState<Error | undefined>(undefined);
+  // The WebID whose profile retryProfile() should re-load — mirrors `webId` in a
+  // ref so the stable retry callback never goes stale.
+  const profileWebIdRef = useRef<string>(undefined);
+  // Monotonic generation guard: a profile load only commits its result if it is
+  // still the latest (guards an account switch / retry racing a slow load, and
+  // is bumped on logout to drop any in-flight load).
+  const profileLoadGenRef = useRef(0);
+  // Bumped to re-trigger the profile-load effect (restore-path load + retry).
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [recentAccounts, setRecentAccounts] = useState<RecentAccount[]>([]);
   const [blockedPopup, setBlockedPopup] = useState<BlockedPopup | null>(null);
 
@@ -254,23 +298,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
       if (decision.outcome === "restored") {
         // Live session rebuilt with no popup. Pin the issuer for logout + the
-        // 401-upgrade WebID resolver, mark logged-in immediately, THEN load the
-        // (cosmetic) profile — which is allowed to degrade without bouncing to
-        // login (the session is real regardless of a transient profile blip).
+        // 401-upgrade WebID resolver, mark logged-in immediately — the session
+        // is real regardless of the profile read. The (cosmetic) profile/storage
+        // load then runs in the shared profile effect below: it resolves to
+        // "ready" or, on a transient blip, "error" (with a retry) — NEVER
+        // bouncing to login (that was the reopen-routes-through-login bug) and
+        // NEVER swallowed into a silent undefined-profile state.
         activeIssuerRef.current = decision.issuer;
         pendingWebIdRef.current = decision.webId;
+        profileWebIdRef.current = decision.webId;
+        setProfileStatus("loading");
+        setProfileError(undefined);
         setWebId(decision.webId);
         setStatus("logged-in");
-        try {
-          const p = await fetchProfile(decision.webId);
-          if (!cancelled) {
-            setProfile(p);
-            setActive(p.storages[0]);
-          }
-        } catch {
-          // The session stands; the profile can fill in on a later read. Do NOT
-          // drop to logged-out — that is the reopen-routes-through-login bug.
-        }
+        // Trigger the shared profile-load effect (restore path). The effect
+        // reads profileWebIdRef and runs loadProfileFor once logged-in.
+        setProfileReloadKey((k) => k + 1);
       } else {
         setStatus("logged-out");
       }
@@ -286,6 +329,67 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       void providerReadyRef.current?.then((p) => p?.teardown()).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // The SHARED profile/storage load behind a logged-in session. Every path that
+  // lands logged-in (restore + interactive login) and every retry funnels
+  // through here, so the explicit profileStatus lifecycle is identical
+  // everywhere. Reports an EXPLICIT terminal state via loadProfileState (which
+  // never throws): "ready" (profile + activeStorage set) or "error"
+  // (profile/activeStorage stay undefined, profileError set, retry offered). The
+  // session stays logged-in throughout — a profile blip never drops to login,
+  // and is never swallowed into a silent undefined-profile state.
+  //
+  // `profileLoadGenRef` guards against a stale load clobbering a newer one (an
+  // account switch, or a retry that races a slow in-flight load): each call
+  // claims the next generation and only commits if it is still the latest.
+  // Returns the terminal result so a caller (the login path) can act on it (e.g.
+  // record the recent account) without re-loading.
+  const loadProfileFor = useCallback(async (id: string): Promise<ProfileLoadResult> => {
+    const gen = ++profileLoadGenRef.current;
+    profileWebIdRef.current = id;
+    setProfileStatus("loading");
+    setProfileError(undefined);
+    const result = await loadProfileState(id, fetchProfile);
+    // A newer load (or a logout) superseded this one: drop the stale result.
+    if (gen !== profileLoadGenRef.current) return result;
+    if (result.status === "ready") {
+      setProfile(result.profile);
+      setActive(result.activeStorage);
+      setProfileError(undefined);
+      setProfileStatus("ready");
+    } else {
+      // The session stands; expose the error + a retry. Do NOT drop to
+      // logged-out (the reopen-routes-through-login bug) and do NOT leave
+      // profile/activeStorage silently undefined with no recourse.
+      setProfile(undefined);
+      setActive(undefined);
+      setProfileError(result.error);
+      setProfileStatus("error");
+    }
+    return result;
+  }, []);
+
+  // Drive the restore path's profile load: when a silent restore lands
+  // logged-in it sets the WebID + profileStatus:"loading" and bumps
+  // profileReloadKey; this effect then runs the shared loader. (The interactive
+  // login path calls loadProfileFor inline — it needs the result to record the
+  // recent account — so this effect is for restore + retry.)
+  useEffect(() => {
+    if (status !== "logged-in" || profileReloadKey === 0) return;
+    const id = profileWebIdRef.current;
+    if (!id) return;
+    void loadProfileFor(id);
+  }, [status, profileReloadKey, loadProfileFor]);
+
+  /**
+   * Re-attempt the profile/storage load after a `profileStatus === "error"`
+   * (or trigger the restore-path load). Bumps profileReloadKey so the effect
+   * above re-runs the shared loader. No-op without a logged-in WebID.
+   */
+  const retryProfile = useCallback(() => {
+    if (!profileWebIdRef.current) return;
+    setProfileReloadKey((k) => k + 1);
   }, []);
 
   /**
@@ -323,19 +427,31 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           if (prev && prev !== id) readCache.clearWebId(prev);
           return id;
         });
-        const p = await fetchProfile(id);
-        setProfile(p);
-        setActive(p.storages[0]);
+        // The token grant succeeded → the session is real; mark logged-in. The
+        // (cosmetic) profile/storage load runs through the SHARED loader, so the
+        // explicit profileStatus lifecycle is identical to the restore path: a
+        // profile blip after a successful login does NOT bounce back to
+        // logged-out — it surfaces as profileStatus:"error" with a retry, never
+        // a silent undefined-profile state.
         setStatus("logged-in");
+        const result = await loadProfileFor(id);
 
+        // Record the recent account from the load result. On "ready" we have the
+        // display name/avatar/storage; on "error" we still remember the account
+        // (WebID + issuer) so its chip works — the display name falls back to the
+        // WebID (the same fallback the profile uses) and fills in on a retry.
         const accounts = new RecentAccounts();
-        accounts.remember({
-          webId: id,
-          displayName: p.displayName,
-          avatarUrl: p.avatarUrl,
-          issuer,
-          storage: p.storages[0],
-        });
+        if (result.status === "ready") {
+          accounts.remember({
+            webId: id,
+            displayName: result.profile.displayName,
+            avatarUrl: result.profile.avatarUrl,
+            issuer,
+            storage: result.activeStorage,
+          });
+        } else {
+          accounts.remember({ webId: id, displayName: id, issuer });
+        }
         setRecentAccounts(accounts.list());
         if (typeof localStorage !== "undefined") {
           localStorage.setItem(ACTIVE_WEBID_KEY, id);
@@ -347,7 +463,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         throw e;
       }
     },
-    [getController],
+    [getController, loadProfileFor],
   );
 
   const login = useCallback(
@@ -417,6 +533,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setActive(undefined);
     setStatus("logged-out");
     pendingWebIdRef.current = undefined;
+    // Invalidate any in-flight profile load (its result must not land after
+    // logout) and reset the explicit profile lifecycle for the next session.
+    profileLoadGenRef.current++;
+    profileWebIdRef.current = undefined;
+    setProfileStatus("loading");
+    setProfileError(undefined);
     if (typeof localStorage !== "undefined") {
       localStorage.removeItem(ACTIVE_WEBID_KEY);
     }
@@ -442,6 +564,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       webId,
       profile,
       activeStorage,
+      profileStatus,
+      profileError,
+      retryProfile,
       recentAccounts,
       login,
       loginWithIssuer,
@@ -454,6 +579,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       webId,
       profile,
       activeStorage,
+      profileStatus,
+      profileError,
+      retryProfile,
       recentAccounts,
       login,
       loginWithIssuer,

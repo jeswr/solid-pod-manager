@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { usePathname } from "next/navigation";
-import { Loader2, Menu } from "lucide-react";
+import { Loader2, Menu, TriangleAlert } from "lucide-react";
 import { useSession } from "@/components/session-provider";
 import { LoginScreen } from "@/components/login-screen";
 import { SidebarNav, BottomNav } from "@/components/sidebar-nav";
@@ -10,6 +10,7 @@ import { Brand } from "@/components/brand";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { AccountMenu } from "@/components/account-menu";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 /**
@@ -26,7 +27,7 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/s
 const PUBLIC_ROUTES = new Set(["/privacy", "/terms"]);
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { status } = useSession();
+  const { status, profileStatus, retryProfile } = useSession();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const pathname = usePathname();
 
@@ -34,12 +35,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return <>{children}</>;
   }
 
+  // While we silently restore a returning user's session (refresh-token grant,
+  // no popup), hold this brief loading state — never flash or route to the
+  // login screen. Login is shown ONLY once the restore decision lands as
+  // "logged-out" (no/expired/revoked token).
   if (status === "loading") {
     return (
       <div className="grid min-h-dvh place-items-center" role="status" aria-live="polite">
         <span className="flex items-center gap-2 text-muted-foreground">
           <Loader2 className="size-5 animate-spin" aria-hidden="true" />
-          Loading your pod…
+          Restoring your session…
         </span>
       </div>
     );
@@ -97,7 +102,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         {/* Page content. Bottom padding clears the mobile bottom bar. */}
         <main className="flex-1 px-4 pb-24 pt-6 md:px-8 md:pb-10">
-          <div className="mx-auto w-full max-w-6xl">{children}</div>
+          <div className="mx-auto w-full max-w-6xl">
+            {/* Logged in, but the profile/storage read failed: the session is
+                real, so we DON'T bounce to login — we degrade with a single,
+                non-blocking, retryable banner at the shell level. Feature pages
+                guard on `activeStorage`/`profile` being set (showing their idle
+                state), so this banner is the one place that explains why and
+                offers a retry, instead of each page handling undefined storage. */}
+            {profileStatus === "error" && (
+              <Alert variant="destructive" className="mb-6">
+                <TriangleAlert className="size-4" aria-hidden="true" />
+                <AlertTitle>Couldn&apos;t load your profile</AlertTitle>
+                <AlertDescription className="flex flex-col items-start gap-3">
+                  <span>
+                    You&apos;re signed in, but we couldn&apos;t read your profile and
+                    storage from your pod. Your data is safe — this is usually a
+                    temporary connection issue.
+                  </span>
+                  <Button size="sm" variant="outline" onClick={retryProfile}>
+                    Retry
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            )}
+            {children}
+          </div>
         </main>
       </div>
 

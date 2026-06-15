@@ -5,10 +5,11 @@
  * `useSwrRead` — the React bridge over {@link SwrCache} that gives the
  * expensive pod read models stale-while-revalidate behaviour:
  *
- *   - On (re-)mount, if a value is cached for this `(webId, key)`, it renders
- *     INSTANTLY (`loading:false`) — no blank spinner returning to Home — and a
- *     background revalidation runs (`revalidating:true`). First-ever load with
- *     no cache shows the spinner exactly as before (`loading:true`).
+ *   - On (re-)mount, if a value is cached for this `(webId, key)` — in memory OR
+ *     in the durable snapshot ({@link SwrCache.hydrate}, so a COLD OPEN / app
+ *     reopen counts) — it renders INSTANTLY (`loading:false`), no blank spinner,
+ *     and a background revalidation runs (`revalidating:true`). Only a
+ *     first-EVER load with no snapshot at all shows the spinner (`loading:true`).
  *   - The cache is shared across mounts and views, so two pages reading the
  *     same model share one fetch and one cached value.
  *   - It subscribes to the cache, so a `set`/`invalidate`/clear from anywhere
@@ -71,7 +72,10 @@ export function useSwrRead<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
-  const initial = webId ? cache.get<T>(webId, key) : undefined;
+  // Seed from the cache SYNCHRONOUSLY on first render: prefer the in-memory
+  // value, else pull the durable snapshot into memory (cold open / app reopen).
+  // This is what lets the first paint after a reload show data, not a spinner.
+  const initial = webId && key !== "" ? cache.hydrate<T>(webId, key) : undefined;
   const [data, setData] = useState<T | undefined>(initial);
   const [error, setError] = useState<Error | undefined>(undefined);
   // loading = nothing to show yet; revalidating = refreshing a shown value.
@@ -92,7 +96,9 @@ export function useSwrRead<T>(
     if (status !== "logged-in" || !webId || key === "") return;
     let cancelled = false;
 
-    const cached = cache.get<T>(webId, key);
+    // Hydrate (in-memory hit, else durable snapshot → memory) so a cold open
+    // takes the stale-while-revalidate path, not the cold spinner path.
+    const cached = cache.hydrate<T>(webId, key);
     if (cached !== undefined) {
       // Stale-while-revalidate: paint the cached value immediately.
       setData(cached);

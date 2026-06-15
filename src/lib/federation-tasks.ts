@@ -324,12 +324,16 @@ export async function discoverAssignedTasks(opts: {
   }
 
   // ── 2. Foreign authorized sources (friends + contacts). Each source is read
-  //    in FULL ISOLATION: a single source whose profile, type-index, or task
-  //    container is unreadable/broken (403/500/parse error) is skipped
-  //    fail-closed (logged, omitted) — it must not reject the aggregate and hide
-  //    the user's own tasks or the OTHER readable sources. `allSettled` ensures
-  //    a rejection from one source never propagates; the inner try/catch is the
-  //    primary guard and the one that logs.
+  //    in FULL ISOLATION at THREE levels: (a) a source whose profile or
+  //    type-index is unreadable/broken (403/500/parse error) is skipped
+  //    fail-closed by the per-source guard below; (b) within a source, one broken
+  //    registered LOCATION is skipped without dropping the source's OTHER valid
+  //    locations; (c) within a location, one broken FIELD (container vs instance)
+  //    is skipped without dropping the valid sibling — both (b) and (c) handled
+  //    inside `readSourceTasks`. A broken source/location/field must never reject
+  //    the aggregate and hide the user's own tasks or the OTHER readable sources.
+  //    `allSettled` ensures a rejection from one source never propagates; the
+  //    inner try/catch is the primary guard and the one that logs.
   await Promise.allSettled(
     authorized.others.map(async (sourceWebId) => {
       try {
@@ -366,11 +370,19 @@ export async function discoverAssignedTasks(opts: {
 }
 
 /**
- * Read + verify the tasks for ONE source's registered locations. A location's
- * `container` and `instance` are each verified INDEPENDENTLY against the source's
- * own verified storage before any authenticated read (defence in depth): an
- * off-storage value in one field skips only that field, never the valid sibling.
- * Found tasks are verified via {@link verifyAssignedTask} and handed to `collect`.
+ * Read + verify the tasks for ONE source's registered locations. Every read is
+ * isolated TWICE over: each registered LOCATION is read independently, and within
+ * a location its `container` and `instance` fields are each read independently.
+ * A single broken location (e.g. a 500 from one container) or a single broken
+ * field must skip ONLY that location/field — never the source's OTHER valid
+ * locations, and never the valid sibling field within the same location.
+ *
+ * Each location is verified against the source's own verified storage before any
+ * authenticated read (defence in depth): an off-storage value is skipped. The
+ * reads run under `Promise.allSettled` so every location settles before we
+ * return — a rejection from one read can never abort a sibling that is still in
+ * flight, nor propagate out to drop the whole source. Found tasks are verified
+ * via {@link verifyAssignedTask} and handed to `collect`.
  */
 async function readSourceTasks(opts: {
   locations: RegisteredLocation[];
@@ -390,15 +402,24 @@ async function readSourceTasks(opts: {
   // `authorized`, so this single guard covers both.)
   const allowedRoots = source === myWebId ? ownStorages : sourceStorages;
 
-  await Promise.all(
+  // allSettled (not all): one location/field rejecting must NOT reject the
+  // aggregate (which the outer per-source catch would then turn into dropping the
+  // ENTIRE source, hiding its other healthy locations) — and it must not leave a
+  // sibling read orphaned mid-flight. Every per-location promise resolves; its
+  // own try/catch is the primary guard that logs + skips just the failing part.
+  await Promise.allSettled(
     locations.map(async (loc) => {
       const found: { url: string; task: Issue }[] = [];
-      // `container` and `instance` are verified INDEPENDENTLY: an off-storage
-      // value in one field must skip ONLY that field, never drop a valid sibling
-      // (nor the tasks already read from a valid container). A single location
-      // can legitimately carry both.
+      // `container` and `instance` are verified AND read INDEPENDENTLY: an
+      // off-storage value OR a broken read in one field must skip ONLY that field,
+      // never drop a valid sibling (nor the tasks already read from a valid
+      // container). A single location can legitimately carry both.
       if (loc.container && isInOwnPods(loc.container, allowedRoots)) {
-        found.push(...(await readAssignedFromContainer(loc.container, myWebId, fetchImpl)));
+        try {
+          found.push(...(await readAssignedFromContainer(loc.container, myWebId, fetchImpl)));
+        } catch (e) {
+          logSkippedSource(loc.container, e); // broken container — skip this field only.
+        }
       }
       if (loc.instance && isInOwnPods(loc.instance, allowedRoots)) {
         try {
@@ -407,8 +428,8 @@ async function readSourceTasks(opts: {
           if (task && isAssignedToMe(task.assignee, myWebId)) {
             found.push({ url: loc.instance, task });
           }
-        } catch {
-          // skip unreadable instance.
+        } catch (e) {
+          logSkippedSource(loc.instance, e); // unreadable instance — skip this field only.
         }
       }
       for (const { url, task } of found) {

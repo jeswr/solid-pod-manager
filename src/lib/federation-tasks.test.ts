@@ -84,6 +84,28 @@ function indexTtlBoth(opts: { self: string; issuesContainer: string; instance: s
       solid:instance <${opts.instance}> .`;
 }
 
+/**
+ * A type-index with TWO distinct wf:Task registrations (two separate
+ * `TypeRegistration` subjects, each its own `instanceContainer`) — used to verify
+ * one broken registered LOCATION does not drop the source's other valid one.
+ */
+function indexTtlTwoContainers(opts: {
+  self: string;
+  containerA: string;
+  containerB: string;
+}): string {
+  return `
+    @prefix solid: <http://www.w3.org/ns/solid/terms#> .
+    @prefix wf: <${WF}> .
+    <${opts.self}> a solid:TypeIndex, solid:UnlistedDocument .
+    <${opts.self}#reg-tasks-a> a solid:TypeRegistration ;
+      solid:forClass wf:Task ;
+      solid:instanceContainer <${opts.containerA}> .
+    <${opts.self}#reg-tasks-b> a solid:TypeRegistration ;
+      solid:forClass wf:Task ;
+      solid:instanceContainer <${opts.containerB}> .`;
+}
+
 /** A container listing (Turtle) advertising member resources. */
 function containerTtl(container: string, members: string[]): string {
   const contains = members.length > 0 ? `; ldp:contains ${members.map((m) => `<${m}>`).join(", ")}` : "";
@@ -545,6 +567,60 @@ describe("discoverAssignedTasks", () => {
       fetchImpl,
     });
     expect(tasks.map((t) => t.url)).toEqual([`${ALICE_ISSUES}own.ttl`]);
+  });
+
+  it("isolates a broken registered LOCATION: a 500 container does not drop the source's OTHER healthy container (per-location isolation)", async () => {
+    // ONE source (Bob, a friend) registers TWO wf:Task containers: containerA
+    // 500s on listing, containerB is healthy with a task for Alice. The MEDIUM
+    // finding: the prior fix isolated PER-SOURCE but not PER-LOCATION — a single
+    // bad container under Promise.all rejected the whole source read and the
+    // per-source catch then skipped ALL of Bob's locations, hiding the valid
+    // task in his healthy container. With per-location isolation the broken
+    // container is skipped and the healthy one's task still surfaces.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const BOB_BROKEN = `${BOB_POD}broken/`;
+    const BOB_HEALTHY = `${BOB_POD}healthy/`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+        return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+      }
+      if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, [])); // Alice has no own tasks
+      if (url === BOB_DOC) {
+        return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+      }
+      if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+        // BOTH containers are within Bob's own storage (provenance OK); one is broken.
+        return ttl(indexTtlTwoContainers({
+          self: "https://bob.example/settings/privateTypeIndex.ttl",
+          containerA: BOB_BROKEN,
+          containerB: BOB_HEALTHY,
+        }));
+      }
+      // Broken container: 500 on listing → readAssignedFromContainer re-throws.
+      if (url === BOB_BROKEN) return new Response("server error", { status: 500 });
+      // Healthy container: a task assigned to Alice, in Bob's verified storage.
+      if (url === BOB_HEALTHY) return ttl(containerTtl(BOB_HEALTHY, [`${BOB_HEALTHY}forA.ttl`]));
+      if (url === `${BOB_HEALTHY}forA.ttl`) return ttl(taskTtl(`${BOB_HEALTHY}forA.ttl`, { title: "Healthy from Bob", assignee: ALICE }));
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [],
+      fetchImpl,
+    });
+    // The broken location is skipped; the healthy location's task still appears.
+    expect(tasks.map((t) => t.url)).toEqual([`${BOB_HEALTHY}forA.ttl`]);
+    expect(tasks[0].source).toBe(BOB);
+    expect(tasks[0].own).toBe(false);
+    // The broken container WAS attempted (it is in-storage, so it is read) but did
+    // not poison the sibling.
+    const fetched = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(fetched).toContain(BOB_BROKEN);
+    expect(fetched).toContain(BOB_HEALTHY);
   });
 
   it("survives a broken OWN type-index without sinking readable friend tasks", async () => {

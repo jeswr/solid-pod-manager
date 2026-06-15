@@ -245,9 +245,15 @@ export type AssignReason =
   /** The task payload was malformed (e.g. an empty title). */
   | "invalid-task"
   /**
-   * The minimal WAC read-grant for the assignee could not be set — the task was
-   * written but the assignee would be unable to read it. FATAL (distinct from a
-   * best-effort notification failure, which is non-fatal).
+   * The minimal read-grant for the assignee could not be set, so the assignee
+   * would be unable to read the task. FATAL (distinct from a best-effort
+   * notification failure, which is non-fatal). Two sub-cases, both leaving
+   * NOTHING orphaned in the pod:
+   *   - the pod uses ACP, which assignment doesn't support yet → caught BEFORE
+   *     any write (no task created); or
+   *   - a WAC grant attempt failed AFTER the write (403/network/race) → the
+   *     just-created task is rolled back (deleted) before this is surfaced.
+   * Either way a UI retry starts clean and can't stack duplicate assignments.
    */
   | "grant-failed";
 
@@ -273,5 +279,5 @@ const MESSAGE_FOR_ASSIGN: Record<AssignReason, string> = {
   "invalid-assignee": "The person you're assigning to must have a WebID (an https:// URL).",
   "invalid-task": "This task can't be assigned — please give it a title.",
   "grant-failed":
-    "The task was created but couldn't be shared with the assignee. Please try again.",
+    "The task couldn't be shared with the assignee, so the assignment was cancelled. Please try again.",
 };

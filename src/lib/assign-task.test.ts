@@ -77,10 +77,21 @@ const ASSIGNEE_PROFILE_TTL = `
  *   - the task resource: create-only PUT, then GET (acl discovery) + acl reads/PUT
  *   - the assignee inbox: profile GET (discovery) + POST (Announce)
  *
- * `opts` lets a test simulate a delivery failure (no inbox / non-2xx POST).
+ * `opts` lets a test simulate a delivery failure (no inbox / non-2xx POST), a
+ * WAC-grant failure (the task's `.acl` PUT 403s), or an ACP-backed pod (the
+ * containers advertise an `.acr` control slot instead of `.acl`).
  */
-function mockFetch(opts: { inbox?: "ok" | "no-inbox" | "post-fails" } = {}) {
+function mockFetch(
+  opts: {
+    inbox?: "ok" | "no-inbox" | "post-fails";
+    /** When set, the task's `.acl` PUT (the grant write) fails with this status. */
+    grant?: "fails-403";
+    /** When "acp", the containers advertise an `.acr` slot → ACP-backed pod. */
+    accessControl?: "wac" | "acp";
+  } = {},
+) {
   const inboxMode = opts.inbox ?? "ok";
+  const acp = opts.accessControl === "acp";
   const captured: Captured[] = [];
 
   const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -117,13 +128,18 @@ function mockFetch(opts: { inbox?: "ok" | "no-inbox" | "post-fails" } = {}) {
         // create-only task PUT (the body we assert on)
         return new Response(null, { status: 201, headers: { etag: '"task-v1"' } });
       }
+      if (method === "DELETE") {
+        // Rollback delete of the just-created task.
+        return new Response(null, { status: 205 });
+      }
       if (method === "GET") {
-        // ACL discovery: advertise the resource's own .acl slot via Link header.
+        // ACL discovery: advertise the resource's own .acl/.acr slot via Link.
+        const slot = acp ? `${url}.acr` : `${url}.acl`;
         return new Response("", {
           status: 200,
           headers: {
             "content-type": "text/turtle",
-            link: `<${url}.acl>; rel="acl"`,
+            link: `<${slot}>; rel="acl"`,
             etag: '"task-v1"',
           },
         });
@@ -137,17 +153,20 @@ function mockFetch(opts: { inbox?: "ok" | "no-inbox" | "post-fails" } = {}) {
         return new Response("nf", { status: 404 });
       }
       if (method === "PUT") {
+        if (opts.grant === "fails-403") return new Response("forbidden", { status: 403 });
         return new Response(null, { status: 201, headers: { etag: '"acl-v1"' } });
       }
     }
 
-    // ── Ancestor containers (inherited-ACL walk): the issues/ + pod root with an
-    //    inheritable owner default so the writer finds the inherited rules. ──
+    // ── Ancestor containers (inherited-ACL walk + the pre-write access-control
+    //    detection): the issues/ + pod root advertise either a WAC `.acl` slot
+    //    or, when `accessControl: "acp"`, an ACP `.acr` control slot. ──
     if (url === `${POD}issues/` || url === POD) {
       if (method === "GET") {
+        const slot = acp ? `${url}.acr` : `${url}.acl`;
         return new Response("", {
           status: 200,
-          headers: { "content-type": "text/turtle", link: `<${url}.acl>; rel="acl"`, etag: '"c"' },
+          headers: { "content-type": "text/turtle", link: `<${slot}>; rel="acl"`, etag: '"c"' },
         });
       }
     }
@@ -172,6 +191,13 @@ function taskPut(captured: Captured[]): Captured | undefined {
 /** The PUT that writes the task's .acl document. */
 function aclPut(captured: Captured[]): Captured | undefined {
   return captured.find((c) => c.method === "PUT" && c.url.endsWith(".acl"));
+}
+
+/** The DELETE that rolls back a just-created task resource. */
+function taskDelete(captured: Captured[]): Captured | undefined {
+  return captured.find(
+    (c) => c.method === "DELETE" && c.url.startsWith(`${POD}issues/`) && c.url.endsWith(".ttl"),
+  );
 }
 
 describe("assignTask — validates the assignee WebID (fail closed)", () => {
@@ -330,5 +356,122 @@ describe("assignTask — best-effort as:Announce (notify never fails the assignm
     );
     expect(res.granted).toBe(true);
     expect(res.notified).toBe(false);
+  });
+});
+
+describe("assignTask — rolls back the task on grant failure (no orphan, no duplicates)", () => {
+  it("DELETEs the just-created task and throws grant-failed when the WAC grant fails", async () => {
+    const { impl, captured } = mockFetch({ grant: "fails-403" });
+    await expect(
+      assignTask(
+        { assignerWebId: ASSIGNER, podRoot: POD, assigneeWebId: ASSIGNEE, task: { title: "T" } },
+        impl,
+      ),
+    ).rejects.toMatchObject({ reason: "grant-failed" });
+
+    // The task WAS created (the grant comes after the write) …
+    const created = taskPut(captured);
+    expect(created).toBeDefined();
+    // … but it was ROLLED BACK — the same resource is deleted, so nothing
+    // unreadable is left behind for a retry to stack onto.
+    const deleted = taskDelete(captured);
+    expect(deleted).toBeDefined();
+    expect(deleted?.url).toBe(created?.url);
+  });
+
+  it("a retry after a grant failure does NOT duplicate the assignment", async () => {
+    // First attempt: grant fails → task rolled back.
+    const first = mockFetch({ grant: "fails-403" });
+    await expect(
+      assignTask(
+        { assignerWebId: ASSIGNER, podRoot: POD, assigneeWebId: ASSIGNEE, task: { title: "T" } },
+        first.impl,
+      ),
+    ).rejects.toMatchObject({ reason: "grant-failed" });
+    const firstUrl = taskPut(first.captured)?.url;
+    expect(taskDelete(first.captured)?.url).toBe(firstUrl); // rolled back
+
+    // Retry (grant now succeeds): exactly ONE task is created and it is not the
+    // orphan from the failed attempt — the failed one was deleted, so no
+    // duplicate unreadable assignment remains.
+    const retry = mockFetch();
+    const res = await assignTask(
+      { assignerWebId: ASSIGNER, podRoot: POD, assigneeWebId: ASSIGNEE, task: { title: "T" } },
+      retry.impl,
+    );
+    expect(res.granted).toBe(true);
+    const created = retry.captured.filter(
+      (c) =>
+        c.method === "PUT" &&
+        c.url.startsWith(`${POD}issues/`) &&
+        c.url.endsWith(".ttl") &&
+        c.headers["if-none-match"] === "*",
+    );
+    expect(created).toHaveLength(1); // one task, not stacked
+    expect(taskDelete(retry.captured)).toBeUndefined(); // nothing rolled back on success
+  });
+
+  it("still surfaces grant-failed even if the rollback delete itself fails", async () => {
+    // Grant fails AND the rollback DELETE 500s — we must still reject (never
+    // resolve as if the assignment worked), with the grant error as the cause.
+    const captured: Captured[] = [];
+    const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      captured.push({ url, method, headers: headerObj(init?.headers) });
+      if (url === ASSIGNER || url === ASSIGNER_DOC) return ttl(PROFILE_TTL);
+      if (url === INDEX) return ttl(INDEX_TTL);
+      if (url === `${POD}issues/` || url === POD) {
+        return new Response("", {
+          status: 200,
+          headers: { "content-type": "text/turtle", link: `<${url}.acl>; rel="acl"`, etag: '"c"' },
+        });
+      }
+      if (url.startsWith(`${POD}issues/`) && url.endsWith(".ttl")) {
+        if (method === "PUT") return new Response(null, { status: 201, headers: { etag: '"t"' } });
+        if (method === "DELETE") return new Response("boom", { status: 500 }); // rollback fails
+        if (method === "GET") {
+          return new Response("", {
+            status: 200,
+            headers: { "content-type": "text/turtle", link: `<${url}.acl>; rel="acl"`, etag: '"t"' },
+          });
+        }
+      }
+      if (url.endsWith(".acl")) {
+        if (method === "GET") return new Response("nf", { status: 404 });
+        if (method === "PUT") return new Response("forbidden", { status: 403 }); // grant fails
+      }
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      assignTask(
+        { assignerWebId: ASSIGNER, podRoot: POD, assigneeWebId: ASSIGNEE, task: { title: "T" } },
+        impl,
+      ),
+    ).rejects.toMatchObject({ reason: "grant-failed" });
+    // The rollback was attempted (a DELETE was issued) even though it failed.
+    expect(captured.some((c) => c.method === "DELETE")).toBe(true);
+  });
+});
+
+describe("assignTask — ACP pods: fail clean BEFORE any write (no orphan)", () => {
+  it("rejects grant-failed and writes NO task when the pod is ACP-backed", async () => {
+    const { impl, captured } = mockFetch({ accessControl: "acp" });
+    await expect(
+      assignTask(
+        { assignerWebId: ASSIGNER, podRoot: POD, assigneeWebId: ASSIGNEE, task: { title: "T" } },
+        impl,
+      ),
+    ).rejects.toMatchObject({ reason: "grant-failed" });
+
+    // The pod's ACP nature is detected on the container BEFORE the write, so the
+    // task is NEVER created (no orphan to clean up) …
+    expect(taskPut(captured)).toBeUndefined();
+    // … and consequently nothing is rolled back and no grant is attempted.
+    expect(taskDelete(captured)).toBeUndefined();
+    expect(aclPut(captured)).toBeUndefined();
+    // The container WAS probed (a GET to issues/ that returned the .acr slot).
+    expect(captured.some((c) => c.method === "GET" && c.url === `${POD}issues/`)).toBe(true);
   });
 });

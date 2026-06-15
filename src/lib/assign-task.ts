@@ -25,6 +25,21 @@
  *      grant write/control, never touch the container's `acl:default`, and never
  *      widen access to the rest of the pod. Default-deny everything else stands.
  *
+ *      The grant writer only speaks WAC. PM has no ACP (`.acr`) sharing backend
+ *      yet, so on an ACP-backed pod the grant cannot be set. To avoid leaving an
+ *      ORPHAN task the assignee can never be granted read on, we DETECT the pod's
+ *      access-control system (WAC vs ACP) on the target container BEFORE creating
+ *      the task and, for ACP, fail clean (`grant-failed`) WITHOUT writing it —
+ *      see {@link detectAccessControl}. Full ACP assignment support is tracked as
+ *      a follow-up (bead: "ACP-backed pods: cross-pod task assignment grant").
+ *
+ *      ATOMICITY. Even on a WAC pod the grant can still fail after the write
+ *      (403/network/race). A failed grant ROLLS BACK the just-created task
+ *      (best-effort delete) before surfacing `grant-failed`, so a UI retry never
+ *      stacks DUPLICATE unreadable assignments. Detect-before-write + rollback-
+ *      on-grant-failure together mean an assignment either fully succeeds or
+ *      leaves nothing behind.
+ *
  *   3. BEST-EFFORT as:Announce. We notify the assignee by POSTing an
  *      ActivityStreams 2.0 `Announce` (object = the task IRI, target = the
  *      assignee WebID) to the assignee's LDN inbox, discovered + STRICTLY
@@ -48,8 +63,9 @@
  * RDF/ACL house rule: the task is written via the typed `issues.ts` builder and
  * the grant via the typed `resource-acl.ts` writer — never hand-built triples.
  */
-import { issuesStore, type Issue } from "./issues.js";
+import { issuesStore, ISSUES_SLUG, type Issue } from "./issues.js";
 import { WacResourceSharingBackend, type AccessSubject } from "./resource-acl.js";
+import { aclUrlFromLinkHeader } from "./permissions.js";
 import { sendNotification } from "./notify-send.js";
 import { AssignError } from "./errors.js";
 
@@ -98,26 +114,76 @@ function isHttpWebId(value: string | undefined): boolean {
   }
 }
 
+/** The access-control system a pod advertises for a resource. */
+type AccessControlSystem = "wac" | "acp" | "unknown";
+
+/** True for a clearly-ACP control document (an `.acr` slot). */
+function isAcpControlUrl(aclUrl: string): boolean {
+  try {
+    return new URL(aclUrl).pathname.endsWith(".acr");
+  } catch {
+    return aclUrl.endsWith(".acr");
+  }
+}
+
+/**
+ * Detect whether `containerUrl` is governed by WAC or ACP, BEFORE we write the
+ * task into it — so an ACP pod (which PM's grant writer can't serve yet) fails
+ * clean without leaving an orphan task. We probe the container's
+ * `Link: rel="acl"` header (the same discovery the WAC backend uses) and classify
+ * the advertised control slot: a `.acr` target ⇒ ACP, any other ⇒ WAC. A probe
+ * that doesn't resolve (no Link header, unreachable container) is `unknown` —
+ * we DON'T fail on `unknown` (the WAC grant attempt + its own rollback handles a
+ * later surprise); we only fail-fast on a DEFINITE ACP signal here.
+ *
+ * Uses GET (the auth-patched fetch only replays the 401→DPoP upgrade for GET).
+ */
+async function detectAccessControl(
+  containerUrl: string,
+  fetchImpl?: typeof fetch,
+): Promise<AccessControlSystem> {
+  let res: Response;
+  try {
+    res = await (fetchImpl ?? fetch)(containerUrl, { method: "GET" });
+  } catch {
+    return "unknown";
+  }
+  await res.body?.cancel().catch(() => undefined);
+  if (!res.ok) return "unknown";
+  const aclUrl = aclUrlFromLinkHeader(res.headers.get("link"), containerUrl);
+  if (!aclUrl) return "unknown";
+  return isAcpControlUrl(aclUrl) ? "acp" : "wac";
+}
+
 /**
  * Assign a task to another agent, cross-pod and safely.
  *
- * Flow (steps 1+2 are load-bearing; step 3 is best-effort):
+ * Flow (steps 1–4 are load-bearing; step 5 is best-effort):
  *   1. Validate the assignee WebID (http(s) IRI) — fail closed otherwise.
- *   2. WRITE the `wf:Task` (with `wf:assignee`) into the ASSIGNER'S OWN pod via
+ *   2. DETECT the pod's access-control system on the target container. A
+ *      DEFINITELY-ACP pod fails clean ({@link AssignError} `grant-failed`) BEFORE
+ *      any write — PM has no ACP grant backend yet, so we never create an orphan.
+ *   3. WRITE the `wf:Task` (with `wf:assignee`) into the ASSIGNER'S OWN pod via
  *      the typed `issuesStore`.
- *   3. Grant the assignee MINIMAL `view` (WAC read) on JUST that task resource
- *      via `WacResourceSharingBackend`. If this fails, the assignment is rejected
- *      ({@link AssignError} `grant-failed`) — we don't leave an unreadable task.
- *   4. BEST-EFFORT: POST an as:Announce to the assignee's (discovered, SSRF-
+ *   4. Grant the assignee MINIMAL `view` (WAC read) on JUST that task resource
+ *      via `WacResourceSharingBackend`. If this fails, the just-created task is
+ *      ROLLED BACK (best-effort delete) and the assignment is rejected
+ *      ({@link AssignError} `grant-failed`) — we never leave an unreadable task,
+ *      and a retry can't duplicate it.
+ *   5. BEST-EFFORT: POST an as:Announce to the assignee's (discovered, SSRF-
  *      validated) inbox. A failure is swallowed → `notified: false`.
+ *
+ * Atomicity: detect-before-write (step 2) + rollback-on-grant-failure (step 4)
+ * mean an assignment either fully succeeds or leaves nothing in the pod.
  *
  * Production callers pass NO `fetchImpl` (the auth-patched global runs); tests
  * inject one (AGENTS.md §Reading data).
  *
  * @throws AssignError `invalid-assignee` — the assignee is not an http(s) WebID.
- * @throws AssignError `grant-failed`     — the minimal WAC grant could not be set
- *   (the task was written but the assignee can't read it; the caller surfaces a
- *   retry). Distinct from a delivery failure, which is non-fatal.
+ * @throws AssignError `grant-failed`     — either the pod is ACP-backed (caught
+ *   before any write, no task created) OR the minimal WAC grant could not be set
+ *   (the just-created task is rolled back, so nothing is left behind). The caller
+ *   surfaces a retry. Distinct from a delivery failure, which is non-fatal.
  */
 export async function assignTask(
   args: AssignTaskArgs,
@@ -136,10 +202,28 @@ export async function assignTask(
     throw new AssignError("invalid-task", "A task must have a title.");
   }
 
-  // 2. WRITE the task in the ASSIGNER'S OWN pod (typed issues builder). Living in
+  const store = issuesStore({ podRoot: args.podRoot, webId: args.assignerWebId, fetchImpl });
+
+  // 2. DETECT the pod's access-control system BEFORE writing. The grant writer
+  //    only speaks WAC; PM has no ACP (`.acr`) backend yet. On a DEFINITELY-ACP
+  //    pod we can never grant the assignee read, so we fail clean here — WITHOUT
+  //    writing the task — rather than create an orphan the assignee can't reach.
+  //    (`unknown` is permissive: we proceed and let the WAC grant + its rollback
+  //    handle any later surprise.) Probe the target container (issues/), the slot
+  //    the task will live under.
+  const issuesContainer = new URL(ISSUES_SLUG, args.podRoot).toString();
+  const acSystem = await detectAccessControl(issuesContainer, fetchImpl);
+  if (acSystem === "acp") {
+    throw new AssignError("grant-failed", issuesContainer, {
+      cause: new Error(
+        "This pod uses ACP access control, which task assignment doesn't support yet — no task was created.",
+      ),
+    });
+  }
+
+  // 3. WRITE the task in the ASSIGNER'S OWN pod (typed issues builder). Living in
   //    the assigner's verified storage is exactly what makes the read side trust
   //    the assignee claim (federation-tasks tier-2 provenance).
-  const store = issuesStore({ podRoot: args.podRoot, webId: args.assignerWebId, fetchImpl });
   const issue: Issue = {
     title: args.task.title.trim(),
     description: args.task.description?.trim() || undefined,
@@ -148,16 +232,20 @@ export async function assignTask(
   };
   const { url } = await store.create(issue, issue.title);
 
-  // 3. MINIMAL WAC grant: the assignee gets `view` (read) on JUST this task
+  // 4. MINIMAL WAC grant: the assignee gets `view` (read) on JUST this task
   //    resource — nothing broader (no write/control, no container default, no
-  //    pod-wide access). A grant failure rejects the assignment so we never
-  //    leave a task the assignee cannot read; the task resource is left in the
-  //    assigner's pod (they can delete/re-try) — we do not silently swallow it.
+  //    pod-wide access). A grant failure ROLLS BACK the just-created task (a
+  //    best-effort delete) and THEN rejects the assignment, so no unreadable
+  //    task is ever left behind and a UI retry can't stack duplicates. Rollback
+  //    is best-effort: if the delete itself fails we still surface `grant-failed`
+  //    (with the grant error as the cause), but we never silently swallow either.
   const subject: AccessSubject = { kind: "agent", id: assignee };
   const sharing = new WacResourceSharingBackend(args.assignerWebId, fetchImpl);
   try {
     await sharing.setAccess(url, subject, "view");
   } catch (cause) {
+    // Roll back the orphan so a retry reuses no stale, unreadable resource.
+    await store.remove(url).catch(() => undefined);
     throw new AssignError("grant-failed", url, { cause });
   }
 

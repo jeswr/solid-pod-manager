@@ -69,6 +69,21 @@ function indexTtl(opts: { self: string; issuesContainer: string }): string {
       solid:instanceContainer <${opts.issuesContainer}> .`;
 }
 
+/**
+ * A type-index whose SINGLE wf:Task registration carries BOTH a container and an
+ * instance — used to verify the two fields are validated independently.
+ */
+function indexTtlBoth(opts: { self: string; issuesContainer: string; instance: string }): string {
+  return `
+    @prefix solid: <http://www.w3.org/ns/solid/terms#> .
+    @prefix wf: <${WF}> .
+    <${opts.self}> a solid:TypeIndex, solid:UnlistedDocument .
+    <${opts.self}#reg-tasks> a solid:TypeRegistration ;
+      solid:forClass wf:Task ;
+      solid:instanceContainer <${opts.issuesContainer}> ;
+      solid:instance <${opts.instance}> .`;
+}
+
 /** A container listing (Turtle) advertising member resources. */
 function containerTtl(container: string, members: string[]): string {
   const contains = members.length > 0 ? `; ldp:contains ${members.map((m) => `<${m}>`).join(", ")}` : "";
@@ -453,5 +468,194 @@ describe("discoverAssignedTasks", () => {
       fetchImpl,
     });
     expect(tasks.map((t) => t.url)).toEqual([`${ALICE_ISSUES}own.ttl`]);
+  });
+
+  it("survives a friend whose TYPE-INDEX errors (500): skips that friend, keeps own + other friends", async () => {
+    // Alice knows Bob (broken index) AND Carol (a contact, healthy). A single bad
+    // source must NOT sink the aggregate (the MEDIUM finding): own-pod tasks AND
+    // the other readable source must still render.
+    const aliceDs = aliceProfileDataset([BOB]); // Bob is a friend; Carol below is a contact
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      // Alice's own pod: one task assigned to her.
+      if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+        return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+      }
+      if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, [`${ALICE_ISSUES}own.ttl`]));
+      if (url === `${ALICE_ISSUES}own.ttl`) return ttl(taskTtl(`${ALICE_ISSUES}own.ttl`, { title: "Own", assignee: ALICE }));
+      // Bob's profile reads fine, but his type-index 500s — discovery must not throw.
+      if (url === BOB_DOC) {
+        return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+      }
+      if (url === "https://bob.example/settings/privateTypeIndex.ttl") return new Response("boom", { status: 500 });
+      // Carol (contact) is healthy and has a task for Alice.
+      if (url === CAROL_DOC) {
+        return ttl(profileTtl({ webId: CAROL, storage: CAROL_POD, privateIndex: "https://carol.example/settings/privateTypeIndex.ttl" }));
+      }
+      if (url === "https://carol.example/settings/privateTypeIndex.ttl") {
+        return ttl(indexTtl({ self: "https://carol.example/settings/privateTypeIndex.ttl", issuesContainer: CAROL_ISSUES }));
+      }
+      if (url === CAROL_ISSUES) return ttl(containerTtl(CAROL_ISSUES, [`${CAROL_ISSUES}c.ttl`]));
+      if (url === `${CAROL_ISSUES}c.ttl`) return ttl(taskTtl(`${CAROL_ISSUES}c.ttl`, { title: "From Carol", assignee: ALICE }));
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [CAROL],
+      fetchImpl,
+    });
+    // Own task + Carol's task survive; Bob (broken index) is silently skipped.
+    expect(tasks.map((t) => t.url).sort()).toEqual(
+      [`${ALICE_ISSUES}own.ttl`, `${CAROL_ISSUES}c.ttl`].sort(),
+    );
+  });
+
+  it("survives a friend whose TASK CONTAINER errors (500): skips that friend, keeps own tasks", async () => {
+    // Bob's profile + index read fine, but his registered task container 500s
+    // (404/403 are swallowed deeper; a 500 exercises the throw path that the
+    // per-source guard must catch). readSourceTasks must not sink Alice's own tasks.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+        return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+      }
+      if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, [`${ALICE_ISSUES}own.ttl`]));
+      if (url === `${ALICE_ISSUES}own.ttl`) return ttl(taskTtl(`${ALICE_ISSUES}own.ttl`, { title: "Own", assignee: ALICE }));
+      if (url === BOB_DOC) {
+        return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+      }
+      if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+        return ttl(indexTtl({ self: "https://bob.example/settings/privateTypeIndex.ttl", issuesContainer: BOB_ISSUES }));
+      }
+      // Bob's task container errors with a 500 — readAssignedFromContainer
+      // re-throws it; the per-source guard must catch + skip fail-closed.
+      if (url === BOB_ISSUES) return new Response("server error", { status: 500 });
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [],
+      fetchImpl,
+    });
+    expect(tasks.map((t) => t.url)).toEqual([`${ALICE_ISSUES}own.ttl`]);
+  });
+
+  it("survives a broken OWN type-index without sinking readable friend tasks", async () => {
+    // Alice's own private type-index 500s, but she has a healthy friend Bob with a
+    // task for her. The own-pod read is wrapped fail-closed; Bob's must still show.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://alice.example/settings/privateTypeIndex.ttl") return new Response("boom", { status: 500 });
+      if (url === BOB_DOC) {
+        return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+      }
+      if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+        return ttl(indexTtl({ self: "https://bob.example/settings/privateTypeIndex.ttl", issuesContainer: BOB_ISSUES }));
+      }
+      if (url === BOB_ISSUES) return ttl(containerTtl(BOB_ISSUES, [`${BOB_ISSUES}forA.ttl`]));
+      if (url === `${BOB_ISSUES}forA.ttl`) return ttl(taskTtl(`${BOB_ISSUES}forA.ttl`, { title: "Bob assigned Alice", assignee: ALICE }));
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [],
+      fetchImpl,
+    });
+    expect(tasks.map((t) => t.url)).toEqual([`${BOB_ISSUES}forA.ttl`]);
+  });
+
+  it("treats a registration's container and instance INDEPENDENTLY (off-storage instance does not drop a valid container)", async () => {
+    // Bob's single wf:Task registration carries BOTH a valid container (in his
+    // pod) AND an instance that points OFF his storage (evil.example). The LOW
+    // finding: the bad instance must NOT discard the tasks read from the valid
+    // container. The off-storage instance is skipped; the container task survives.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const EVIL_INSTANCE = "https://evil.example/tasks/spoof.ttl";
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+        return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+      }
+      if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, []));
+      if (url === BOB_DOC) {
+        return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+      }
+      if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+        return ttl(
+          indexTtlBoth({
+            self: "https://bob.example/settings/privateTypeIndex.ttl",
+            issuesContainer: BOB_ISSUES, // valid — within Bob's storage
+            instance: EVIL_INSTANCE, // off-storage — must be skipped, not poison the container
+          }),
+        );
+      }
+      if (url === BOB_ISSUES) return ttl(containerTtl(BOB_ISSUES, [`${BOB_ISSUES}forA.ttl`]));
+      if (url === `${BOB_ISSUES}forA.ttl`) return ttl(taskTtl(`${BOB_ISSUES}forA.ttl`, { title: "Valid from Bob", assignee: ALICE }));
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [],
+      fetchImpl,
+    });
+    // The valid container task survives despite the off-storage sibling instance.
+    expect(tasks.map((t) => t.url)).toEqual([`${BOB_ISSUES}forA.ttl`]);
+    // The off-storage instance must NEVER have been fetched.
+    const fetched = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(fetched.some((u) => u.startsWith("https://evil.example/"))).toBe(false);
+  });
+
+  it("treats container and instance INDEPENDENTLY (off-storage container does not drop a valid instance)", async () => {
+    // Mirror of the above: a bad container must not discard a VALID sibling
+    // instance in the same registration.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const EVIL_CONTAINER = "https://evil.example/issues/";
+    const VALID_INSTANCE = `${BOB_POD}tasks/forA.ttl`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+        return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+      }
+      if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, []));
+      if (url === BOB_DOC) {
+        return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+      }
+      if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+        return ttl(
+          indexTtlBoth({
+            self: "https://bob.example/settings/privateTypeIndex.ttl",
+            issuesContainer: EVIL_CONTAINER, // off-storage — must be skipped
+            instance: VALID_INSTANCE, // valid — within Bob's storage, must survive
+          }),
+        );
+      }
+      if (url === VALID_INSTANCE) return ttl(taskTtl(VALID_INSTANCE, { title: "Valid instance from Bob", assignee: ALICE }));
+      return new Response("nf", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [],
+      fetchImpl,
+    });
+    expect(tasks.map((t) => t.url)).toEqual([VALID_INSTANCE]);
+    const fetched = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(fetched.some((u) => u.startsWith(EVIL_CONTAINER))).toBe(false);
   });
 });

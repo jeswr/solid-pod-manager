@@ -303,42 +303,62 @@ export async function discoverAssignedTasks(opts: {
   };
 
   // ── 1. Own pods. Discover this user's wf:Task registrations + list them.
-  const ownReg = await discoverRegistrations(myWebId, myProfileDataset, fetchImpl);
-  const ownTaskLocs = taskLocations(ownReg.locations);
-  await readSourceTasks({
-    locations: ownTaskLocs,
-    source: myWebId,
-    sourceStorages: ownStorages,
-    myWebId,
-    ownStorages,
-    authorized,
-    fetchImpl,
-    collect,
-  });
+  //    Wrapped fail-closed: a broken own type-index or container must not sink
+  //    the whole view (it would also hide any readable foreign sources). Logged
+  //    + skipped rather than thrown.
+  try {
+    const ownReg = await discoverRegistrations(myWebId, myProfileDataset, fetchImpl);
+    const ownTaskLocs = taskLocations(ownReg.locations);
+    await readSourceTasks({
+      locations: ownTaskLocs,
+      source: myWebId,
+      sourceStorages: ownStorages,
+      myWebId,
+      ownStorages,
+      authorized,
+      fetchImpl,
+      collect,
+    });
+  } catch (e) {
+    logSkippedSource(myWebId, e);
+  }
 
-  // ── 2. Foreign authorized sources (friends + contacts).
-  await Promise.all(
+  // ── 2. Foreign authorized sources (friends + contacts). Each source is read
+  //    in FULL ISOLATION: a single source whose profile, type-index, or task
+  //    container is unreadable/broken (403/500/parse error) is skipped
+  //    fail-closed (logged, omitted) — it must not reject the aggregate and hide
+  //    the user's own tasks or the OTHER readable sources. `allSettled` ensures
+  //    a rejection from one source never propagates; the inner try/catch is the
+  //    primary guard and the one that logs.
+  await Promise.allSettled(
     authorized.others.map(async (sourceWebId) => {
-      let sourceProfile: PodProfile;
-      let sourceDataset: import("@rdfjs/types").DatasetCore;
       try {
-        const { dataset } = await freshRdf(profileDocUrl(sourceWebId), fetchImpl);
-        sourceDataset = dataset;
-        sourceProfile = readProfile(sourceWebId, dataset);
-      } catch {
-        return; // unreadable source profile — skip this source.
+        let sourceProfile: PodProfile;
+        let sourceDataset: import("@rdfjs/types").DatasetCore;
+        try {
+          const { dataset } = await freshRdf(profileDocUrl(sourceWebId), fetchImpl);
+          sourceDataset = dataset;
+          sourceProfile = readProfile(sourceWebId, dataset);
+        } catch (e) {
+          logSkippedSource(sourceWebId, e); // unreadable source profile — skip this source.
+          return;
+        }
+        const reg = await discoverRegistrations(sourceWebId, sourceDataset, fetchImpl);
+        await readSourceTasks({
+          locations: taskLocations(reg.locations),
+          source: sourceWebId,
+          sourceStorages: sourceProfile.storages,
+          myWebId,
+          ownStorages,
+          authorized,
+          fetchImpl,
+          collect,
+        });
+      } catch (e) {
+        // A broken type-index or task container for this source — skip it
+        // fail-closed. Own-pod tasks and other readable sources still render.
+        logSkippedSource(sourceWebId, e);
       }
-      const reg = await discoverRegistrations(sourceWebId, sourceDataset, fetchImpl);
-      await readSourceTasks({
-        locations: taskLocations(reg.locations),
-        source: sourceWebId,
-        sourceStorages: sourceProfile.storages,
-        myWebId,
-        ownStorages,
-        authorized,
-        fetchImpl,
-        collect,
-      });
     }),
   );
 
@@ -346,10 +366,11 @@ export async function discoverAssignedTasks(opts: {
 }
 
 /**
- * Read + verify the tasks for ONE source's registered locations. Each location's
- * container/instance must be within the source's own verified storage before any
- * authenticated read (defence in depth). Found tasks are verified via
- * {@link verifyAssignedTask} and handed to `collect`.
+ * Read + verify the tasks for ONE source's registered locations. A location's
+ * `container` and `instance` are each verified INDEPENDENTLY against the source's
+ * own verified storage before any authenticated read (defence in depth): an
+ * off-storage value in one field skips only that field, never the valid sibling.
+ * Found tasks are verified via {@link verifyAssignedTask} and handed to `collect`.
  */
 async function readSourceTasks(opts: {
   locations: RegisteredLocation[];
@@ -372,12 +393,14 @@ async function readSourceTasks(opts: {
   await Promise.all(
     locations.map(async (loc) => {
       const found: { url: string; task: Issue }[] = [];
-      if (loc.container) {
-        if (!isInOwnPods(loc.container, allowedRoots)) return; // off-storage registration — drop.
+      // `container` and `instance` are verified INDEPENDENTLY: an off-storage
+      // value in one field must skip ONLY that field, never drop a valid sibling
+      // (nor the tasks already read from a valid container). A single location
+      // can legitimately carry both.
+      if (loc.container && isInOwnPods(loc.container, allowedRoots)) {
         found.push(...(await readAssignedFromContainer(loc.container, myWebId, fetchImpl)));
       }
-      if (loc.instance) {
-        if (!isInOwnPods(loc.instance, allowedRoots)) return; // off-storage registration — drop.
+      if (loc.instance && isInOwnPods(loc.instance, allowedRoots)) {
         try {
           const { dataset } = await freshRdf(loc.instance, fetchImpl);
           const task = parseIssue(loc.instance, dataset);
@@ -424,4 +447,16 @@ export function sortAssigned(tasks: readonly AssignedTask[]): AssignedTask[] {
 /** Count of assigned tasks not yet closed (the badge on the nav / header). */
 export function openAssignedCount(tasks: readonly AssignedTask[]): number {
   return tasks.filter((t) => t.task.state !== "closed").length;
+}
+
+/**
+ * Log (at `console.debug` only) that a federation source was skipped fail-closed
+ * because its profile / type-index / task container was unreadable or broken.
+ * A broken source must NEVER sink the aggregate view — it is omitted, not raised.
+ * Mirrors the notifications-degradation convention (no user-facing error).
+ */
+function logSkippedSource(source: string, err: unknown): void {
+  if (typeof console !== "undefined" && typeof console.debug === "function") {
+    console.debug("[federation-tasks] skipped unreadable source", source, err);
+  }
 }

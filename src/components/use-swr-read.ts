@@ -91,11 +91,23 @@ export function useSwrRead<T>(
   // resets it AFTER commit. Tracking the active `(webId, key)` and resetting
   // synchronously when it differs makes `data` reflect the NEW key immediately,
   // so a key change never paints the old key's value even once. React discards
-  // this render and re-renders with the new state — no flash, no effect, no loop
-  // (the ref guard fires the resets exactly once per key change).
-  const activeRef = useRef<{ webId: string | undefined; key: string }>({ webId, key });
-  if (activeRef.current.webId !== webId || activeRef.current.key !== key) {
-    activeRef.current = { webId, key };
+  // this render and re-renders with the new state — no flash, no effect, no loop.
+  //
+  // The previous `(webId, key)` is tracked in `useState`, NOT a `useRef`, on
+  // purpose: this is React's documented "adjust state when a prop changes"
+  // pattern, and it is concurrent-SAFE. A ref mutated during render can leak a
+  // write from an ABANDONED render (one React started, then threw away), so a
+  // later COMMITTED render with that same key would see the ref already updated
+  // and skip the reset — the exact concurrent hazard roborev flagged. State set
+  // during render is scoped to the render that committed: React re-runs the
+  // component with the new state only for the render it keeps, so an abandoned
+  // render's `setActive` is discarded with it and never poisons a later commit.
+  const [active, setActive] = useState<{ webId: string | undefined; key: string }>({
+    webId,
+    key,
+  });
+  if (active.webId !== webId || active.key !== key) {
+    setActive({ webId, key });
     const next = deriveSwrInitialState<T>(cache, webId, key);
     setData(next.data);
     setLoading(next.loading);

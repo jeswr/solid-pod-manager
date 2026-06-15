@@ -8,9 +8,12 @@ import {
 } from "./integrations/core/testing.js";
 import { ensureTypeRegistrations } from "./type-index-write.js";
 import { TypeIndexDataset, typeIndexLinks } from "./type-index.js";
+import { ISSUE_CLASS, ISSUES_CONFIG, ISSUES_SLUG } from "./issues.js";
 
 const MUSIC = "https://schema.org/MusicRecording";
 const CONTAINER = `${TEST_POD_ROOT}integrations/spotify/music/`;
+/** The issues container URL as ensureRegistered() would compute it. */
+const ISSUES_CONTAINER = `${TEST_POD_ROOT}${ISSUES_SLUG}`;
 
 describe("ensureTypeRegistrations", () => {
   it("bootstraps a private index, links it from the profile, registers the class", async () => {
@@ -94,5 +97,63 @@ describe("ensureTypeRegistrations", () => {
     const index = new TypeIndexDataset(pod.dataset(result.indexUrl), DataFactory);
     expect(index.locate(MUSIC)).toHaveLength(1);
     expect(index.locate(other.forClass)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wf:Task / issues federation registration (pss-77n)
+// ---------------------------------------------------------------------------
+describe("wf:Task type-index registration for issues (pss-77n)", () => {
+  it("registers solid:forClass wf:Task with instanceContainer issues/ (cross-app discovery)", async () => {
+    // This is the registration that ProductivityStore.ensureRegistered() makes
+    // on the first create() call, using ISSUES_CONFIG.forClass and the computed
+    // containerUrl. Simulates the federation discovery seam: other apps
+    // (solid-issues) reading wf:Task instanceContainers will find PM's issues/.
+    const pod = createMemoryPod();
+
+    const result = await ensureTypeRegistrations({
+      webId: TEST_WEBID,
+      podRoot: TEST_POD_ROOT,
+      registrations: [{ forClass: ISSUE_CLASS, container: ISSUES_CONTAINER }],
+      fetchImpl: pod.fetch,
+    });
+
+    expect(result.added).toBe(1);
+    expect(ISSUE_CLASS).toBe("http://www.w3.org/2005/01/wf/flow#Task");
+
+    const index = new TypeIndexDataset(pod.dataset(result.indexUrl), DataFactory);
+    const locs = index.locate(ISSUE_CLASS);
+    expect(locs).toHaveLength(1);
+    expect(locs[0]).toMatchObject({
+      forClass: "http://www.w3.org/2005/01/wf/flow#Task",
+      container: ISSUES_CONTAINER,
+    });
+  });
+
+  it("ISSUES_CONFIG.forClass matches ISSUE_CLASS (the forClass drives the registration)", () => {
+    expect(ISSUES_CONFIG.forClass).toBe(ISSUE_CLASS);
+  });
+
+  it("is idempotent for the wf:Task registration (re-registering on every create is safe)", async () => {
+    const pod = createMemoryPod();
+    const reg = { forClass: ISSUE_CLASS, container: ISSUES_CONTAINER };
+
+    await ensureTypeRegistrations({
+      webId: TEST_WEBID,
+      podRoot: TEST_POD_ROOT,
+      registrations: [reg],
+      fetchImpl: pod.fetch,
+    });
+    const putsAfterFirst = pod.putCount;
+
+    const second = await ensureTypeRegistrations({
+      webId: TEST_WEBID,
+      podRoot: TEST_POD_ROOT,
+      registrations: [reg],
+      fetchImpl: pod.fetch,
+    });
+
+    expect(second.added).toBe(0);
+    expect(pod.putCount).toBe(putsAfterFirst);
   });
 });

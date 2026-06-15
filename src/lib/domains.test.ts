@@ -445,6 +445,36 @@ describe("quotePurchase", () => {
     expect(quote.reason).toBe("This domain is already taken.");
   });
 
+  it("drops a non-USD price rather than mislabelling it as USD", async () => {
+    const { fetch } = fetchMock(
+      jsonResponse(200, {
+        ...PURCHASE_QUOTE,
+        price: { registrationUsd: 14, renewalUsd: 14, currency: "EUR" },
+      }),
+    );
+    const quote = await quotePurchase(BASE, "alice-pods.com", fetch);
+    // The numbers are not USD, so the client refuses to render them as USD:
+    // the price reads as absent, never as a wrong "$14".
+    expect(quote.price).toBeUndefined();
+  });
+
+  it("accepts a USD-tagged price (and a price with no currency field)", async () => {
+    const tagged = fetchMock(jsonResponse(200, PURCHASE_QUOTE));
+    expect((await quotePurchase(BASE, "alice-pods.com", tagged.fetch)).price).toEqual({
+      registrationUsd: 14,
+      renewalUsd: 14,
+      currency: "USD",
+    });
+    const untagged = fetchMock(
+      jsonResponse(200, { ...PURCHASE_QUOTE, price: { registrationUsd: 14, renewalUsd: 14 } }),
+    );
+    expect((await quotePurchase(BASE, "alice-pods.com", untagged.fetch)).price).toEqual({
+      registrationUsd: 14,
+      renewalUsd: 14,
+      currency: "USD",
+    });
+  });
+
   it("maps a 404 (purchase off even with connect on) to purchase-unavailable", async () => {
     const { fetch } = fetchMock(jsonResponse(404, { message: "Route not found" }));
     await expect(quotePurchase(BASE, "alice-pods.com", fetch)).rejects.toBeInstanceOf(

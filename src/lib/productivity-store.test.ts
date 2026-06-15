@@ -17,7 +17,7 @@ import {
 } from "./integrations/core/testing.js";
 import { ItemReadError } from "./errors.js";
 import { TypeIndexDataset } from "./type-index.js";
-import { createStore, toSlug, type StoreConfig } from "./productivity-store.js";
+import { createStore, toSlug, OutOfScopeError, type StoreConfig } from "./productivity-store.js";
 
 const SCHEMA = "https://schema.org/";
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -125,6 +125,40 @@ describe("ProductivityStore CRUD", () => {
     await expect(s.read(`${TEST_POD_ROOT}widgets/missing.ttl`)).rejects.toSatisfy(
       (e: unknown) => e instanceof ItemReadError && e.status === 404,
     );
+  });
+
+  it("refuses to read/update/delete a url outside its container (confused-deputy guard)", async () => {
+    const { pod, s } = store();
+    const evil = "https://evil.example/x.ttl";
+    const otherContainer = `${TEST_POD_ROOT}contacts/c.ttl`; // own pod, wrong app container
+    await expect(s.read(evil)).rejects.toBeInstanceOf(OutOfScopeError);
+    await expect(s.update(evil, { name: "x" })).rejects.toBeInstanceOf(OutOfScopeError);
+    await expect(s.remove(evil)).rejects.toBeInstanceOf(OutOfScopeError);
+    await expect(s.read(otherContainer)).rejects.toBeInstanceOf(OutOfScopeError);
+    // No request ever reached the network for the out-of-scope URLs.
+    expect(pod.get(evil)).toBeUndefined();
+  });
+
+  it("refuses to operate on the container itself or a sub-container (incl. slashless)", async () => {
+    const { s } = store();
+    // Each must be rejected: the container root (both slash forms), a
+    // sub-container, a nested descendant, and an encoded-slash traversal. A
+    // slashless bare segment like `widgets/nested` is NOT here — it is
+    // indistinguishable from a direct item resource and is safely in-container.
+    const targets = [
+      `${TEST_POD_ROOT}widgets/`, // the container, trailing slash
+      `${TEST_POD_ROOT}widgets`, // the container, slashless (isWithinPod would allow)
+      `${TEST_POD_ROOT}widgets/nested/`, // a sub-container
+      `${TEST_POD_ROOT}widgets/nested/item.ttl`, // a nested descendant (not a direct child)
+      `${TEST_POD_ROOT}widgets/evil%2f..%2fsecret.ttl`, // an encoded-slash traversal attempt
+      `${TEST_POD_ROOT}widgets/item.ttl?x=1`, // a query (builders would mint a wrong subject)
+      `${TEST_POD_ROOT}widgets/item.ttl#frag`, // a fragment (would double `#it`)
+    ];
+    for (const url of targets) {
+      await expect(s.read(url)).rejects.toBeInstanceOf(OutOfScopeError);
+      await expect(s.update(url, { name: "x" })).rejects.toBeInstanceOf(OutOfScopeError);
+      await expect(s.remove(url)).rejects.toBeInstanceOf(OutOfScopeError);
+    }
   });
 
   it("list returns every parseable item and skips foreign resources", async () => {

@@ -19,6 +19,7 @@ import { isInOwnPods } from "@/lib/pod-scope";
 import { useSession } from "@/components/session-provider";
 import { useResource } from "@/components/use-resource";
 import { ResourceViewer } from "@/components/resource-viewer";
+import { SharingPanel } from "@/components/sharing-panel";
 import { ErrorState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -70,7 +71,7 @@ function ItemDetail({
   categoryId: string;
   categoryLabel?: string;
 }) {
-  const { data, error, loading } = useResource(url);
+  const { data, error, loading, reload } = useResource(url);
   const name = nameFromUrl(url);
 
   return (
@@ -122,20 +123,22 @@ function ItemDetail({
             <ExternalLink className="size-4" aria-hidden="true" />
             Open original
           </a>
+          <SharingPanel resourceUrl={url} />
           <DeleteItemButton url={url} name={name} categoryId={categoryId} />
         </div>
       </header>
 
-      {/* Access pointer — honest (no fabricated per-item status; the real
-          per-app access list lives in Connected apps). */}
+      {/* Access pointer — honest: per-resource sharing is managed in the Share
+          panel above; the by-app view lives in Connected apps. */}
       <Card className="border-primary/20 bg-accent/20">
         <CardContent className="flex items-start gap-3 py-4 text-sm">
           <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
           <p className="text-muted-foreground">
             <span className="font-medium text-foreground">Access:</span>{" "}
-            apps can only read this if you&apos;ve granted them access.{" "}
+            use <span className="font-medium text-foreground">Share</span> to choose
+            who can see or change this item.{" "}
             <Link href="/connected-apps" className="font-medium text-primary underline-offset-4 hover:underline">
-              See and manage which apps have access
+              Manage which apps have access
             </Link>
             .
           </p>
@@ -165,7 +168,7 @@ function ItemDetail({
             <Skeleton className="h-40 w-full rounded-2xl" />
           </div>
         ) : (
-          <ResourceViewer resource={data} />
+          <ResourceViewer resource={data} onReload={reload} />
         )}
       </section>
     </div>

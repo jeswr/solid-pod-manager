@@ -760,10 +760,15 @@ function parseQuote(value: Record<string, unknown> | undefined): DomainQuote {
     typeof value.price === "object" && value.price !== null
       ? (value.price as Record<string, unknown>)
       : undefined;
+  // The server's quote price block is USD-only (src/http/domains.ts always
+  // sends `currency: "USD"`). Defence in depth: never coerce a non-USD price
+  // into a USD label — if the server ever sends a different currency, treat the
+  // price as absent (the quote then reads as "no price", never a wrong amount).
   const price: QuotePrice | undefined =
     priceRaw &&
     typeof priceRaw.registrationUsd === "number" &&
-    typeof priceRaw.renewalUsd === "number"
+    typeof priceRaw.renewalUsd === "number" &&
+    (priceRaw.currency === undefined || priceRaw.currency === "USD")
       ? {
           registrationUsd: priceRaw.registrationUsd,
           renewalUsd: priceRaw.renewalUsd,

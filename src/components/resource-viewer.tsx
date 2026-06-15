@@ -1,15 +1,47 @@
-import { Download, ExternalLink, FileQuestion, LinkIcon } from "lucide-react";
-import type { LoadedResource } from "@/components/use-resource";
-import type { PropertyGroup } from "@/lib/resource-view";
-import { safeLinkHref } from "@/lib/pod-scope";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+"use client";
 
-/** Render a loaded resource with the viewer chosen by its content type. */
-export function ResourceViewer({ resource }: { resource: LoadedResource }) {
+import { useMemo, useState, type ReactNode } from "react";
+import { Download, ExternalLink, FileQuestion } from "lucide-react";
+import type { LoadedResource } from "@/components/use-resource";
+import { selectTypedView, viewMetaFor } from "@/components/typed-views/registry";
+import { RdfViewer } from "@/components/typed-views/rdf-table";
+import { ViewSwitcher } from "@/components/typed-views/view-switcher";
+import { ClassTable } from "@/components/typed-views/class-table";
+import { SourceActionButton } from "@/components/typed-views/source-action";
+import { UnderTheHood } from "@/components/typed-views/under-the-hood";
+import { EditableTypedView } from "@/components/forms/editable-typed-view";
+import { Markdown } from "@/components/markdown";
+import { looksLikeMarkdown } from "@/lib/literal-format";
+import { buildClassTable } from "@/lib/typed-views/table-of-class";
+import {
+  initialViewMode,
+  shouldShowSwitcher,
+  viewModeOptions,
+  type ViewMode,
+} from "@/lib/typed-views/view-modes";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+
+/**
+ * Render a loaded resource with the viewer chosen by its content type. The
+ * `rdf` kind adds the view-switcher tray (A3 — typed card ↔ raw data ↔ source)
+ * and an always-available, collapsed-by-default under-the-hood panel (A4); the
+ * `text` kind renders Markdown safely (A2). `actions` is the caller's
+ * resource-level controls (e.g. Delete), reused inside the under-the-hood panel.
+ */
+export function ResourceViewer({
+  resource,
+  actions,
+  onReload,
+}: {
+  resource: LoadedResource;
+  actions?: ReactNode;
+  /** Re-fetch the resource (used by inline editing to recover from a stale ETag). */
+  onReload?: () => void;
+}) {
   switch (resource.viewer.kind) {
     case "rdf":
-      return <RdfViewer groups={resource.properties ?? []} />;
+      return <RdfResourceView resource={resource} actions={actions} onReload={onReload} />;
     case "image":
       return (
         <figure className="overflow-hidden rounded-2xl border border-border bg-card">
@@ -22,11 +54,7 @@ export function ResourceViewer({ resource }: { resource: LoadedResource }) {
         </figure>
       );
     case "text":
-      return (
-        <pre className="measure-none overflow-x-auto rounded-2xl border border-border bg-muted/40 p-4 text-sm leading-relaxed">
-          <code>{resource.text}</code>
-        </pre>
-      );
+      return <TextResourceView resource={resource} />;
     case "pdf":
       return (
         <object
@@ -47,83 +75,99 @@ export function ResourceViewer({ resource }: { resource: LoadedResource }) {
   }
 }
 
-/** Friendly property table for RDF resources (the "structured data" viewer). */
-function RdfViewer({ groups }: { groups: PropertyGroup[] }) {
-  if (groups.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        This resource has no readable properties.
-      </p>
-    );
+/**
+ * The RDF view: typed card by default (no-raw-RDF-by-default, §5.1), with a
+ * view-switcher tray to reveal the raw triples or the source platform on demand,
+ * and an under-the-hood developer panel below. When no typed view matches, the
+ * triple table is the only rendering (no tray) and remains the explicit
+ * unknown-type fallback (typed-data-views §4.5).
+ */
+function RdfResourceView({
+  resource,
+  actions,
+  onReload,
+}: {
+  resource: LoadedResource;
+  actions?: ReactNode;
+  onReload?: () => void;
+}) {
+  const typed = useMemo(() => selectTypedView(resource), [resource]);
+  const meta = useMemo(() => viewMetaFor(resource), [resource]);
+  const inputs = {
+    hasTypedView: typed != null,
+    hasSource: meta.source != null,
+    hasClassTable: meta.tableClass != null,
+    // Any RDF resource we could load (and therefore are authorised to read) is
+    // offered an inline editor; a write that lacks permission surfaces 403.
+    canEdit: resource.dataset != null,
+  };
+  const options = viewModeOptions(inputs);
+  const [mode, setMode] = useState<ViewMode>(() => initialViewMode(inputs));
+
+  const classTable = useMemo(
+    () =>
+      meta.tableClass && resource.dataset
+        ? buildClassTable(resource.dataset, meta.tableClass)
+        : undefined,
+    [meta.tableClass, resource.dataset],
+  );
+
+  // No typed view and nothing else to switch to → the triple table is the sole
+  // rendering (the fallback); the under-the-hood panel would only duplicate it.
+  if (!typed && options.length === 0) {
+    return <RdfViewer groups={resource.properties ?? []} />;
   }
+
   return (
     <div className="flex flex-col gap-4">
-      {groups.map((group) => (
-        <Card key={group.subject}>
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-sm font-medium">
-              {group.label}
-              {group.primary && (
-                <span className="rounded-full bg-accent px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-accent-foreground">
-                  Main
-                </span>
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="overflow-x-auto">
-            {/* Accessible underlying table (DESIGN.md §8, R8). */}
-            <table className="w-full border-collapse text-sm">
-              <caption className="sr-only">Properties of {group.label}</caption>
-              <thead className="sr-only">
-                <tr>
-                  <th scope="col">Property</th>
-                  <th scope="col">Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {group.properties.map((entry) => (
-                  <tr key={entry.predicate} className="border-b border-border/60 last:border-0">
-                    <th
-                      scope="row"
-                      className="whitespace-nowrap py-2 pr-4 text-left align-top font-medium text-muted-foreground"
-                    >
-                      {entry.label}
-                    </th>
-                    <td className="py-2 align-top">
-                      <ul className="flex flex-col gap-1">
-                        {entry.values.map((v, i) => {
-                          // SECURITY (SEC-2): only render an IRI as a link when its
-                          // scheme is safe; `javascript:`/`data:` IRIs from pod data
-                          // render as inert text.
-                          const href = v.kind === "named" ? safeLinkHref(v.value) : undefined;
-                          return (
-                            <li key={`${v.value}-${i}`} className="break-all">
-                              {href ? (
-                                <a
-                                  href={href}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
-                                >
-                                  <LinkIcon className="size-3 shrink-0" aria-hidden="true" />
-                                  {v.value}
-                                </a>
-                              ) : (
-                                <span>{v.value}</span>
-                              )}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {shouldShowSwitcher(inputs) && (
+        <ViewSwitcher options={options} active={mode} onChange={setMode} />
+      )}
+
+      {mode === "typed" && typed}
+      {mode === "data" && <RdfViewer groups={resource.properties ?? []} />}
+      {mode === "edit" && <EditableTypedView resource={resource} onReload={onReload} />}
+      {mode === "table" && classTable && <ClassTable model={classTable} />}
+      {mode === "source" && meta.source && (
+        <Card>
+          <CardContent className="flex flex-col items-start gap-3 py-6">
+            <p className="text-sm text-muted-foreground">
+              This item came from another service. Open it there:
+            </p>
+            <SourceActionButton source={meta.source} />
           </CardContent>
         </Card>
-      ))}
+      )}
+
+      <UnderTheHood resource={resource} actions={actions} />
     </div>
+  );
+}
+
+/**
+ * The text view: render Markdown as safe formatted HTML for `text/markdown`, or
+ * for plain text that *looks* like Markdown (A2). Everything else stays as
+ * monospace text. The `Markdown` component maps a parsed AST to React elements —
+ * there is no HTML string and no `dangerouslySetInnerHTML`, so no XSS surface.
+ */
+function TextResourceView({ resource }: { resource: LoadedResource }) {
+  const body = resource.text ?? "";
+  const isMarkdown =
+    resource.viewer.mediaType === "text/markdown" ||
+    (resource.viewer.mediaType === "text/plain" && looksLikeMarkdown(body));
+
+  if (isMarkdown) {
+    return (
+      <article className="rounded-2xl border border-border bg-card p-4 text-sm leading-relaxed">
+        <Markdown source={body} />
+      </article>
+    );
+  }
+
+  return (
+    <pre className="measure-none overflow-x-auto rounded-2xl border border-border bg-muted/40 p-4 text-sm leading-relaxed">
+      <code>{body}</code>
+    </pre>
   );
 }
 

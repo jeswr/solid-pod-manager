@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { parseRdf } from "@jeswr/fetch-rdf";
+import type { DatasetCore } from "@rdfjs/types";
 import { useSession } from "@/components/session-provider";
 import { chooseViewer, type ViewerChoice } from "@/lib/viewers";
 import { readResourceProperties, type PropertyGroup } from "@/lib/resource-view";
@@ -16,6 +17,19 @@ export interface LoadedResource {
   text?: string;
   /** Parsed RDF property groups (for the `rdf` kind). */
   properties?: PropertyGroup[];
+  /**
+   * Parsed RDF quads (for the `rdf` kind) — fed to the typed-view registry so a
+   * known shape renders a domain view; absent → generic table only. Already
+   * parsed for `properties`, so no extra fetch (see typed-data-views §4.5).
+   */
+  dataset?: DatasetCore;
+  /** Optional Type-Index category id the resource was discovered under. */
+  categoryId?: string;
+  /**
+   * The resource's ETag from the GET, kept for a later conditional write
+   * (inline editing — Wave 5). Absent when the server sent none.
+   */
+  etag?: string | null;
 }
 
 /**
@@ -28,8 +42,12 @@ export function useResource(url: string): {
   data?: LoadedResource;
   error?: Error;
   loading: boolean;
+  /** Re-fetch the resource (e.g. after a stale-ETag write conflict). */
+  reload: () => void;
 } {
   const { status } = useSession();
+  const [refresh, setRefresh] = useState(0);
+  const reload = useCallback(() => setRefresh((n) => n + 1), []);
   const [state, setState] = useState<{
     data?: LoadedResource;
     error?: Error;
@@ -42,7 +60,9 @@ export function useResource(url: string): {
     setState({ loading: true });
 
     (async () => {
-      const res = await fetch(url, { headers: { accept: "*/*" } });
+      // Always revalidate (no-cache) so a reload after an edit reads the fresh
+      // body + ETag rather than a heuristically-cached copy (see rdf-read.ts).
+      const res = await fetch(url, { headers: { accept: "*/*", "cache-control": "no-cache" } });
       if (!res.ok) {
         throw Object.assign(new Error(`Request failed (${res.status})`), {
           status: res.status,
@@ -53,13 +73,22 @@ export function useResource(url: string): {
       const size = sizeHeader ? Number(sizeHeader) : undefined;
       const viewer = chooseViewer(contentType, url);
 
-      const loaded: LoadedResource = { url, viewer, contentType, size };
+      const loaded: LoadedResource = {
+        url,
+        viewer,
+        contentType,
+        size,
+        etag: res.headers.get("etag"),
+      };
 
       if (viewer.kind === "rdf") {
         const body = await res.text();
         loaded.text = body;
         const dataset = await parseRdf(body, viewer.mediaType, { baseIRI: url });
         loaded.properties = readResourceProperties(url, dataset);
+        // Keep the parsed dataset so the typed-view registry can select a
+        // domain view (contacts/etc.); no extra fetch — same parse.
+        loaded.dataset = dataset;
       } else if (viewer.kind === "text" && viewer.embeddable) {
         loaded.text = await res.text();
       }
@@ -76,7 +105,7 @@ export function useResource(url: string): {
     return () => {
       cancelled = true;
     };
-  }, [url, status]);
+  }, [url, status, refresh]);
 
-  return state;
+  return { ...state, reload };
 }

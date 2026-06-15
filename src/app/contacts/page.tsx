@@ -5,19 +5,24 @@
  * (`vcard:Individual` under `contacts/`) alphabetically, with create / open /
  * edit / delete via `/contacts/[id]`.
  */
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Mail, Phone, Plus, Users } from "lucide-react";
+import { Download, Mail, Phone, Plus, Upload, Users } from "lucide-react";
+import { toast } from "sonner";
 import { contactsStore, type Contact } from "@/lib/contacts";
 import { useStore, useItems } from "@/components/use-productivity";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Button } from "@/components/ui/button";
+import { exportVCard, importVCard } from "@/lib/vcard-io";
+import { downloadText, readFileText } from "@/lib/download";
 import type { StoredItem } from "@/lib/productivity-store";
 
 export default function ContactsPage() {
   const store = useStore<Contact>(contactsStore);
   const { data, loading, error, reload } = useItems(store);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
 
   const contacts = useMemo(
     () =>
@@ -26,6 +31,53 @@ export default function ContactsPage() {
       ),
     [data],
   );
+
+  function onExport() {
+    if (!data || data.length === 0) {
+      toast.error("There are no contacts to export.");
+      return;
+    }
+    downloadText("contacts.vcf", exportVCard(data.map((i) => i.data)), "text/vcard");
+  }
+
+  async function onImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !store) return;
+    setBusy(true);
+    try {
+      const parsed = importVCard(await readFileText(file));
+      if (parsed.length === 0) {
+        toast.error("No contacts (VCARD) found in that file.");
+        return;
+      }
+      let added = 0;
+      let failed = false;
+      for (const c of parsed) {
+        try {
+          await store.create(c, c.fn);
+          added += 1;
+        } catch {
+          failed = true;
+          break;
+        }
+      }
+      if (added > 0) reload();
+      if (failed) {
+        toast.error(
+          added > 0
+            ? `Imported ${added} of ${parsed.length} contacts before an error. The rest were not imported.`
+            : "Could not import the contacts. Please try again.",
+        );
+      } else {
+        toast.success(`Imported ${added} ${added === 1 ? "contact" : "contacts"}`);
+      }
+    } catch {
+      toast.error("Could not import that file. Please check it is a valid .vcf vCard.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -44,12 +96,31 @@ export default function ContactsPage() {
             </p>
           </div>
         </div>
-        <Button asChild>
-          <Link href="/contacts/edit">
-            <Plus aria-hidden="true" />
-            New contact
-          </Link>
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".vcf,text/vcard"
+            className="sr-only"
+            onChange={onImportFile}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+          <Button variant="outline" onClick={() => fileInput.current?.click()} disabled={busy || !store}>
+            <Upload aria-hidden="true" />
+            Import
+          </Button>
+          <Button variant="outline" onClick={onExport} disabled={!data || data.length === 0}>
+            <Download aria-hidden="true" />
+            Export
+          </Button>
+          <Button asChild>
+            <Link href="/contacts/edit">
+              <Plus aria-hidden="true" />
+              New contact
+            </Link>
+          </Button>
+        </div>
       </header>
 
       {error ? (

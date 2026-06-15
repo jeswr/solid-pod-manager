@@ -740,6 +740,33 @@ export function allGrants(app: AppAccess): AccessGrant[] {
   return out;
 }
 
+/**
+ * The grants for one agent across the pod, looked up in a freshly-read app
+ * list. Returns `[]` when the agent has no current access (already revoked).
+ *
+ * Mutation paths source their grants through this against a LIVE-discovered
+ * list (never a cached UI snapshot) so a "revoke all" acts on the agent's
+ * current grant set — a grant added after a cache write is still revoked.
+ */
+export function grantsForAgent(apps: AppAccess[], agentId: string): AccessGrant[] {
+  const app = apps.find((a) => a.agentId === agentId);
+  return app ? allGrants(app) : [];
+}
+
+/**
+ * The grants for one agent within a single category, looked up in a freshly-read
+ * app list. Returns `[]` when that category is no longer granted to the agent.
+ */
+export function grantsForCategory(
+  apps: AppAccess[],
+  agentId: string,
+  categoryId: string,
+): AccessGrant[] {
+  const app = apps.find((a) => a.agentId === agentId);
+  const category = app?.categories.find((c) => c.category.id === categoryId);
+  return category?.grants ?? [];
+}
+
 /** Plain-language verb phrase for a set of modes (DESIGN.md §6 copy). */
 export function describeModes(modes: AccessMode[]): string {
   const parts: string[] = [];

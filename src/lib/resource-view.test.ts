@@ -32,7 +32,10 @@ describe("readResourceProperties", () => {
     const me = groups.find((g) => g.subject === `${URL}#me`);
     expect(me?.properties.map((p) => p.label)).toEqual(["age", "name", "type"]); // sorted
     const name = me?.properties.find((p) => p.label === "name");
-    expect(name?.values[0]).toEqual({ value: "Alice", kind: "literal" });
+    // Literals now carry datatype/language (for A2 human-readable formatting);
+    // the core value + kind are unchanged.
+    expect(name?.values[0]).toMatchObject({ value: "Alice", kind: "literal" });
+    expect(name?.values[0].datatype).toBe("http://www.w3.org/2001/XMLSchema#string");
   });
 
   it("distinguishes named-node values from literals", async () => {

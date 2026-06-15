@@ -53,6 +53,12 @@ export interface Contact {
   phone?: string;
   /** Free-text note — `vcard:note`. */
   note?: string;
+  /**
+   * The contact's WebID, if known — `vcard:url` (the Solid contacts
+   * convention). Lets a contact be selected in the people-picker and feed
+   * sharing/group membership. Bare IRI, no scheme stripping.
+   */
+  webId?: string;
 }
 
 /** Typed `@rdfjs/wrapper` view of a single contact's subject. */
@@ -90,13 +96,28 @@ export class ContactDoc extends TermWrapper {
   set note(v: string | undefined) {
     OptionalAs.object(this, `${VCARD}note`, v, LiteralFrom.string);
   }
+  /** The contact's WebID — `vcard:url` (a NamedNode IRI). */
+  get webId(): string | undefined {
+    return OptionalFrom.subjectPredicate(this, `${VCARD}url`, NamedNodeAs.string);
+  }
+  set webId(v: string | undefined) {
+    OptionalAs.object(this, `${VCARD}url`, v, NamedNodeFrom.string);
+  }
 }
 
 /** Strip a `mailto:`/`tel:` scheme for display; `undefined` passes through. */
 export function stripScheme(uri: string | undefined): string | undefined {
   if (!uri) return undefined;
   const m = /^(?:mailto|tel):(.*)$/i.exec(uri);
-  return m ? decodeURIComponent(m[1]) : uri;
+  if (!m) return uri;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    // Malformed percent-encoding (e.g. an imported value like `bad%ZZ@y.z`) must
+    // not throw — that would make the whole contact fail to parse and vanish
+    // from the list. Fall back to the raw scheme-stripped value.
+    return m[1];
+  }
 }
 
 /** Wrap a bare email in a `mailto:` IRI; `undefined`/empty passes through. */
@@ -127,6 +148,7 @@ export function parseContact(
     email: stripScheme(doc.emailUri),
     phone: stripScheme(doc.phoneUri),
     note: doc.note,
+    webId: doc.webId,
   };
 }
 
@@ -138,6 +160,7 @@ export function buildContact(itemUrl: string, contact: Contact): Store {
   doc.emailUri = toMailto(contact.email);
   doc.phoneUri = toTel(contact.phone);
   doc.note = contact.note || undefined;
+  doc.webId = contact.webId?.trim() || undefined;
   return store;
 }
 

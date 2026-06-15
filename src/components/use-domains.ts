@@ -145,6 +145,10 @@ export function usePurchaseFeature(
   const [available, setAvailable] = useState<boolean | undefined>(undefined);
 
   useEffect(() => {
+    // Reset to "probing" whenever the server/session/enabled-gate changes, so a
+    // stale `true` from a previous server can never briefly reveal the buy path
+    // for a different origin before the new probe answers (fail closed).
+    setAvailable(undefined);
     if (status !== "logged-in" || !base || !enabled) return;
     let cancelled = false;
     detectPurchaseFeature(base)

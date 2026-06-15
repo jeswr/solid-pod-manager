@@ -31,7 +31,8 @@ export function formatModified(iso: string | undefined, now: Date = new Date()):
   return formatDate(date);
 }
 
-function formatDate(date: Date): string {
+/** A short, readable calendar date, e.g. "1 Jul 2026" (locale-formatted). */
+export function formatDate(date: Date): string {
   return date.toLocaleDateString(undefined, {
     year: "numeric",
     month: "short",

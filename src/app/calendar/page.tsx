@@ -5,16 +5,19 @@
  * `calendar/`) shown two ways: an agenda (upcoming, grouped by day) and a
  * simple month grid. Create / open / edit / delete via `/calendar/[id]`.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
   Clock,
+  Download,
   MapPin,
   Plus,
+  Upload,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   calendarStore,
   groupByDay,
@@ -26,6 +29,8 @@ import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Button } from "@/components/ui/button";
 import { formatTime } from "@/lib/format";
+import { exportICal, importICal } from "@/lib/ical";
+import { downloadText, readFileText } from "@/lib/download";
 import type { StoredItem } from "@/lib/productivity-store";
 import { cn } from "@/lib/utils";
 
@@ -37,8 +42,74 @@ export default function CalendarPage() {
   const { data, loading, error, reload } = useItems(store);
   const [view, setView] = useState<View>("agenda");
   const [anchor, setAnchor] = useState(() => new Date());
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
 
   const events = data ?? [];
+
+  function onExport() {
+    if (events.length === 0) {
+      toast.error("There are no events to export.");
+      return;
+    }
+    downloadText("calendar.ics", exportICal({ events }), "text/calendar");
+  }
+
+  async function onImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !store) return;
+    setBusy(true);
+    try {
+      const { events: parsed, recurringCount, timezoneQualifiedCount, dateOnlyCount } = importICal(
+        await readFileText(file),
+      );
+      if (parsed.length === 0) {
+        toast.error("No events (VEVENT) found in that file.");
+        return;
+      }
+      if (recurringCount > 0) {
+        toast.warning(
+          `${recurringCount} recurring ${recurringCount === 1 ? "event" : "events"} imported as a single occurrence — repeats are not expanded.`,
+        );
+      }
+      if (timezoneQualifiedCount > 0) {
+        toast.warning(
+          `${timezoneQualifiedCount} ${timezoneQualifiedCount === 1 ? "event has" : "events have"} a named timezone — imported using this device's timezone, so the time may be off. Check after importing.`,
+        );
+      }
+      if (dateOnlyCount > 0) {
+        toast.warning(
+          `${dateOnlyCount} all-day ${dateOnlyCount === 1 ? "event was" : "events were"} imported as a timed event at midnight — all-day dates aren't preserved yet.`,
+        );
+      }
+      let added = 0;
+      let failed = false;
+      for (const ev of parsed) {
+        try {
+          await store.create(ev, ev.name);
+          added += 1;
+        } catch {
+          failed = true;
+          break;
+        }
+      }
+      if (added > 0) reload();
+      if (failed) {
+        toast.error(
+          added > 0
+            ? `Imported ${added} of ${parsed.length} events before an error. The rest were not imported.`
+            : "Could not import the events. Please try again.",
+        );
+      } else {
+        toast.success(`Imported ${added} ${added === 1 ? "event" : "events"}`);
+      }
+    } catch {
+      toast.error("Could not import that file. Please check it is a valid .ics calendar.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -57,12 +128,31 @@ export default function CalendarPage() {
             </p>
           </div>
         </div>
-        <Button asChild>
-          <Link href="/calendar/edit">
-            <Plus aria-hidden="true" />
-            New event
-          </Link>
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".ics,text/calendar"
+            className="sr-only"
+            onChange={onImportFile}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+          <Button variant="outline" onClick={() => fileInput.current?.click()} disabled={busy || !store}>
+            <Upload aria-hidden="true" />
+            Import
+          </Button>
+          <Button variant="outline" onClick={onExport} disabled={events.length === 0}>
+            <Download aria-hidden="true" />
+            Export
+          </Button>
+          <Button asChild>
+            <Link href="/calendar/edit">
+              <Plus aria-hidden="true" />
+              New event
+            </Link>
+          </Button>
+        </div>
       </header>
 
       <div

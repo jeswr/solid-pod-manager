@@ -23,6 +23,13 @@ export interface PropertyValue {
   value: string;
   /** `named` (a link/IRI) or `literal` (text/number/date). */
   kind: "named" | "literal";
+  /**
+   * For `literal` values: the datatype IRI (e.g. `xsd:dateTime`), enabling
+   * human-readable formatting (A2) in the render layer. Absent on named nodes.
+   */
+  datatype?: string;
+  /** For `literal` values: a BCP-47 language tag (`rdf:langString`), if any. */
+  language?: string;
 }
 
 /** All properties of one subject. */
@@ -47,6 +54,17 @@ export function localName(iri: string): string {
 
 function termValue(term: Term): PropertyValue {
   if (term.termType === "NamedNode") return { value: term.value, kind: "named" };
+  if (term.termType === "Literal") {
+    const language = term.language ? term.language : undefined;
+    return {
+      value: term.value,
+      kind: "literal",
+      datatype: term.datatype?.value,
+      language,
+    };
+  }
+  // Blank nodes (and the variable/default-graph terms that never appear as
+  // object values here) render as their label, like literals.
   return { value: term.value, kind: "literal" };
 }
 

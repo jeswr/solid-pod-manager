@@ -65,6 +65,13 @@ export const spotifyAdapter: IntegrationAdapter = {
         .filter((n): n is string => n !== undefined);
       rec.byArtist = artists.length > 0 ? artists.join(", ") : undefined;
       rec.inAlbum = optionalText(t.album?.name);
+      // FOLLOW-UP (typed-views P2 / docs §6 Q4): no album-art triple is imported
+      // today — only `album.name`. Adding e.g.
+      //   rec.image = optionalText(t.album?.images?.[0]?.url)
+      // (a `schema:image` setter on MusicRecording + `images` on SpotifyTrack)
+      // would populate real cover art; the music card already renders it `if
+      // present` and shows a music-note icon fallback otherwise. Left as a
+      // separate, reviewed change — not made here.
       const ms = optionalNumber(t.duration_ms);
       rec.duration = ms !== undefined ? isoDuration(ms) : undefined;
       rec.sourceUrl = optionalText(t.external_urls?.spotify);

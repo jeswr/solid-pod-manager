@@ -55,6 +55,8 @@ const SCHEMA_HTTP = "http://schema.org/";
 const VCARD = "http://www.w3.org/2006/vcard/ns#";
 const FOAF = "http://xmlns.com/foaf/0.1/";
 const BOOKMARK = "http://www.w3.org/2002/01/bookmark#";
+const SIOC = "http://rdfs.org/sioc/ns#";
+const AS = "https://www.w3.org/ns/activitystreams#";
 
 /**
  * The canonical category list. Order within each tier is the display order.
@@ -118,6 +120,10 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA_HTTP}Event`,
       "http://www.w3.org/2002/12/cal/ical#Vevent",
       "http://www.w3.org/2002/12/cal/icaltzd#Vevent",
+      // First-party Tasks app stores to-dos as iCal VTODO, so they surface under
+      // Calendar alongside events.
+      "http://www.w3.org/2002/12/cal/icaltzd#Vtodo",
+      "http://www.w3.org/2002/12/cal/ical#Vtodo",
     ],
   },
   {
@@ -177,6 +183,8 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA}DigitalDocument`,
       `${SCHEMA_HTTP}TextDigitalDocument`,
       `${BOOKMARK}Bookmark`,
+      // First-party Issues tracker stores issues as wf:Task.
+      "http://www.w3.org/2005/01/wf/flow#Task",
       // Connected sources: structured collections (Notion databases).
       `${SCHEMA}Dataset`,
       // File imports: reading libraries (Goodreads).
@@ -197,6 +205,9 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${FOAF}OnlineAccount`,
       // File imports: chat history (WhatsApp).
       `${SCHEMA}Message`,
+      // First-party Chat (Wave 6) stores messages as sioc:Note / AS2.0 Note.
+      `${SIOC}Note`,
+      `${AS}Note`,
     ],
   },
 ] as const;

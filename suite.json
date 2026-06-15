@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jeswr/full-solid-ecosystem/main/tracking/schema/suite.schema.json",
+  "id": "solid-pod-manager",
+  "kind": "app",
+  "name": "Solid Pod Manager",
+  "repo": "https://github.com/jeswr/solid-pod-manager",
+  "category": "productivity",
+  "maturity": "beta",
+  "visibility": "public",
+  "stack": {
+    "language": "TypeScript",
+    "runtime": "Node >=24",
+    "framework": "Next.js 15",
+    "ui": "shadcn/ui + Radix + Tailwind 4",
+    "rdf": "@jeswr/fetch-rdf ^0.1, @solid/object ^0.6, @rdfjs/wrapper ^0.34, n3 ^2",
+    "shacl": "rdf-validate-shacl ^0.6",
+    "auth": "@solid/reactive-authentication 0.1.3, jose ^6",
+    "test": "vitest ^4, Playwright ^1.60 (e2e)",
+    "deploy": "static export (Docker on EC2 / Vercel Hobby)"
+  },
+  "dependsOn": [
+    "prod-solid-server",
+    "solid-webid-index"
+  ],
+  "federation": {
+    "clientIdUrl": "https://app.solid-test.jeswr.org/clientid.jsonld",
+    "sectors": [
+      "identity",
+      "productivity",
+      "media",
+      "finance",
+      "health",
+      "documents",
+      "social"
+    ],
+    "accessModes": ["Read", "Write", "Append", "Control"],
+    "consumes": [
+      "identity",
+      "productivity",
+      "media",
+      "finance",
+      "health",
+      "documents",
+      "social"
+    ],
+    "produces": [
+      "productivity",
+      "documents",
+      "social"
+    ],
+    "membershipTodo": "TODO(O1-gated): declare fedapp:memberOf once the fedapp: namespace is frozen and the registry engine ships. The Pod Manager is a multi-sector consumer (it manages every pod data type via the integrations + productivity suite); its clientid.jsonld will need a fedapp: block enumerating per-sector access once the namespace lands."
+  }
+}

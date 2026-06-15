@@ -49,6 +49,37 @@ export type ProfileLoadResult =
 export type LoadProfile = (webId: string) => Promise<PodProfile>;
 
 /**
+ * Decide whether to CLEAR the currently-exposed `profile`/`activeStorage` as a
+ * new profile load enters `"loading"`.
+ *
+ * This guards the interactive account switch. When the user switches from
+ * WebID A (with A's `profile`/`activeStorage` exposed) to WebID B, the provider
+ * marks the session `logged-in` for B *before* B's profile resolves. If A's
+ * `profile`/`activeStorage` were left in place during B's load, children would
+ * briefly observe `status: "logged-in"` for B's WebID paired with A's storage —
+ * so a page that guards only on `activeStorage` could read or act on the wrong
+ * pod. Clearing on an actual WebID change closes that window: B's loading state
+ * exposes no storage/profile at all until B's own resolve.
+ *
+ * A SAME-WebID load (the `retryProfile()` path, or the very first load for a
+ * WebID that has no exposed profile yet) must NOT blank an already-good profile
+ * — that would flash the UI empty on a retry. So the rule is precisely "clear
+ * iff the load is for a DIFFERENT WebID than the one whose profile is currently
+ * exposed". When nothing is exposed yet (`exposedWebId` is undefined) there is
+ * nothing to clear regardless.
+ *
+ * @param loadingWebId  the WebID whose profile load is now entering "loading".
+ * @param exposedWebId  the WebID the currently-set `profile`/`activeStorage`
+ *   belong to, or `undefined` when none is exposed (logged-out, or mid-load).
+ */
+export function shouldClearOnSwitch(
+  loadingWebId: string,
+  exposedWebId: string | undefined,
+): boolean {
+  return exposedWebId !== undefined && exposedWebId !== loadingWebId;
+}
+
+/**
  * Run the (cosmetic) profile load for an already-authenticated WebID and report
  * an EXPLICIT terminal state. Never throws: a failed load resolves to
  * `{ status: "error" }` (with the cause) rather than propagating — the caller

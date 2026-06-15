@@ -14,7 +14,11 @@
  *     same loader and now reaches "ready" (the session never dropped to login).
  */
 import { describe, expect, it, vi } from "vitest";
-import { loadProfileState, type LoadProfile } from "./session-profile";
+import {
+  loadProfileState,
+  shouldClearOnSwitch,
+  type LoadProfile,
+} from "./session-profile";
 import type { PodProfile } from "./profile";
 
 const WEBID = "https://alice.pod.test/profile/card#me";
@@ -80,6 +84,28 @@ describe("loadProfileState — FAILURE is explicit, not swallowed", () => {
       expect(result.error).toBeInstanceOf(Error);
       expect(result.error.message).toBe("network down");
     }
+  });
+});
+
+describe("shouldClearOnSwitch — clear stale storage/profile iff the WebID changed", () => {
+  const A = "https://alice.pod.test/profile/card#me";
+  const B = "https://bob.pod.test/profile/card#me";
+
+  it("CLEARS when loading a DIFFERENT WebID than the one currently exposed (account switch)", () => {
+    // A's profile is exposed; we begin loading B → must blank A's profile/storage
+    // so children never see B's logged-in identity paired with A's pod.
+    expect(shouldClearOnSwitch(B, A)).toBe(true);
+  });
+
+  it("does NOT clear on a SAME-WebID retry (no flash of an already-good profile)", () => {
+    // retryProfile() re-loads the SAME WebID — the existing profile must stay so
+    // the degraded → ready retry never flashes the UI empty.
+    expect(shouldClearOnSwitch(A, A)).toBe(false);
+  });
+
+  it("does NOT clear when nothing is exposed yet (first load after restore/login)", () => {
+    // No profile/storage exposed (logged-out, or mid-load): nothing to clear.
+    expect(shouldClearOnSwitch(A, undefined)).toBe(false);
   });
 });
 

@@ -46,6 +46,7 @@ import {
 import { decideSilentRestore } from "@/lib/session-restore";
 import {
   loadProfileState,
+  shouldClearOnSwitch,
   type ProfileLoadResult,
   type ProfileStatus,
 } from "@/lib/session-profile";
@@ -169,6 +170,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // The WebID whose profile retryProfile() should re-load — mirrors `webId` in a
   // ref so the stable retry callback never goes stale.
   const profileWebIdRef = useRef<string>(undefined);
+  // The WebID the currently-EXPOSED `profile`/`activeStorage` belong to (set only
+  // when a "ready" load commits; cleared on an account-switch blank + on logout).
+  // `loadProfileFor` compares the incoming WebID against this to decide whether a
+  // load is an account SWITCH (clear stale storage/profile before exposing the new
+  // logged-in identity) versus a same-WebID retry (keep the good profile — no
+  // flash). See shouldClearOnSwitch in session-profile.ts.
+  const exposedProfileWebIdRef = useRef<string>(undefined);
   // Monotonic generation guard: a profile load only commits its result if it is
   // still the latest (guards an account switch / retry racing a slow load, and
   // is bumped on logout to drop any in-flight load).
@@ -345,30 +353,53 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // claims the next generation and only commits if it is still the latest.
   // Returns the terminal result so a caller (the login path) can act on it (e.g.
   // record the recent account) without re-loading.
-  const loadProfileFor = useCallback(async (id: string): Promise<ProfileLoadResult> => {
-    const gen = ++profileLoadGenRef.current;
+  // Enter the "loading" profile state for `id`, CLEARING the prior account's
+  // exposed profile/activeStorage first when this is a real account SWITCH (a
+  // DIFFERENT WebID than the one currently exposed). Co-located with the
+  // `setStatus("logged-in")` transition so the clear and the new logged-in
+  // status commit together — children NEVER observe the new WebID's
+  // `logged-in` status paired with the PRIOR account's storage/profile (a page
+  // guarding only on activeStorage would otherwise briefly read/act on the
+  // wrong pod). A same-WebID retry (shouldClearOnSwitch === false) keeps the
+  // existing profile so a degraded → retry never flashes the UI empty. Safe and
+  // idempotent: both the login/restore status transition and loadProfileFor's
+  // prologue call it; the second call is a no-op once cleared. See
+  // shouldClearOnSwitch.
+  const enterSwitchLoading = useCallback((id: string) => {
     profileWebIdRef.current = id;
+    if (shouldClearOnSwitch(id, exposedProfileWebIdRef.current)) {
+      exposedProfileWebIdRef.current = undefined;
+      setProfile(undefined);
+      setActive(undefined);
+    }
     setProfileStatus("loading");
     setProfileError(undefined);
+  }, []);
+
+  const loadProfileFor = useCallback(async (id: string): Promise<ProfileLoadResult> => {
+    const gen = ++profileLoadGenRef.current;
+    enterSwitchLoading(id);
     const result = await loadProfileState(id, fetchProfile);
     // A newer load (or a logout) superseded this one: drop the stale result.
     if (gen !== profileLoadGenRef.current) return result;
     if (result.status === "ready") {
       setProfile(result.profile);
       setActive(result.activeStorage);
+      exposedProfileWebIdRef.current = id;
       setProfileError(undefined);
       setProfileStatus("ready");
     } else {
       // The session stands; expose the error + a retry. Do NOT drop to
       // logged-out (the reopen-routes-through-login bug) and do NOT leave
       // profile/activeStorage silently undefined with no recourse.
+      exposedProfileWebIdRef.current = undefined;
       setProfile(undefined);
       setActive(undefined);
       setProfileError(result.error);
       setProfileStatus("error");
     }
     return result;
-  }, []);
+  }, [enterSwitchLoading]);
 
   // Drive the restore path's profile load: when a silent restore lands
   // logged-in it sets the WebID + profileStatus:"loading" and bumps
@@ -422,11 +453,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         // Account switch (logging into a different WebID without an explicit
         // logout): clear the read cache so the new account never renders the
         // previous one's cached models. Per-WebID keying already prevents a
-        // cross-account read; this also frees the old partition.
+        // cross-account read; this also frees the old partition. AND clear the
+        // prior account's exposed profile/activeStorage HERE — before we mark
+        // the new WebID logged-in — so children never observe B's `logged-in`
+        // status paired with A's storage/profile (the account-switch wrong-pod
+        // window). `enterSwitchLoading` clears both refs + state on a real
+        // WebID change; the shared loader then resolves to B's own profile.
         setWebId((prev) => {
           if (prev && prev !== id) readCache.clearWebId(prev);
           return id;
         });
+        enterSwitchLoading(id);
         // The token grant succeeded → the session is real; mark logged-in. The
         // (cosmetic) profile/storage load runs through the SHARED loader, so the
         // explicit profileStatus lifecycle is identical to the restore path: a
@@ -463,7 +500,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         throw e;
       }
     },
-    [getController, loadProfileFor],
+    [getController, loadProfileFor, enterSwitchLoading],
   );
 
   const login = useCallback(
@@ -537,6 +574,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // logout) and reset the explicit profile lifecycle for the next session.
     profileLoadGenRef.current++;
     profileWebIdRef.current = undefined;
+    exposedProfileWebIdRef.current = undefined;
     setProfileStatus("loading");
     setProfileError(undefined);
     if (typeof localStorage !== "undefined") {

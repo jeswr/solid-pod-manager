@@ -15,6 +15,7 @@ import {
   IdCard,
   UsersRound,
   CircleDot,
+  ClipboardCheck,
   Inbox,
   MessagesSquare,
   CalendarClock,
@@ -48,6 +49,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/contacts", label: "Contacts", icon: Users },
   { href: "/bookmarks", label: "Bookmarks", icon: Bookmark },
   { href: "/issues", label: "Issues", icon: CircleDot },
+  // Federation consumption: tasks assigned to me across my pods + people I trust.
+  { href: "/assigned", label: "Assigned to me", icon: ClipboardCheck },
   { href: "/people", label: "People", icon: UsersRound },
   // Wave 6 cross-pod collaboration — receive notifications, chat, and schedule.
   { href: "/inbox", label: "Inbox", icon: Inbox },

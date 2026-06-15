@@ -1,12 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import {
   type ProductivityStore,
   type StoredItem,
 } from "@/lib/productivity-store";
+import type { AdvisoryHandler } from "@/lib/shacl/advisory";
 import type { AsyncState } from "@/components/use-pod-data";
+
+/**
+ * The default advisory-validation surface (ADR-0014 Phase 1): a non-blocking
+ * sonner warning toast. A write that fails SHACL validation still succeeds —
+ * this only informs the user the saved data may not be fully interoperable.
+ */
+const advisoryToast: AdvisoryHandler = (notice) => {
+  const n = notice.results.length;
+  toast.warning(
+    `Saved, but this data may not be fully interoperable (${n} shape ${n === 1 ? "issue" : "issues"}).`,
+    {
+      description:
+        notice.results
+          .map((r) => r.message || r.path)
+          .filter(Boolean)
+          .slice(0, 3)
+          .join("; ") || undefined,
+    },
+  );
+};
 
 /**
  * Bind a productivity store (Notes / Calendar / Contacts) to the active Solid
@@ -18,12 +40,19 @@ import type { AsyncState } from "@/components/use-pod-data";
  *   identity; pass a module-level function reference.
  */
 export function useStore<T>(
-  factory: (opts: { podRoot: string; webId: string }) => ProductivityStore<T>,
+  factory: (opts: {
+    podRoot: string;
+    webId: string;
+    onAdvisory?: AdvisoryHandler;
+  }) => ProductivityStore<T>,
 ): ProductivityStore<T> | undefined {
   const { webId, activeStorage, status } = useSession();
   return useMemo(() => {
     if (status !== "logged-in" || !webId || !activeStorage) return undefined;
-    return factory({ podRoot: activeStorage, webId });
+    // Supply the advisory-toast surface to every store. Stores that haven't
+    // opted into validation (`cfg.validate` unset) simply never call it
+    // (ADR-0014 Phase 1) — it is the no-op default for them.
+    return factory({ podRoot: activeStorage, webId, onAdvisory: advisoryToast });
   }, [factory, webId, activeStorage, status]);
 }
 

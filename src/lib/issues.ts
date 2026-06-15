@@ -353,6 +353,15 @@ export const ISSUES_CONFIG: StoreConfig<Issue> = {
   prefixes: PREFIXES,
   parse: parseIssue,
   build: buildIssue,
+  /**
+   * ADVISORY SHACL validation is ON for issues (ADR-0014 Phase 1): the PM
+   * writes `wf:Task` and the vendored solid-issues `issue.ttl` shape checks
+   * federation compatibility. A violation surfaces a non-blocking warning — it
+   * NEVER blocks or rejects the write (the form-level title/assignee checks
+   * remain the hard guards). Issues are the first opted-in write-type; other
+   * stores leave `validate` unset (off) until a matching shape is vendored.
+   */
+  validate: true,
 };
 
 /** Build an Issues store bound to the active pod + WebID. */
@@ -360,6 +369,8 @@ export function issuesStore(opts: {
   podRoot: string;
   webId: string;
   fetchImpl?: typeof fetch;
+  /** Where an advisory SHACL violation surfaces (a toast); never blocks. */
+  onAdvisory?: import("./shacl/advisory.js").AdvisoryHandler;
 }): ProductivityStore<Issue> {
   return createStore(ISSUES_CONFIG, opts);
 }

@@ -1,0 +1,207 @@
+# SHACL shapes for the Solid Issues data model.
+#
+# Authored against reused, dereferenceable IRIs only (W3C workflow ontology `wf:`
+# + Dublin Core Terms + SIOC + FOAF + ActivityStreams 2.0 `as:`) — see
+# docs/data-modelling.md §5 and
+# decisions/0001-issue-tracker-vocabulary.md. The shapes are anonymous (blank
+# nodes), so nothing is minted at a non-resolving domain.
+#
+# Validate an issue document's object-mapper output before write, and on read of
+# untrusted data (rdf-validate-shacl in CI; see src/lib/shacl.test.ts).
+
+@prefix sh:    <http://www.w3.org/ns/shacl#> .
+@prefix wf:    <http://www.w3.org/2005/01/wf/flow#> .
+@prefix dct:   <http://purl.org/dc/terms/> .
+@prefix sioc:  <http://rdfs.org/sioc/ns#> .
+@prefix foaf:  <http://xmlns.com/foaf/0.1/> .
+@prefix as:    <https://www.w3.org/ns/activitystreams#> .
+@prefix prov:  <http://www.w3.org/ns/prov#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+# --- An issue (wf:Task) ---
+[] a sh:NodeShape ;
+  sh:targetClass wf:Task ;
+  sh:property [
+    sh:path dct:title ; sh:name "title" ;
+    sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path wf:description ; sh:name "description" ;
+    sh:datatype xsd:string ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path wf:tracker ; sh:name "tracker" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path dct:created ; sh:name "created" ;
+    sh:datatype xsd:dateTime ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path dct:modified ; sh:name "modified" ;
+    sh:datatype xsd:dateTime ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path dct:creator ; sh:name "creator" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  # Assignee is a WebID / agent IRI: an IRI (nodeKind) AND http(s)-schemed
+  # (pattern). `sh:pattern` matches the node's lexical value, so for an IRI it
+  # constrains the scheme — a `urn:`/`mailto:` assignee is rejected.
+  sh:property [
+    sh:path wf:assignee ; sh:name "assignee" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+    sh:pattern "^https?://" ;
+  ] ;
+  # Issue↔issue links are always document IRIs (parent / blocked-by / related),
+  # never literals — see the `parent`, `blockedBy` wrappers in src/lib/issue.ts.
+  sh:property [
+    sh:path dct:isPartOf ; sh:name "parent" ;
+    sh:nodeKind sh:IRI ;
+  ] ;
+  sh:property [
+    sh:path dct:requires ; sh:name "blocked by" ;
+    sh:nodeKind sh:IRI ;
+  ] ;
+  sh:property [
+    sh:path dct:relation ; sh:name "related" ;
+    sh:nodeKind sh:IRI ;
+  ] ;
+  # Close-as-duplicate: this issue is superseded by exactly one canonical
+  # successor (supersession semantics, not blocking). An issue IRI, never a literal.
+  sh:property [
+    sh:path dct:isReplacedBy ; sh:name "duplicate of" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  # Clone provenance: the single original this issue was derived from.
+  sh:property [
+    sh:path prov:wasDerivedFrom ; sh:name "cloned from" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path wf:dateDue ; sh:name "due date" ;
+    sh:datatype xsd:dateTime ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path wf:message ; sh:name "comments" ;
+    sh:nodeKind sh:IRI ;
+  ] ;
+  # --- State (rdf:type carries wf:Open / wf:Closed; the SolidOS model, since
+  # dependency pss-qec replaced the literal `wf:state`). A well-formed task is
+  # typed with exactly one of the two state classes — Open and Closed are mutually
+  # exclusive.
+  #
+  # SHACL Core CAN express this exclusivity on a single `rdf:type` path via
+  # `sh:qualifiedMaxCount 1` combined with the `sh:qualifiedValueShape [ sh:in
+  # ( wf:Open wf:Closed ) ]` — "exactly one of {wf:Open, wf:Closed} must appear
+  # among the rdf:type values". A node carrying BOTH is rejected by the
+  # qualifiedMaxCount constraint. (What Core *cannot* do is cross-path
+  # conditionals — but none are needed here.)
+  #
+  # Severity: sh:Warning (not sh:Violation). The application setter (Issue.state)
+  # is already the hard guarantor of exclusivity — it always removes the opposite
+  # class before adding the new one. Untrusted read data may legitimately be
+  # mid-migration or from a foreign producer; a Warning lets callers decide whether
+  # to treat it as fatal. The write path should escalate by rejecting any result
+  # that has results (non-conforming). Severity stays Warning so that the
+  # "stateless task" and "contradictory state" cases are both reported uniformly.
+  sh:property [
+    sh:path rdf:type ; sh:name "state" ;
+    sh:qualifiedValueShape [ sh:in ( wf:Open wf:Closed ) ] ;
+    sh:qualifiedMinCount 1 ;
+    sh:qualifiedMaxCount 1 ;
+    sh:severity sh:Warning ;
+  ] .
+
+# --- An assignment notification (as:Announce) ---
+# Posted to an assignee's inbox when an issue is assigned to them
+# (ActivityStreams 2.0; canonical https:// namespace — docs/data-modelling.md §3).
+# The shape targets exactly `as:Announce`: `as:object` is the assigned issue IRI
+# and `as:target` is the assignee's WebID, both IRIs.
+[] a sh:NodeShape ;
+  sh:targetClass as:Announce ;
+  sh:property [
+    sh:path as:object ; sh:name "assigned issue" ;
+    sh:nodeKind sh:IRI ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path as:target ; sh:name "assignee" ;
+    sh:nodeKind sh:IRI ; sh:minCount 1 ;
+    sh:pattern "^https?://" ;
+  ] .
+
+# --- A comment (wf:Message) ---
+[] a sh:NodeShape ;
+  sh:targetClass wf:Message ;
+  sh:property [
+    sh:path sioc:content ; sh:name "content" ;
+    sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path foaf:maker ; sh:name "author" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path dct:created ; sh:name "created" ;
+    sh:datatype xsd:dateTime ; sh:maxCount 1 ;
+  ] .
+
+# --- A configurable-workflow status class (wf:State) — F1 ---
+# A tracker declares its workflow as `#status-<slug>` classes (each a `wf:State`).
+# The crucial invariant for interop: EVERY custom status **resolves** to exactly
+# one open/closed disposition via `rdfs:subClassOf wf:Open | wf:Closed`. That keeps
+# the issue model (which still types each task `wf:Open`/`wf:Closed`) and the
+# exactly-one-state rule above well-defined no matter how many statuses a tracker
+# adds. The resolution constraint reuses the same `sh:qualifiedValueShape`
+# [ sh:in ( wf:Open wf:Closed ) ] pattern as the task-state shape: a status must be
+# a subclass of exactly one of {wf:Open, wf:Closed}.
+[] a sh:NodeShape ;
+  sh:targetClass wf:State ;
+  sh:property [
+    sh:path rdfs:label ; sh:name "label" ;
+    sh:datatype xsd:string ; sh:maxCount 1 ;
+  ] ;
+  # Every state resolves to exactly one of wf:Open / wf:Closed (the disposition).
+  sh:property [
+    sh:path rdfs:subClassOf ; sh:name "resolution" ;
+    sh:qualifiedValueShape [ sh:in ( wf:Open wf:Closed ) ] ;
+    sh:qualifiedMinCount 1 ;
+    sh:qualifiedMaxCount 1 ;
+  ] ;
+  # Allowed transition targets are state IRIs (the FSM edges), never literals.
+  sh:property [
+    sh:path wf:allowedTransitions ; sh:name "allowed transitions" ;
+    sh:nodeKind sh:IRI ;
+  ] .
+
+# --- A provenance activity-log entry (prov:Activity) — F3 ---
+# One immutable recorded change to an issue. `prov:startedAtTime` is the required
+# timestamp; `prov:wasAssociatedWith` is the actor's WebID (http(s) IRI);
+# `prov:used` / `prov:generated` are the prior / new values (a status class, a
+# WebID, or an issue IRI — always an IRI, at most one each); `dct:type` carries the
+# change kind. Entries are append-only — the writer never mutates an existing node.
+[] a sh:NodeShape ;
+  sh:targetClass prov:Activity ;
+  sh:property [
+    sh:path prov:startedAtTime ; sh:name "started at" ;
+    sh:datatype xsd:dateTime ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path prov:wasAssociatedWith ; sh:name "actor" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+    sh:pattern "^https?://" ;
+  ] ;
+  sh:property [
+    sh:path prov:used ; sh:name "prior value" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path prov:generated ; sh:name "new value" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path dct:type ; sh:name "change kind" ;
+    sh:datatype xsd:string ; sh:maxCount 1 ;
+  ] .

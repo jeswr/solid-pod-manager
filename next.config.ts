@@ -24,6 +24,13 @@ const nextConfig: NextConfig = {
       ".js": [".ts", ".tsx", ".js", ".jsx"],
       ".mjs": [".mts", ".mjs"],
     };
+    // Vendored SHACL shapes (`src/lib/shacl/shapes/*.ttl`, ADR-0014) are
+    // imported as raw Turtle text and parsed at runtime with N3 (browser-safe).
+    // `asset/source` inlines the file contents as a string export.
+    config.module.rules.push({
+      test: /\.ttl$/,
+      type: "asset/source",
+    });
     return config;
   },
 };

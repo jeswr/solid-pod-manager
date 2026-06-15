@@ -28,6 +28,7 @@ import {
   writeResource,
 } from "./pod-data.js";
 import { ensureTypeRegistrations } from "./type-index-write.js";
+import { validateAdvisory, type AdvisoryHandler } from "./shacl/advisory.js";
 
 /**
  * Thrown when an item URL passed to `read`/`update`/`remove` is not inside this
@@ -70,6 +71,16 @@ export interface StoreConfig<T> {
   /** Turtle prefix map for readable documents. */
   prefixes: Record<string, string>;
   /**
+   * Opt this write-type into ADVISORY SHACL validation (ADR-0014 Phase 1). When
+   * `true`, every `create`/`update` validates the built graph against the
+   * vendored shape for {@link StoreConfig.forClass} and surfaces any violation
+   * as a non-blocking warning (a toast via the store's `onAdvisory` + a log) —
+   * the write is NEVER blocked or rejected. Defaults to `false` (off) so
+   * validation is opt-in per write-type and a blanket rollout is never implicit.
+   * Has no effect unless a shape is registered for `forClass`.
+   */
+  validate?: boolean;
+  /**
    * Parse a single item's dataset into the payload. `itemUrl` is the resource
    * URL (the item's subject is `${itemUrl}#it`). Return `undefined` when the
    * document holds no item of this class (so a stray file is skipped).
@@ -93,8 +104,36 @@ export class ProductivityStore<T> {
     private readonly podRoot: string,
     private readonly webId: string,
     private readonly fetchImpl?: typeof fetch,
+    /**
+     * Where a failed ADVISORY SHACL validation surfaces (a toast, a log). Only
+     * consulted when `cfg.validate` is `true`. ADVISORY ONLY — invoking it
+     * never blocks or rejects the write (ADR-0014 Phase 1).
+     */
+    private readonly onAdvisory?: AdvisoryHandler,
   ) {
     this.containerUrl = new URL(cfg.containerSlug, podRoot).toString();
+  }
+
+  /**
+   * Kick off advisory SHACL validation for a just-written graph, if this
+   * write-type opted in (`cfg.validate`). Fire-and-forget by contract: the
+   * caller does NOT await it, so a slow/hanging validator never delays the
+   * store op (the pod write has already succeeded by the time this is called).
+   * `validateAdvisory` already swallows every failure, but we add a defensive
+   * `.catch` on the detached promise so it can never become an unhandled
+   * rejection even if that contract regresses.
+   */
+  private runAdvisory(url: string, dataset: import("@rdfjs/types").DatasetCore): void {
+    if (!this.cfg.validate) return;
+    void validateAdvisory(dataset, {
+      forClass: this.cfg.forClass,
+      url,
+      onAdvisory: this.onAdvisory,
+    }).catch((e) => {
+      // Defence in depth: validateAdvisory never rejects, but a detached
+      // promise must not surface an unhandled rejection if that ever changes.
+      console.warn(`[shacl] advisory validation promise rejected for ${url}:`, e);
+    });
   }
 
   /** The container these items live in (always ends in `/`). */
@@ -227,6 +266,10 @@ export class ProductivityStore<T> {
       fetchImpl: this.fetchImpl,
       prefixes: this.cfg.prefixes,
     });
+    // ADVISORY ONLY (ADR-0014): validate AFTER the write, fire-and-forget, so a
+    // violation (or a slow/hanging validator) can never block or delay it. A
+    // non-conforming graph still surfaces a warning out-of-band.
+    this.runAdvisory(url, dataset);
     return { url, etag };
   }
 
@@ -242,11 +285,16 @@ export class ProductivityStore<T> {
   ): Promise<{ etag: string | null }> {
     this.assertInContainer(url);
     const dataset = this.cfg.build(url, data);
-    return writeResource(url, dataset, {
+    const result = await writeResource(url, dataset, {
       etag,
       fetchImpl: this.fetchImpl,
       prefixes: this.cfg.prefixes,
     });
+    // ADVISORY ONLY (ADR-0014): validate AFTER the write, fire-and-forget, so a
+    // violation (or a slow/hanging validator) can never block or delay it. A
+    // non-conforming graph still surfaces a warning out-of-band.
+    this.runAdvisory(url, dataset);
+    return result;
   }
 
   /** Delete an item (idempotent — a missing resource resolves to success). */
@@ -269,9 +317,18 @@ export class ProductivityStore<T> {
 /** Build a typed store for an app, bound to the active pod + WebID. */
 export function createStore<T>(
   cfg: StoreConfig<T>,
-  opts: { podRoot: string; webId: string; fetchImpl?: typeof fetch },
+  opts: {
+    podRoot: string;
+    webId: string;
+    fetchImpl?: typeof fetch;
+    /**
+     * Where a failed ADVISORY SHACL validation surfaces (e.g. a toast). Only
+     * used when `cfg.validate` is `true`; never blocks the write (ADR-0014).
+     */
+    onAdvisory?: AdvisoryHandler;
+  },
 ): ProductivityStore<T> {
-  return new ProductivityStore(cfg, opts.podRoot, opts.webId, opts.fetchImpl);
+  return new ProductivityStore(cfg, opts.podRoot, opts.webId, opts.fetchImpl, opts.onAdvisory);
 }
 
 /**

@@ -126,3 +126,37 @@ SolidOS-parity QUICK WINS — touched:
   Extracted `RdfViewer` to `rdf-table.tsx`.
 - `src/components/typed-views/registry.tsx` — adds `viewMetaFor(resource)`
   reporting `{ hasTypedView, source, tableClass }` for the switcher.
+
+## Advisory SHACL validation (ADR-0014 Phase 1) — Claude Opus 4.8 (Fable unavailable)
+
+The swappable `ShaclValidator` seam + vendored, hash-pinned shapes + advisory
+(non-blocking) validation at the pod write seam. Backed by `rdf-validate-shacl`
+now; replaceable by sparq's engine (sparq #162) at `getDefaultValidator()`.
+Fable unavailable at authoring time; upgrade candidates pending re-review.
+
+New files:
+
+- `src/lib/shacl/validator.ts` — the `ShaclValidator` interface + the
+  `rdf-validate-shacl`-backed impl + the `getDefaultValidator()` swap point.
+- `src/lib/shacl/shape-registry.ts` — `forClass` → vendored shape (Turtle).
+- `src/lib/shacl/advisory.ts` — the write-seam bridge: validate, surface a
+  warning on violation, NEVER throw / NEVER block.
+- `src/lib/shacl/ttl.d.ts` — `*.ttl` raw-text module declaration.
+- `src/lib/shacl/shapes/issue.ttl` — vendored from `jeswr/solid-issues`
+  (byte-identical, hash-pinned).
+- `src/lib/shacl/shapes/README.md`, `src/lib/shacl/shapes-lock.json` — provenance
+  + hash-pin manifest.
+- `scripts/check-shapes.mjs` — the `check:shapes` drift guard.
+- `src/lib/shacl/validator.test.ts`, `src/lib/shacl/advisory.test.ts`,
+  `src/lib/shacl/shapes-lock.test.ts` — tests.
+
+Touched (wire-in only):
+
+- `src/lib/productivity-store.ts` — `StoreConfig.validate` opt-in + `onAdvisory`
+  ctor option; runs advisory validation AFTER each create/update write.
+- `src/lib/issues.ts` — `ISSUES_CONFIG.validate = true` (first opted-in
+  write-type); `issuesStore` forwards `onAdvisory`.
+- `src/components/use-productivity.ts` — default advisory surface (sonner
+  warning toast) wired into every store.
+- `next.config.ts` / `vitest.config.ts` — `.ttl` raw-text import (webpack
+  `asset/source` + a Vite transform).

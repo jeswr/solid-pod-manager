@@ -1,0 +1,22 @@
+{
+  "$comment": "Hash-pin manifest for vendored SHACL shapes (ADR-0014 Phase 1). Each entry pins a vendored shape's exact content (sha256) so a shape cannot change silently. `npm run check:shapes` recomputes every file's hash and fails on drift. To update a shape: re-vendor from `source.repo`, bump `source.commit`, recompute `sha256`, and commit the new lock in the SAME change as the .ttl. Do NOT hand-edit a vendored .ttl — it must stay byte-identical to its upstream source so the hash is verifiable against that source.",
+  "algorithm": "sha256",
+  "shapes": {
+    "shapes/issue.ttl": {
+      "sha256": "3e6a5058facbcc729d1ee4401870cd1e8f1e89bbd7a752fe9987af14e3cbb3cd",
+      "source": {
+        "repo": "jeswr/solid-issues",
+        "path": "shapes/issue.ttl",
+        "commit": "3787a5b4bf5b5584d01d7bb6d27731b0ed964688"
+      },
+      "describes": "The solid-issues issue data model: wf:Task (issue), wf:Message (comment), as:Announce (assignment notification), wf:State (configurable workflow status), prov:Activity (provenance log). PM writes wf:Task via src/lib/issues.ts, so this shape advisory-validates PM issue writes for federation compatibility with solid-issues.",
+      "targetClasses": [
+        "http://www.w3.org/2005/01/wf/flow#Task",
+        "http://www.w3.org/2005/01/wf/flow#Message",
+        "https://www.w3.org/ns/activitystreams#Announce",
+        "http://www.w3.org/2005/01/wf/flow#State",
+        "http://www.w3.org/ns/prov#Activity"
+      ]
+    }
+  }
+}

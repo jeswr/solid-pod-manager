@@ -37,6 +37,22 @@
  *            enumerated their Type Index for `wf:Task`), not free-text — so the
  *            URL we fetched is bounded to the authorized set.
  *
+ * OWNER-WRITE-ONLY (the refinement — solid-ai-coding lesson `18194f5`). "Resides
+ * in the source's storage" is NOT sufficient on its own: the boundary that
+ * matters is WHO COULD HAVE WRITTEN THE BYTES, not merely the URL. A friend's
+ * WORLD- or GROUP-appendable container (a public inbox, a shared writable
+ * folder) holds bytes a THIRD PARTY posted — so a stranger could plant a
+ * `wf:Task` there with `wf:assignee = <you>` claiming the friend assigned it.
+ * Therefore, on BOTH tiers, the task resource must additionally be in storage
+ * that ONLY THE EXPECTED PRINCIPAL can write (owner-write-only): its effective
+ * ACL must not grant `acl:Append`/`acl:Write` to a BROAD subject — public
+ * (`acl:agentClass foaf:Agent`), any-authenticated (`acl:AuthenticatedAgent`),
+ * an `acl:agentGroup`, or any other `acl:agentClass`. If the access cannot be
+ * determined (unreadable/ACP/parse error), we FAIL CLOSED and drop the task.
+ * The pure {@link verifyAssignedTask} takes the already-resolved owner-write-only
+ * boolean; the I/O that reads each resource's effective ACL lives in
+ * {@link resolveOwnerWriteOnly} so the trust decision stays unit-testable.
+ *
  * The discovery walk itself is constrained: we read Type Indexes ONLY from the
  * user's own profile and from the profiles of authorized agents. We never
  * dereference an arbitrary URL on the strength of pod content (a crafted
@@ -61,6 +77,11 @@ import { discoverRegistrations, type RegisteredLocation } from "./type-index.js"
 import { ISSUE_CLASS, parseIssue, type Issue } from "./issues.js";
 import { isInOwnPods } from "./pod-scope.js";
 import { listContainer } from "./pod-data.js";
+import {
+  WacResourceSharingBackend,
+  type AccessEntry,
+  type ResourceAccess,
+} from "./resource-acl.js";
 
 /**
  * A federated task surfaced in the "Assigned to me" view: the parsed task plus
@@ -120,6 +141,17 @@ export function buildAuthorizedSources(
 
 /** True for an absolute http(s) URL usable as a WebID (mirrors issues.isWebId). */
 function isHttpWebId(value: string): boolean {
+  return isHttpUrl(value);
+}
+
+/**
+ * True iff `value` is an absolute `http:`/`https:` URL. A task resource on any
+ * other scheme (`file:`, `data:`, `javascript:`, …) is never a real pod resource
+ * and must never be trusted/fetched — the verifier rejects it before any tier
+ * check (defence-in-depth on top of {@link isInOwnPods}, which also rejects
+ * non-http(s) targets). Pure.
+ */
+function isHttpUrl(value: string): boolean {
   try {
     const u = new URL(value);
     return u.protocol === "http:" || u.protocol === "https:";
@@ -139,6 +171,41 @@ export function isAssignedToMe(assignee: string | undefined, myWebId: string): b
 }
 
 /**
+ * OWNER-WRITE-ONLY predicate (pure). Given a resource's EFFECTIVE access entries
+ * (as built by {@link WacResourceSharingBackend.read}), decide whether the
+ * resource is writable by ONLY the named pod owner — i.e. NOT world- or
+ * group-appendable, so a third party could not have planted the bytes.
+ *
+ * The spoofable surface is a BROAD write/append grant — anything that lets
+ * someone OTHER than the pod owner add or change the bytes:
+ *   - `public` (`acl:agentClass foaf:Agent`) — anyone on the web,
+ *   - `authenticated` (`acl:AuthenticatedAgent`) — any logged-in agent,
+ *   - `group` (`acl:agentGroup`) — a (possibly attacker-controlled) group,
+ *   - `class` — any other unmodelled `acl:agentClass`.
+ * If ANY effective entry grants `write` OR `append` to one of those broad
+ * subjects, the resource is NOT owner-write-only (a stranger could have posted
+ * the task) and the claim there is untrusted. Named-agent (`agent`) and
+ * read-only/control grants don't make a container world-appendable, so they do
+ * not, by themselves, defeat owner-write-only.
+ *
+ * Conservative + fail-closed: the caller passes `undefined` when the access
+ * could not be determined, which this treats as NOT owner-write-only.
+ */
+export function isOwnerWriteOnly(entries: readonly AccessEntry[] | undefined): boolean {
+  if (!entries) return false; // access undetermined — fail closed.
+  for (const e of entries) {
+    const broad =
+      e.subject.kind === "public" ||
+      e.subject.kind === "authenticated" ||
+      e.subject.kind === "group" ||
+      e.subject.kind === "class";
+    if (!broad) continue;
+    if (e.modes.includes("write") || e.modes.includes("append")) return false;
+  }
+  return true;
+}
+
+/**
  * VERIFY a task's provenance against the trust model (pss-6ae). Returns the
  * trusted {@link AssignedTask} when the claim is authentic, or `undefined` to
  * REJECT (the task is dropped, never shown). Pure — no I/O; the caller supplies
@@ -146,15 +213,21 @@ export function isAssignedToMe(assignee: string | undefined, myWebId: string): b
  * under, that source's verified storage roots).
  *
  * The function fails CLOSED on every ambiguity:
+ *   - The `url` must be an absolute http(s) URL (a `file:`/`data:`/`javascript:`
+ *     scheme is never a real pod resource — reject before any tier check).
  *   - The task must actually be assigned to me (defensive re-check; the caller
  *     already filters, but provenance and assignment are verified together so a
  *     mis-wired caller cannot leak an unassigned task).
- *   - OWN-POD: `url` is within one of `ownStorages` → trusted (`own: true`,
- *     source = self). No further check; the user controls the bytes.
+ *   - OWN-POD: `url` is within one of `ownStorages` AND the resource is
+ *     OWNER-WRITE-ONLY (`ownerWriteOnly`) → trusted (`own: true`, source = self).
+ *     The owner-write-only gate is essential even on the own pod: a world-/group-
+ *     appendable own container (a public inbox) holds third-party bytes, so a
+ *     stranger could plant a self-addressed task there.
  *   - FOREIGN: `url` is NOT in an own pod. Then it is shown ONLY if the
  *     discovery `source` is an authorized assigner (`others`) AND `url` is
- *     within that source's OWN verified storage (`sourceStorages`). Otherwise
- *     REJECT — a foreign pod's bare claim is never trusted.
+ *     within that source's OWN verified storage (`sourceStorages`) AND the
+ *     resource is OWNER-WRITE-ONLY (only that source could have written it).
+ *     Otherwise REJECT — a foreign pod's bare claim is never trusted.
  *
  * @param url            - the task resource URL.
  * @param task           - the parsed task (must carry `wf:assignee`).
@@ -165,6 +238,11 @@ export function isAssignedToMe(assignee: string | undefined, myWebId: string): b
  * @param sourceStorages - the discovery source's verified `pim:storage` roots
  *   (read from the source's profile). Empty/irrelevant for own-pod tasks.
  * @param authorized     - the authorized-source set.
+ * @param ownerWriteOnly - whether the resource's effective ACL grants write/
+ *   append to ONLY the (single) pod owner — i.e. NOT world-/group-appendable.
+ *   The caller resolves this from the resource's effective access
+ *   ({@link resolveOwnerWriteOnly}); `false` (the fail-closed default) drops the
+ *   task. Applied on BOTH tiers.
  */
 export function verifyAssignedTask(opts: {
   url: string;
@@ -174,19 +252,31 @@ export function verifyAssignedTask(opts: {
   source: string;
   sourceStorages: readonly string[];
   authorized: AuthorizedSources;
+  ownerWriteOnly: boolean;
 }): AssignedTask | undefined {
-  const { url, task, myWebId, ownStorages, source, sourceStorages, authorized } = opts;
+  const { url, task, myWebId, ownStorages, source, sourceStorages, authorized, ownerWriteOnly } =
+    opts;
+
+  // Reject non-http(s) resources outright (file:/data:/javascript: etc.).
+  if (!isHttpUrl(url)) return undefined;
 
   // Defensive: provenance is only ever asserted for tasks assigned to me.
   if (!isAssignedToMe(task.assignee, myWebId)) return undefined;
 
-  // Tier 1 — OWN POD. The user controls these bytes; the assignment is authentic.
+  // OWNER-WRITE-ONLY gate (applies to BOTH tiers). A resource a third party
+  // could have written (world-/group-appendable) carries an untrusted claim,
+  // even inside the user's OWN pod. Fail closed when undetermined.
+  if (!ownerWriteOnly) return undefined;
+
+  // Tier 1 — OWN POD. The user controls these bytes (owner-write-only verified
+  // above); the assignment is authentic.
   if (isInOwnPods(url, ownStorages)) {
     return { url, task, own: true, source: myWebId };
   }
 
   // Tier 2 — FOREIGN POD. The bare claim is untrusted. Require an authorized
-  // assigner AND that the task resides in that assigner's OWN verified storage.
+  // assigner AND that the task resides in that assigner's OWN verified storage
+  // (owner-write-only already enforced above).
   const isAuthorizedSource = source === authorized.self || authorized.others.includes(source);
   if (!isAuthorizedSource) return undefined; // discovered under a non-authorized WebID — reject.
   if (source === authorized.self) {
@@ -253,6 +343,43 @@ async function readAssignedFromContainer(
  */
 function taskLocations(locations: RegisteredLocation[]): RegisteredLocation[] {
   return locations.filter((l) => l.forClass === ISSUE_CLASS);
+}
+
+/**
+ * Resolve whether `url` is OWNER-WRITE-ONLY — i.e. its effective WAC access does
+ * NOT grant write/append to any broad subject (public / authenticated / group /
+ * other agentClass). Reads the resource's effective access through the same
+ * vetted WAC backend the Sharing panel uses (typed accessors, never hand-parsed
+ * triples) and applies the pure {@link isOwnerWriteOnly} predicate.
+ *
+ * FAIL CLOSED: any failure to determine the access (ACL discovery/read error,
+ * an ACP `.acr` document we don't model, a parse error, an empty/absent ACL,
+ * etc.) returns `false` — the task is then dropped by {@link verifyAssignedTask}.
+ * An empty effective-access set is also treated as not-determinable rather than
+ * "no broad grants" so a server returning no rules can't be read as permissive.
+ *
+ * @param ownerWebId - the WebID the backend protects (the logged-in user). The
+ *   backend only reads access; the owner identity is for its self-lockout guard
+ *   and is irrelevant to a read, but it must be a non-empty WebID.
+ * @param fetchImpl  - test-only override; **omit in production**.
+ */
+async function resolveOwnerWriteOnly(
+  url: string,
+  ownerWebId: string,
+  fetchImpl?: typeof fetch,
+): Promise<boolean> {
+  let access: ResourceAccess;
+  try {
+    access = await new WacResourceSharingBackend(ownerWebId, fetchImpl).read(url);
+  } catch (e) {
+    logSkippedSource(url, e); // access undeterminable — fail closed (not owner-write-only).
+    return false;
+  }
+  // No effective rules at all → cannot prove owner-write-only. Fail closed: a
+  // server that returns an empty/absent ACL must not be read as "no broad
+  // grants" and thereby trusted.
+  if (access.entries.length === 0) return false;
+  return isOwnerWriteOnly(access.entries);
 }
 
 /**
@@ -432,19 +559,27 @@ async function readSourceTasks(opts: {
           logSkippedSource(loc.instance, e); // unreadable instance — skip this field only.
         }
       }
-      for (const { url, task } of found) {
-        collect(
-          verifyAssignedTask({
-            url,
-            task,
-            myWebId,
-            ownStorages,
-            source,
-            sourceStorages,
-            authorized,
-          }),
-        );
-      }
+      // Resolve each found task's OWNER-WRITE-ONLY status (one effective-ACL read
+      // per resource) before the pure provenance check. Done per task and
+      // isolated under allSettled so one resource's unreadable ACL never poisons
+      // a sibling; resolveOwnerWriteOnly already fails closed on any error.
+      await Promise.allSettled(
+        found.map(async ({ url, task }) => {
+          const ownerWriteOnly = await resolveOwnerWriteOnly(url, myWebId, fetchImpl);
+          collect(
+            verifyAssignedTask({
+              url,
+              task,
+              myWebId,
+              ownStorages,
+              source,
+              sourceStorages,
+              authorized,
+              ownerWriteOnly,
+            }),
+          );
+        }),
+      );
     }),
   );
 }

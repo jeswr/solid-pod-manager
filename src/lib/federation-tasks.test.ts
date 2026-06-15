@@ -4,6 +4,7 @@ import { Parser, Store } from "n3";
 import {
   buildAuthorizedSources,
   isAssignedToMe,
+  isOwnerWriteOnly,
   verifyAssignedTask,
   discoverAssignedTasks,
   sortAssigned,
@@ -131,6 +132,131 @@ function parseStore(body: string): Store {
   return new Store(new Parser().parse(body));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ACL fixtures — the owner-write-only gate reads each surfaced task's effective
+// ACL. These helpers let the mock pod web advertise + serve those ACLs.
+// ─────────────────────────────────────────────────────────────────────────────
+const ACL_NS = "http://www.w3.org/ns/auth/acl#";
+
+/** The conventional `.acl` slot URL for a resource (CSS default convention). */
+function aclSlot(resourceUrl: string): string {
+  return `${resourceUrl}.acl`;
+}
+
+/** A turtle Response that also advertises its ACL slot via `Link: rel="acl"`. */
+function withAclLink(body: string, resourceUrl: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "text/turtle",
+      etag: '"v1"',
+      link: `<${aclSlot(resourceUrl)}>; rel="acl"`,
+    },
+  });
+}
+
+/**
+ * An OWNER-WRITE-ONLY ACL for `resourceUrl`: `ownerWebId` has full control; the
+ * public has READ only (read never makes a resource appendable). isOwnerWriteOnly
+ * must return TRUE for this.
+ */
+function ownerWriteOnlyAcl(resourceUrl: string, ownerWebId: string): string {
+  return `
+    @prefix acl: <${ACL_NS}> .
+    @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+    <#owner> a acl:Authorization ;
+      acl:accessTo <${resourceUrl}> ;
+      acl:agent <${ownerWebId}> ;
+      acl:mode acl:Read, acl:Write, acl:Control .
+    <#public> a acl:Authorization ;
+      acl:accessTo <${resourceUrl}> ;
+      acl:agentClass foaf:Agent ;
+      acl:mode acl:Read .`;
+}
+
+/**
+ * A WORLD-APPENDABLE ACL for `resourceUrl` (a public inbox): the public can
+ * APPEND. isOwnerWriteOnly must return FALSE — anyone could have written it.
+ */
+function worldAppendableAcl(resourceUrl: string, ownerWebId: string): string {
+  return `
+    @prefix acl: <${ACL_NS}> .
+    @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+    <#owner> a acl:Authorization ;
+      acl:accessTo <${resourceUrl}> ;
+      acl:agent <${ownerWebId}> ;
+      acl:mode acl:Read, acl:Write, acl:Control .
+    <#public> a acl:Authorization ;
+      acl:accessTo <${resourceUrl}> ;
+      acl:agentClass foaf:Agent ;
+      acl:mode acl:Read, acl:Append .`;
+}
+
+/** A turtle ACL Response (with an ETag the read path tolerates). */
+function aclRes(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/turtle", etag: '"acl-v1"' },
+  });
+}
+
+/**
+ * The pod-owner WebID for a task URL, by origin convention in these fixtures
+ * (`https://bob.example/...` → Bob's WebID, etc.). The owner-write-only ACL
+ * grants this agent control.
+ */
+function ownerOf(url: string): string {
+  if (url.startsWith("https://alice.example/")) return ALICE;
+  if (url.startsWith("https://bob.example/")) return BOB;
+  if (url.startsWith("https://carol.example/")) return CAROL;
+  return MALLORY;
+}
+
+/** A leaf RDF resource (a task) — gets an ACL link + a default owner-only ACL. */
+function isLeafResource(url: string): boolean {
+  return url.endsWith(".ttl");
+}
+
+type RouteFn = (url: string) => Response | undefined;
+
+/**
+ * Wrap a per-test route table so the owner-write-only gate resolves:
+ *   - any leaf task resource (.ttl) GET gains a `Link: rel="acl"` header;
+ *   - the conventional `<resource>.acl` slot serves an OWNER-WRITE-ONLY ACL,
+ *     UNLESS the resource is listed in `appendable` (then a WORLD-APPENDABLE ACL
+ *     is served, modelling a public inbox — the spoof surface).
+ * The base route table handles everything else (profiles, indexes, containers).
+ */
+function wrapWithAcls(base: RouteFn, appendable: readonly string[] = []): typeof fetch {
+  const appendableSet = new Set(appendable);
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    // ACL slot for a leaf resource: owner-write-only, or world-appendable spoof.
+    if (url.endsWith(".acl")) {
+      const resource = url.slice(0, -".acl".length);
+      if (isLeafResource(resource)) {
+        const owner = ownerOf(resource);
+        return aclRes(
+          appendableSet.has(resource)
+            ? worldAppendableAcl(resource, owner)
+            : ownerWriteOnlyAcl(resource, owner),
+        );
+      }
+      // A non-leaf .acl (e.g. a container's) — let the base handle or 404.
+      return base(url) ?? new Response("nf", { status: 404 });
+    }
+    const res = base(url);
+    if (!res) return new Response("nf", { status: 404 });
+    // Decorate a leaf task resource response with its ACL link so the gate can
+    // discover + read its effective access. Containers/indexes are untouched.
+    if (res.status === 200 && isLeafResource(url)) {
+      const body = await res.clone().text();
+      return withAclLink(body, url);
+    }
+    return res;
+  }) as unknown as typeof fetch;
+}
+
 /** Build the Alice profile dataset for discoverAssignedTasks. */
 function aliceProfileDataset(knows: string[]): Store {
   return parseStore(
@@ -184,7 +310,7 @@ describe("verifyAssignedTask (untrusted-claim verification)", () => {
   const authorized = buildAuthorizedSources(ALICE, [BOB], [CAROL]);
   const baseTask: Issue = { title: "t", state: "open", assignee: ALICE };
 
-  it("TRUSTS an own-pod task assigned to me", () => {
+  it("TRUSTS an own-pod task assigned to me (owner-write-only)", () => {
     const v = verifyAssignedTask({
       url: `${ALICE_ISSUES}t1.ttl`,
       task: baseTask,
@@ -193,11 +319,12 @@ describe("verifyAssignedTask (untrusted-claim verification)", () => {
       source: ALICE,
       sourceStorages: [ALICE_POD],
       authorized,
+      ownerWriteOnly: true,
     });
     expect(v).toEqual({ url: `${ALICE_ISSUES}t1.ttl`, task: baseTask, own: true, source: ALICE });
   });
 
-  it("TRUSTS a foreign task in an AUTHORIZED friend's OWN verified storage", () => {
+  it("TRUSTS a foreign task in an AUTHORIZED friend's OWN verified storage (owner-write-only)", () => {
     const v = verifyAssignedTask({
       url: `${BOB_ISSUES}t1.ttl`,
       task: baseTask,
@@ -206,13 +333,50 @@ describe("verifyAssignedTask (untrusted-claim verification)", () => {
       source: BOB,
       sourceStorages: [BOB_POD],
       authorized,
+      ownerWriteOnly: true,
     });
     expect(v?.own).toBe(false);
     expect(v?.source).toBe(BOB);
   });
 
-  it("REJECTS a foreign task whose host pod is NOT an authorized source", () => {
-    // Mallory (a stranger) hosts a task claiming it is assigned to Alice.
+  it("REJECTS an own-pod task in a WORLD-/GROUP-appendable container (not owner-write-only)", () => {
+    // THE TIER-1 SPOOF: a public inbox INSIDE Alice's own pod holds bytes a
+    // stranger posted (`ownerWriteOnly: false`). A self-addressed task there is
+    // NOT authentic by location — drop it even though it is in her own storage.
+    const v = verifyAssignedTask({
+      url: `${ALICE_POD}inbox/spoof.ttl`,
+      task: baseTask,
+      myWebId: ALICE,
+      ownStorages: [ALICE_POD],
+      source: ALICE,
+      sourceStorages: [ALICE_POD],
+      authorized,
+      ownerWriteOnly: false,
+    });
+    expect(v).toBeUndefined();
+  });
+
+  it("REJECTS a foreign task in a friend's PUBLIC/group-appendable container (THE SPOOF)", () => {
+    // THE TIER-2 SPOOF: Bob (authorized) has a world-/group-appendable container
+    // (a public inbox). A stranger planted a `wf:Task` there with assignee=Alice
+    // claiming Bob assigned it. The URL IS under Bob's verified storage — only the
+    // owner-write-only gate (`ownerWriteOnly: false`) catches it. Must REJECT.
+    const v = verifyAssignedTask({
+      url: `${BOB_POD}inbox/planted.ttl`,
+      task: baseTask,
+      myWebId: ALICE,
+      ownStorages: [ALICE_POD],
+      source: BOB,
+      sourceStorages: [BOB_POD], // genuinely under Bob's storage…
+      authorized,
+      ownerWriteOnly: false, // …but anyone could have written it → reject.
+    });
+    expect(v).toBeUndefined();
+  });
+
+  it("REJECTS a foreign task whose host pod is NOT an authorized source (confused deputy)", () => {
+    // Mallory (a stranger) hosts a task claiming it is assigned to Alice. Even
+    // if the bytes were owner-write-only, the SOURCE is unauthorized → reject.
     const v = verifyAssignedTask({
       url: "https://mallory.example/issues/evil.ttl",
       task: baseTask,
@@ -221,13 +385,15 @@ describe("verifyAssignedTask (untrusted-claim verification)", () => {
       source: MALLORY,
       sourceStorages: ["https://mallory.example/"],
       authorized,
+      ownerWriteOnly: true,
     });
     expect(v).toBeUndefined();
   });
 
-  it("REJECTS a task NAMING an authorized friend but NOT in the friend's verified storage", () => {
+  it("REJECTS a task NAMING an authorized friend but NOT in the friend's verified storage (confused deputy)", () => {
     // Discovered under Bob (authorized) but the task URL is on a THIRD pod — a
-    // third party trying to ride Bob's trust. Provenance binding must reject it.
+    // third party trying to ride Bob's trust. Provenance binding must reject it
+    // even when the resource is owner-write-only on that third pod.
     const v = verifyAssignedTask({
       url: "https://evil.example/issues/spoof.ttl",
       task: baseTask,
@@ -236,6 +402,7 @@ describe("verifyAssignedTask (untrusted-claim verification)", () => {
       source: BOB,
       sourceStorages: [BOB_POD], // Bob's real storage does NOT contain evil.example
       authorized,
+      ownerWriteOnly: true,
     });
     expect(v).toBeUndefined();
   });
@@ -249,6 +416,7 @@ describe("verifyAssignedTask (untrusted-claim verification)", () => {
       source: BOB,
       sourceStorages: [BOB_POD],
       authorized,
+      ownerWriteOnly: true,
     });
     expect(v).toBeUndefined();
   });
@@ -264,8 +432,77 @@ describe("verifyAssignedTask (untrusted-claim verification)", () => {
       source: ALICE,
       sourceStorages: [ALICE_POD],
       authorized,
+      ownerWriteOnly: true,
     });
     expect(v).toBeUndefined();
+  });
+
+  it("REJECTS a non-http(s) scheme resource (file:/data:/javascript:) outright", () => {
+    for (const url of [
+      "file:///etc/passwd",
+      "data:text/turtle,<#it>",
+      "javascript:alert(1)",
+    ]) {
+      const v = verifyAssignedTask({
+        url,
+        task: baseTask,
+        myWebId: ALICE,
+        ownStorages: [ALICE_POD],
+        source: ALICE,
+        sourceStorages: [ALICE_POD],
+        authorized,
+        ownerWriteOnly: true,
+      });
+      expect(v).toBeUndefined();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// isOwnerWriteOnly — pure owner-write-only predicate over effective ACL entries.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("isOwnerWriteOnly", () => {
+  const owner = (modes: ("read" | "write" | "append" | "control")[]) =>
+    ({ subject: { kind: "agent", id: ALICE } as const, level: "owner" as const, modes, source: "direct" as const });
+
+  it("TRUE when only the owner has write (no broad grants)", () => {
+    expect(isOwnerWriteOnly([owner(["read", "write", "control"])])).toBe(true);
+  });
+
+  it("TRUE when public/group have READ only (read does not make it appendable)", () => {
+    expect(
+      isOwnerWriteOnly([
+        owner(["read", "write", "control"]),
+        { subject: { kind: "public", id: "" }, level: "view", modes: ["read"], source: "direct" },
+        { subject: { kind: "group", id: "https://g.example/grp#it" }, level: "view", modes: ["read"], source: "inherited" },
+      ]),
+    ).toBe(true);
+  });
+
+  it("FALSE when public can APPEND (world-appendable inbox)", () => {
+    expect(
+      isOwnerWriteOnly([
+        owner(["read", "write", "control"]),
+        { subject: { kind: "public", id: "" }, level: "add", modes: ["append"], source: "direct" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("FALSE when any-authenticated or a group can WRITE", () => {
+    expect(
+      isOwnerWriteOnly([
+        { subject: { kind: "authenticated", id: "" }, level: "edit", modes: ["read", "write", "append"], source: "direct" },
+      ]),
+    ).toBe(false);
+    expect(
+      isOwnerWriteOnly([
+        { subject: { kind: "group", id: "https://g.example/grp#it" }, level: "edit", modes: ["write"], source: "direct" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("FALSE (fail-closed) when the access is undetermined (undefined)", () => {
+    expect(isOwnerWriteOnly(undefined)).toBe(false);
   });
 });
 
@@ -313,8 +550,7 @@ describe("openAssignedCount", () => {
 describe("discoverAssignedTasks", () => {
   it("surfaces own-pod tasks assigned to me and skips ones assigned to others", async () => {
     const aliceDs = aliceProfileDataset([]);
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
@@ -323,8 +559,8 @@ describe("discoverAssignedTasks", () => {
       }
       if (url === `${ALICE_ISSUES}mine.ttl`) return ttl(taskTtl(`${ALICE_ISSUES}mine.ttl`, { title: "Mine", assignee: ALICE }));
       if (url === `${ALICE_ISSUES}bobs.ttl`) return ttl(taskTtl(`${ALICE_ISSUES}bobs.ttl`, { title: "Bob's", assignee: BOB }));
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -341,8 +577,7 @@ describe("discoverAssignedTasks", () => {
 
   it("surfaces a friend's task in the friend's verified storage (federation consume)", async () => {
     const aliceDs = aliceProfileDataset([BOB]); // Alice foaf:knows Bob
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       // Alice's index (no own tasks) — empty issues container.
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
@@ -357,8 +592,8 @@ describe("discoverAssignedTasks", () => {
       }
       if (url === BOB_ISSUES) return ttl(containerTtl(BOB_ISSUES, [`${BOB_ISSUES}forA.ttl`]));
       if (url === `${BOB_ISSUES}forA.ttl`) return ttl(taskTtl(`${BOB_ISSUES}forA.ttl`, { title: "Bob assigned Alice", assignee: ALICE }));
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -373,20 +608,61 @@ describe("discoverAssignedTasks", () => {
     expect(tasks[0].source).toBe(BOB);
   });
 
+  it("REJECTS a task planted in a friend's PUBLIC/group-appendable container (end-to-end spoof)", async () => {
+    // THE SPOOF the owner-write-only refinement closes: Bob (authorized) exposes a
+    // world-appendable container (a public inbox) registered for wf:Task. A
+    // STRANGER posted a task there with assignee=Alice, claiming Bob assigned it.
+    // The container IS within Bob's verified storage, so the prior provenance
+    // binding (residence-only) would have ACCEPTED it. With owner-write-only the
+    // resource's effective ACL grants the public Append → it is dropped.
+    const aliceDs = aliceProfileDataset([BOB]);
+    const BOB_INBOX = `${BOB_POD}inbox/`;
+    const PLANTED = `${BOB_INBOX}planted.ttl`;
+    const fetchImpl = wrapWithAcls(
+      (url: string): Response | undefined => {
+        if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
+          return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
+        }
+        if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, []));
+        if (url === BOB_DOC) {
+          return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
+        }
+        if (url === "https://bob.example/settings/privateTypeIndex.ttl") {
+          // Registered container is Bob's PUBLIC inbox — within his storage.
+          return ttl(indexTtl({ self: "https://bob.example/settings/privateTypeIndex.ttl", issuesContainer: BOB_INBOX }));
+        }
+        if (url === BOB_INBOX) return ttl(containerTtl(BOB_INBOX, [PLANTED]));
+        if (url === PLANTED) return ttl(taskTtl(PLANTED, { title: "Planted by a stranger", assignee: ALICE }));
+        return undefined;
+      },
+      [PLANTED], // the planted task's ACL is WORLD-APPENDABLE (the spoof).
+    );
+
+    const tasks = await discoverAssignedTasks({
+      myWebId: ALICE,
+      myProfile: readProfile(ALICE, aliceDs),
+      myProfileDataset: aliceDs,
+      contactWebIds: [],
+      fetchImpl,
+    });
+    // The claim sits under Bob's storage but the bytes are world-writable, so the
+    // owner-write-only gate drops it.
+    expect(tasks).toEqual([]);
+  });
+
   it("DOES NOT surface a stranger's task even when it claims to be assigned to me (pss-6ae)", async () => {
     // Alice knows no one. Even if the discovery machinery somehow reached
     // Mallory's pod, an unauthorized source is dropped. We model this by simply
     // not authorizing Mallory and confirming a foreign task never appears.
     const aliceDs = aliceProfileDataset([]); // no friends
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
       if (url === ALICE_ISSUES) return ttl(containerTtl(ALICE_ISSUES, []));
       // Mallory's pod exists, but Alice never authorized her, so it is never read.
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -406,8 +682,7 @@ describe("discoverAssignedTasks", () => {
     // on a THIRD pod (evil.example). It must be dropped before any read.
     const aliceDs = aliceProfileDataset([BOB]);
     const EVIL_CONTAINER = "https://evil.example/issues/";
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
@@ -419,8 +694,8 @@ describe("discoverAssignedTasks", () => {
         // Registration points at evil.example, NOT Bob's own storage.
         return ttl(indexTtl({ self: "https://bob.example/settings/privateTypeIndex.ttl", issuesContainer: EVIL_CONTAINER }));
       }
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -437,8 +712,7 @@ describe("discoverAssignedTasks", () => {
 
   it("includes a contact source and merges own + foreign, de-duplicated", async () => {
     const aliceDs = aliceProfileDataset([]); // Carol is a CONTACT, not a foaf:knows friend
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
@@ -452,8 +726,8 @@ describe("discoverAssignedTasks", () => {
       }
       if (url === CAROL_ISSUES) return ttl(containerTtl(CAROL_ISSUES, [`${CAROL_ISSUES}c.ttl`]));
       if (url === `${CAROL_ISSUES}c.ttl`) return ttl(taskTtl(`${CAROL_ISSUES}c.ttl`, { title: "From Carol", assignee: ALICE }));
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -470,8 +744,7 @@ describe("discoverAssignedTasks", () => {
 
   it("survives an unreadable friend profile (skips that source, keeps own tasks)", async () => {
     const aliceDs = aliceProfileDataset([BOB]);
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
@@ -479,8 +752,8 @@ describe("discoverAssignedTasks", () => {
       if (url === `${ALICE_ISSUES}own.ttl`) return ttl(taskTtl(`${ALICE_ISSUES}own.ttl`, { title: "Own", assignee: ALICE }));
       // Bob's profile is a 500 — discovery must not throw.
       if (url === BOB_DOC) return new Response("boom", { status: 500 });
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -497,8 +770,7 @@ describe("discoverAssignedTasks", () => {
     // source must NOT sink the aggregate (the MEDIUM finding): own-pod tasks AND
     // the other readable source must still render.
     const aliceDs = aliceProfileDataset([BOB]); // Bob is a friend; Carol below is a contact
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       // Alice's own pod: one task assigned to her.
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
@@ -519,8 +791,8 @@ describe("discoverAssignedTasks", () => {
       }
       if (url === CAROL_ISSUES) return ttl(containerTtl(CAROL_ISSUES, [`${CAROL_ISSUES}c.ttl`]));
       if (url === `${CAROL_ISSUES}c.ttl`) return ttl(taskTtl(`${CAROL_ISSUES}c.ttl`, { title: "From Carol", assignee: ALICE }));
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -540,8 +812,7 @@ describe("discoverAssignedTasks", () => {
     // (404/403 are swallowed deeper; a 500 exercises the throw path that the
     // per-source guard must catch). readSourceTasks must not sink Alice's own tasks.
     const aliceDs = aliceProfileDataset([BOB]);
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
@@ -556,8 +827,8 @@ describe("discoverAssignedTasks", () => {
       // Bob's task container errors with a 500 — readAssignedFromContainer
       // re-throws it; the per-source guard must catch + skip fail-closed.
       if (url === BOB_ISSUES) return new Response("server error", { status: 500 });
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -580,8 +851,7 @@ describe("discoverAssignedTasks", () => {
     const aliceDs = aliceProfileDataset([BOB]);
     const BOB_BROKEN = `${BOB_POD}broken/`;
     const BOB_HEALTHY = `${BOB_POD}healthy/`;
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
@@ -602,8 +872,8 @@ describe("discoverAssignedTasks", () => {
       // Healthy container: a task assigned to Alice, in Bob's verified storage.
       if (url === BOB_HEALTHY) return ttl(containerTtl(BOB_HEALTHY, [`${BOB_HEALTHY}forA.ttl`]));
       if (url === `${BOB_HEALTHY}forA.ttl`) return ttl(taskTtl(`${BOB_HEALTHY}forA.ttl`, { title: "Healthy from Bob", assignee: ALICE }));
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -627,8 +897,7 @@ describe("discoverAssignedTasks", () => {
     // Alice's own private type-index 500s, but she has a healthy friend Bob with a
     // task for her. The own-pod read is wrapped fail-closed; Bob's must still show.
     const aliceDs = aliceProfileDataset([BOB]);
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") return new Response("boom", { status: 500 });
       if (url === BOB_DOC) {
         return ttl(profileTtl({ webId: BOB, storage: BOB_POD, privateIndex: "https://bob.example/settings/privateTypeIndex.ttl" }));
@@ -638,8 +907,8 @@ describe("discoverAssignedTasks", () => {
       }
       if (url === BOB_ISSUES) return ttl(containerTtl(BOB_ISSUES, [`${BOB_ISSUES}forA.ttl`]));
       if (url === `${BOB_ISSUES}forA.ttl`) return ttl(taskTtl(`${BOB_ISSUES}forA.ttl`, { title: "Bob assigned Alice", assignee: ALICE }));
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -658,8 +927,7 @@ describe("discoverAssignedTasks", () => {
     // container. The off-storage instance is skipped; the container task survives.
     const aliceDs = aliceProfileDataset([BOB]);
     const EVIL_INSTANCE = "https://evil.example/tasks/spoof.ttl";
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
@@ -678,8 +946,8 @@ describe("discoverAssignedTasks", () => {
       }
       if (url === BOB_ISSUES) return ttl(containerTtl(BOB_ISSUES, [`${BOB_ISSUES}forA.ttl`]));
       if (url === `${BOB_ISSUES}forA.ttl`) return ttl(taskTtl(`${BOB_ISSUES}forA.ttl`, { title: "Valid from Bob", assignee: ALICE }));
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,
@@ -701,8 +969,7 @@ describe("discoverAssignedTasks", () => {
     const aliceDs = aliceProfileDataset([BOB]);
     const EVIL_CONTAINER = "https://evil.example/issues/";
     const VALID_INSTANCE = `${BOB_POD}tasks/forA.ttl`;
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
+    const fetchImpl = wrapWithAcls((url: string): Response | undefined => {
       if (url === "https://alice.example/settings/privateTypeIndex.ttl") {
         return ttl(indexTtl({ self: "https://alice.example/settings/privateTypeIndex.ttl", issuesContainer: ALICE_ISSUES }));
       }
@@ -720,8 +987,8 @@ describe("discoverAssignedTasks", () => {
         );
       }
       if (url === VALID_INSTANCE) return ttl(taskTtl(VALID_INSTANCE, { title: "Valid instance from Bob", assignee: ALICE }));
-      return new Response("nf", { status: 404 });
-    }) as unknown as typeof fetch;
+      return undefined;
+    });
 
     const tasks = await discoverAssignedTasks({
       myWebId: ALICE,

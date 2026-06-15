@@ -9,19 +9,22 @@
  * (AGENTS.md §Reading data); the trust model lives entirely in `lib/`.
  *
  * Stale-while-revalidate (offline-first first-paint): this goes through the
- * shared {@link useSwrRead} cache (keyed {@link ASSIGNED_TASKS_KEY}), so
+ * shared {@link useSwrRead} cache (keyed {@link assignedTasksKey}), so
  * navigating away and back — or a COLD OPEN / app reopen (the durable snapshot)
  * — paints the last-known assigned list INSTANTLY and revalidates in the
  * background, instead of re-running the full profile→contacts→cross-pod
- * discovery chain behind a spinner every time. The cache is WebID-scoped and the
- * pod root is watched so a change anywhere invalidates + refreshes.
+ * discovery chain behind a spinner every time. The cache is WebID-scoped AND
+ * storage-scoped (the key carries `activeStorage`), and the pod root is watched
+ * so a change anywhere invalidates + refreshes.
  *
- * The model carries a real `Date` (`AssignedTask.task.created`), so its durable
- * key registers the {@link file://../lib/durable-cache.ts dateRevivingCodec} —
- * the cached snapshot hydrates type-faithfully (Dates, not ISO strings) on a
- * cold open. The TRUST/verification model is NOT touched: the cache stores only
- * what `discoverAssignedTasks` already verified and returned, so a hydrated
- * snapshot can never surface a task the backend would not have surfaced fresh.
+ * The model carries real `Date` fields (`AssignedTask.task.created`/`.endedAt`)
+ * NEXT TO user-controlled strings (`task.title`/`description`), so its durable
+ * key registers the FIELD-AWARE {@link file://../lib/durable-cache.ts assignedTasksCodec}
+ * — which revives ONLY those two known date fields and leaves a date-looking
+ * title as a string. The cached snapshot hydrates type-faithfully on a cold open.
+ * The TRUST/verification model is NOT touched: the cache stores only what
+ * `discoverAssignedTasks` already verified and returned, so a hydrated snapshot
+ * can never surface a task the backend would not have surfaced fresh.
  */
 import { useCallback } from "react";
 import { useSession } from "@/components/session-provider";
@@ -29,15 +32,21 @@ import { useSwrRead } from "@/components/use-swr-read";
 import { freshRdf } from "@/lib/rdf-read";
 import { readProfile } from "@/lib/profile";
 import { contactsStore } from "@/lib/contacts";
+import {
+  ASSIGNED_TASKS_KEY_PREFIX,
+  assignedTasksKey,
+} from "@/lib/durable-cache";
 import { discoverAssignedTasks, type AssignedTask } from "@/lib/federation-tasks";
 import type { RevalidatableState } from "@/components/use-pod-data";
 
-/**
- * The SWR / durable cache key for the assigned-tasks model. MUST stay in sync
- * with the `assigned-tasks` codec entry in {@link file://../lib/durable-cache.ts}
- * — they are two ends of the same persisted snapshot.
- */
-export const ASSIGNED_TASKS_KEY = "assigned-tasks";
+// The storage-scoped cache-key helpers live in the durable layer (so they can be
+// unit-tested without this `"use client"` React module); re-export them here as
+// the assigned-tasks model's public key surface. The full key is
+// `assigned-tasks:<activeStorage>` — storage-scoped so a WebID with more than one
+// storage gets a SEPARATE cache slot per storage, and switching storage CHANGES
+// the key (which re-runs useSwrRead's key-dependent effect) rather than serving
+// the other storage's stale list (roborev finding, use-federation-tasks:78).
+export { ASSIGNED_TASKS_KEY_PREFIX, assignedTasksKey };
 
 /**
  * List the tasks assigned to the logged-in user across their own pods and the
@@ -79,8 +88,11 @@ export function useAssignedTasks(): RevalidatableState<AssignedTask[]> & { reloa
   );
 
   // Until a storage is known, read nothing (an empty key is a no-op in useSwrRead)
-  // so we never cache an empty list under a half-initialised session.
-  const key = activeStorage ? ASSIGNED_TASKS_KEY : "";
+  // so we never cache an empty list under a half-initialised session. The key is
+  // storage-scoped, so switching storage CHANGES the key — which re-runs the
+  // useSwrRead revalidation effect (it depends on `key`) against the new pod and
+  // hydrates that storage's OWN snapshot, never a stale cross-storage hit.
+  const key = activeStorage ? assignedTasksKey(activeStorage) : "";
   const { data, error, loading, revalidating, reload } = useSwrRead<AssignedTask[]>(key, fetcher, {
     // Watch the pod root so an edit/add/delete anywhere invalidates + refreshes.
     topicUrl: activeStorage,

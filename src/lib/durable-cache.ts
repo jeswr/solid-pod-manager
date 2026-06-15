@@ -140,10 +140,18 @@ export function reviveDatesDeep<T>(raw: JsonValue): T {
 }
 
 /**
- * A codec for a model whose ONLY non-plain fields are `Date`s. `encode` is the
- * identity (`JSON.stringify` lowers a `Date` to its ISO string automatically);
- * `decode` deep-revives ISO-datetime strings back into `Date`s. Use this for any
- * future model that genuinely carries `Date` fields, so it hydrates type-faithfully.
+ * A codec for a model whose ONLY non-plain fields are `Date`s AND none of whose
+ * STRING fields can ever legitimately hold an ISO-date-looking value. `encode` is
+ * the identity (`JSON.stringify` lowers a `Date` to its ISO string automatically);
+ * `decode` deep-revives EVERY ISO-datetime string back into a `Date`.
+ *
+ * DANGER (roborev finding, durable-cache:187): this revives indiscriminately, so
+ * it MUST NOT be used for any model carrying USER-CONTROLLED string fields — a
+ * user could legitimately title something "2026-01-01T00:00:00Z", and this codec
+ * would hydrate that title as a `Date`, corrupting the model and crashing any
+ * `.trim()` on it after a cold open. For such a model, write a FIELD-AWARE codec
+ * (see {@link assignedTasksCodec}) that revives only the known real date fields.
+ * Only use this when every string field is system-generated and non-date.
  */
 export function dateRevivingCodec<T>(): DurableCodec<T> {
   return {
@@ -151,6 +159,82 @@ export function dateRevivingCodec<T>(): DurableCodec<T> {
     decode: (raw) => reviveDatesDeep<T>(raw),
   };
 }
+
+/**
+ * Revive a single ISO-8601-datetime string into a `Date`, leaving anything else
+ * (incl. a non-date string, `undefined`, or a malformed datetime) untouched.
+ * The narrow, FIELD-TARGETED counterpart to {@link reviveDatesDeep} — used by a
+ * field-aware codec to revive ONLY the fields it KNOWS are dates.
+ */
+function reviveDateField(v: unknown): unknown {
+  if (typeof v !== "string" || !ISO_DATE.test(v)) return v;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? v : d;
+}
+
+/**
+ * The FIELD-AWARE codec for the `assigned-tasks` model — an `AssignedTask[]`
+ * (see {@link file://./federation-tasks.ts}). It revives ONLY the two known real
+ * `Date` fields on each item's nested `task` (`task.created` and `task.endedAt`,
+ * from `dct:created` / `prov:endedAtTime`) and leaves EVERY other field as the
+ * type `JSON.parse` produced — crucially the USER-CONTROLLED strings `task.title`
+ * and `task.description`, which can legitimately look like an ISO date.
+ *
+ * Why this exists (roborev finding, durable-cache:187): the generic
+ * {@link dateRevivingCodec} revives every date-shaped string anywhere in the
+ * object, so a task titled "2026-01-01T00:00:00Z" would hydrate its `title` as a
+ * `Date` on a cold open, and the assigned page's `it.title.trim()` would then
+ * throw. Reviving by KNOWN FIELD instead of by SHAPE makes user strings stay
+ * strings, so the hydrated model is type-faithful and never crashes the render.
+ *
+ * `encode` is the identity (`JSON.stringify` lowers each `Date` to its ISO
+ * string); `decode` walks the array and rebuilds each item with its two date
+ * fields revived. Non-array / malformed input degrades to an empty list (the
+ * caller treats a miss the same as no cache).
+ */
+export function assignedTasksCodec<T>(): DurableCodec<T> {
+  return {
+    encode: (value) => value as unknown as JsonValue,
+    decode: (raw) => {
+      if (!Array.isArray(raw)) return [] as unknown as T;
+      const out = raw.map((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+        const rec = item as Record<string, unknown>;
+        const task = rec.task;
+        if (!task || typeof task !== "object" || Array.isArray(task)) return item;
+        const taskRec = task as Record<string, unknown>;
+        // Revive ONLY the two real date fields, and only when actually present —
+        // never materialise an absent optional. Every OTHER field, including the
+        // user-controlled `title`/`description` strings, is left exactly as parsed
+        // (so a title that looks like an ISO date stays a string, not a Date).
+        const revivedTask: Record<string, unknown> = { ...taskRec };
+        if ("created" in taskRec) revivedTask.created = reviveDateField(taskRec.created);
+        if ("endedAt" in taskRec) revivedTask.endedAt = reviveDateField(taskRec.endedAt);
+        return { ...rec, task: revivedTask };
+      });
+      return out as unknown as T;
+    },
+  };
+}
+
+/**
+ * The SWR / durable cache key PREFIX for the "Assigned to me" federation view.
+ * The full key is storage-scoped (see {@link assignedTasksKey}) so a WebID with
+ * MORE THAN ONE storage gets a SEPARATE cache slot per storage. Lives here (the
+ * durable layer) so it can be unit-tested without the `"use client"` React hook
+ * that consumes it; re-exported from `use-federation-tasks.ts`.
+ */
+export const ASSIGNED_TASKS_KEY_PREFIX = "assigned-tasks";
+
+/**
+ * The full, storage-scoped durable/SWR cache key for the assigned-tasks model:
+ * `assigned-tasks:<activeStorage>`. Different storage ⇒ different key ⇒ a
+ * different cache slot (and `useSwrRead` re-runs because the key changed), so
+ * switching pods can never serve another storage's stale assigned list (roborev
+ * finding, use-federation-tasks:78). Matched by the `prefix` codec rule below.
+ */
+export const assignedTasksKey = (activeStorage: string): string =>
+  `${ASSIGNED_TASKS_KEY_PREFIX}:${activeStorage}`;
 
 /**
  * The codec registry — the SINGLE place that declares which durable keys may
@@ -166,12 +250,16 @@ export function dateRevivingCodec<T>(): DurableCodec<T> {
  *
  * NOTE: the four JSON-plain models below (their timestamps are ISO strings, not
  * `Date`s) use {@link jsonCodec}. The `assigned-tasks` model is the FIRST that
- * genuinely carries a `Date` field (`AssignedTask.task.created`, a real `Date`
- * revived from `xsd:dateTime`), so it uses {@link dateRevivingCodec} — proving
- * out the codec seam this registry exists for. If a JSON-plain model later gains
- * a `Date`/`Set`/`Map`/`URL` field, switch its codec here (e.g. to
- * {@link dateRevivingCodec}) or drop it to memory-only — never let it ride the
- * identity codec with a non-plain field.
+ * genuinely carries `Date` fields (`AssignedTask.task.created`/`.endedAt`, real
+ * `Date`s revived from `xsd:dateTime`) ALONGSIDE user-controlled strings
+ * (`task.title`/`description`), so it uses the FIELD-AWARE
+ * {@link assignedTasksCodec} (NOT the generic {@link dateRevivingCodec}, which
+ * would revive a date-looking title into a `Date` and crash the render). Its key
+ * is `assigned-tasks:<activeStorage>` (storage-scoped — built by
+ * {@link assignedTasksKey}), so it matches by `prefix`. If a JSON-plain model later gains a
+ * `Date`/`Set`/`Map`/`URL` field, switch its codec here (a field-aware codec when
+ * it also has user strings, else {@link dateRevivingCodec}) or drop it to
+ * memory-only — never let it ride the identity codec with a non-plain field.
  */
 interface CodecRule {
   match: { exact: string } | { prefix: string };
@@ -182,12 +270,15 @@ const CODECS: readonly CodecRule[] = [
   { match: { exact: "connected-apps" }, codec: jsonCodec() },
   { match: { exact: "category-summaries" }, codec: jsonCodec() },
   { match: { exact: "recent-activity" }, codec: jsonCodec() },
-  // The "Assigned to me" federation view. Its only non-plain field is the nested
-  // `task.created` Date, so it round-trips via the date-reviving codec (encode is
-  // the identity — JSON.stringify lowers a Date to its ISO string; decode revives
-  // those ISO strings to Dates). Keep the cache-key string in sync with
-  // {@link file://../components/use-federation-tasks.ts ASSIGNED_TASKS_KEY}.
-  { match: { exact: "assigned-tasks" }, codec: dateRevivingCodec() },
+  // The "Assigned to me" federation view. The key is storage-scoped
+  // (`assigned-tasks:<activeStorage>`) so two storages of one WebID never share a
+  // slot, hence a PREFIX match. It carries real `Date` fields (`task.created` /
+  // `task.endedAt`) NEXT TO user-controlled strings (`task.title`/`description`)
+  // that can look like ISO dates, so it uses the FIELD-AWARE assignedTasksCodec —
+  // never the generic date reviver (which would corrupt a date-looking title into
+  // a Date and crash the render). The prefix MUST equal ASSIGNED_TASKS_KEY_PREFIX
+  // (both defined above) — the codec and the key are two ends of one snapshot.
+  { match: { prefix: ASSIGNED_TASKS_KEY_PREFIX }, codec: assignedTasksCodec() },
   { match: { prefix: "category-items:" }, codec: jsonCodec() },
 ];
 

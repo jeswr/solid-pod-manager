@@ -237,3 +237,41 @@ export class ResourceDeleteError extends PodDataError {
     this.status = status;
   }
 }
+
+/** Why a cross-pod task assignment ({@link import("./assign-task.js").assignTask}) was rejected. */
+export type AssignReason =
+  /** The assignee is not an absolute http(s) WebID. */
+  | "invalid-assignee"
+  /** The task payload was malformed (e.g. an empty title). */
+  | "invalid-task"
+  /**
+   * The minimal WAC read-grant for the assignee could not be set — the task was
+   * written but the assignee would be unable to read it. FATAL (distinct from a
+   * best-effort notification failure, which is non-fatal).
+   */
+  | "grant-failed";
+
+/**
+ * A cross-pod task assignment was rejected. Carries a typed {@link AssignReason}
+ * so the UI branches on the reason, never on the message string. Note: a FAILED
+ * NOTIFICATION is NOT an `AssignError` — the notify is best-effort and reported
+ * via `AssignTaskResult.notified`, never thrown.
+ */
+export class AssignError extends PodDataError {
+  readonly reason: AssignReason;
+  /** The offending value (assignee WebID, task detail, or task URL). */
+  readonly detail: string;
+  constructor(reason: AssignReason, detail: string, options?: { cause?: unknown }) {
+    super(MESSAGE_FOR_ASSIGN[reason], options);
+    this.name = "AssignError";
+    this.reason = reason;
+    this.detail = detail;
+  }
+}
+
+const MESSAGE_FOR_ASSIGN: Record<AssignReason, string> = {
+  "invalid-assignee": "The person you're assigning to must have a WebID (an https:// URL).",
+  "invalid-task": "This task can't be assigned — please give it a title.",
+  "grant-failed":
+    "The task was created but couldn't be shared with the assignee. Please try again.",
+};

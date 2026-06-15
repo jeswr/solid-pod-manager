@@ -43,9 +43,12 @@ import type { RevalidatableState } from "@/components/use-pod-data";
 // unit-tested without this `"use client"` React module); re-export them here as
 // the assigned-tasks model's public key surface. The full key is
 // `assigned-tasks:<activeStorage>` — storage-scoped so a WebID with more than one
-// storage gets a SEPARATE cache slot per storage, and switching storage CHANGES
-// the key (which re-runs useSwrRead's key-dependent effect) rather than serving
-// the other storage's stale list (roborev finding, use-federation-tasks:78).
+// storage gets a SEPARATE cache slot per storage. Switching storage CHANGES the
+// key, and `useSwrRead` resets its visible `data` SYNCHRONOUSLY when the key
+// changes (derive-state-during-render, `deriveSwrInitialState`) — so a storage
+// switch reflects the new storage's OWN cache immediately and never paints the
+// other storage's stale list, even for one frame (roborev finding,
+// use-federation-tasks via useSwrRead).
 export { ASSIGNED_TASKS_KEY_PREFIX, assignedTasksKey };
 
 /**
@@ -89,9 +92,10 @@ export function useAssignedTasks(): RevalidatableState<AssignedTask[]> & { reloa
 
   // Until a storage is known, read nothing (an empty key is a no-op in useSwrRead)
   // so we never cache an empty list under a half-initialised session. The key is
-  // storage-scoped, so switching storage CHANGES the key — which re-runs the
-  // useSwrRead revalidation effect (it depends on `key`) against the new pod and
-  // hydrates that storage's OWN snapshot, never a stale cross-storage hit.
+  // storage-scoped, so switching storage CHANGES the key — and useSwrRead resets
+  // its visible state synchronously on a key change (then revalidates against the
+  // new pod and hydrates that storage's OWN snapshot), never a stale cross-storage
+  // hit, not even for one paint.
   const key = activeStorage ? assignedTasksKey(activeStorage) : "";
   const { data, error, loading, revalidating, reload } = useSwrRead<AssignedTask[]>(key, fetcher, {
     // Watch the pod root so an edit/add/delete anywhere invalidates + refreshes.

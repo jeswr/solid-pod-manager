@@ -25,6 +25,7 @@ import { asContainerUrl, breadcrumbs, type Crumb } from "@/lib/files";
 import { useFilesScope, useFolder } from "@/components/use-files";
 import { FileRow } from "@/components/file-row";
 import { FileToolbar, uploadMany } from "@/components/file-actions";
+import { LaunchInApp } from "@/components/launch-in-app";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -115,7 +116,10 @@ function FolderContents({ current, root }: { current: string; root: string }) {
             </p>
           </div>
         </div>
-        <FileToolbar container={current} onChange={reload} />
+        <div className="flex flex-wrap items-center gap-2">
+          <LaunchInApp app="drive" />
+          <FileToolbar container={current} onChange={reload} />
+        </div>
       </header>
 
       {/* The listing is a drop target for upload. */}

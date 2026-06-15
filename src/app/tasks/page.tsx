@@ -13,6 +13,7 @@ import { CalendarClock, Download, ListTodo, Plus, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { tasksStore, sortTasks, isOverdue, type Task } from "@/lib/tasks";
 import { useStore, useItems } from "@/components/use-productivity";
+import { LaunchInApp } from "@/components/launch-in-app";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Button } from "@/components/ui/button";
@@ -138,6 +139,7 @@ export default function TasksPage() {
             aria-hidden="true"
             tabIndex={-1}
           />
+          <LaunchInApp app="issues" />
           <Button variant="outline" onClick={() => fileInput.current?.click()} disabled={busy || !store}>
             <Upload aria-hidden="true" />
             Import

@@ -23,6 +23,7 @@ import { AssignError } from "@/lib/errors";
 import { useStore, useItems } from "@/components/use-productivity";
 import { useSession } from "@/components/session-provider";
 import { PeoplePicker } from "@/components/people-picker";
+import { LaunchInApp } from "@/components/launch-in-app";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Button } from "@/components/ui/button";
@@ -74,6 +75,7 @@ export default function IssuesPage() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
+          <LaunchInApp app="issues" />
           <Button
             type="button"
             variant="outline"

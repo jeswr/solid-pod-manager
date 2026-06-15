@@ -13,6 +13,8 @@ import {
   useCategoryItems,
 } from "@/components/use-pod-data";
 import { categoryIcon } from "@/components/category-icon";
+import { LaunchInApp } from "@/components/launch-in-app";
+import { podAppsForCategory } from "@/lib/pod-apps";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRow, ItemRowSkeleton } from "@/components/item-row";
 
@@ -23,6 +25,7 @@ export function CategoryView({ categoryId }: { categoryId: string }) {
   const summaryState = useCategorySummary(categoryId);
   const itemsState = useCategoryItems(summaryState.data);
   const Icon = categoryIcon(category.icon);
+  const apps = podAppsForCategory(category.id);
 
   const loading = summaryState.loading || itemsState.loading;
   const error = summaryState.error ?? itemsState.error;
@@ -45,20 +48,29 @@ export function CategoryView({ categoryId }: { categoryId: string }) {
         </ol>
       </nav>
 
-      <header className="flex items-start gap-4">
-        <span
-          aria-hidden="true"
-          className="grid size-12 shrink-0 place-items-center rounded-xl bg-accent text-accent-foreground"
-        >
-          <Icon className="size-6" />
-        </span>
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{category.label}</h1>
-          <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
-            <ShieldCheck className="size-4 shrink-0 text-primary" aria-hidden="true" />
-            {category.assurance}
-          </p>
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-start gap-4">
+          <span
+            aria-hidden="true"
+            className="grid size-12 shrink-0 place-items-center rounded-xl bg-accent text-accent-foreground"
+          >
+            <Icon className="size-6" />
+          </span>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">{category.label}</h1>
+            <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
+              <ShieldCheck className="size-4 shrink-0 text-primary" aria-hidden="true" />
+              {category.assurance}
+            </p>
+          </div>
         </div>
+        {apps.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            {apps.map((a) => (
+              <LaunchInApp key={a.key} app={a.key} />
+            ))}
+          </div>
+        )}
       </header>
 
       {error ? (

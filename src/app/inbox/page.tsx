@@ -16,6 +16,7 @@ import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { useInbox } from "@/components/use-inbox";
 import { useResourceNotifications } from "@/components/use-resource-notifications";
+import { LaunchInApp } from "@/components/launch-in-app";
 import { PeoplePicker } from "@/components/people-picker";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
@@ -54,10 +55,13 @@ export default function InboxPage() {
             </p>
           </div>
         </div>
-        <Button onClick={() => setComposing((c) => !c)} variant={composing ? "secondary" : "default"}>
-          <Send aria-hidden="true" />
-          {composing ? "Close" : "Send notification"}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <LaunchInApp app="mail" />
+          <Button onClick={() => setComposing((c) => !c)} variant={composing ? "secondary" : "default"}>
+            <Send aria-hidden="true" />
+            {composing ? "Close" : "Send notification"}
+          </Button>
+        </div>
       </header>
 
       {composing && webId && (

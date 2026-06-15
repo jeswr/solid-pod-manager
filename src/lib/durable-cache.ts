@@ -164,9 +164,12 @@ export function dateRevivingCodec<T>(): DurableCodec<T> {
  * Order matters only in that {@link codecFor} returns the FIRST match; keep
  * exact entries above any prefix that could also match them.
  *
- * NOTE: the four models below are all JSON-plain TODAY (their timestamps are ISO
- * strings, not `Date`s), so they use {@link jsonCodec}. If one later gains a
- * `Date`/`Set`/`Map`/`URL` field, switch its codec here (e.g. to
+ * NOTE: the four JSON-plain models below (their timestamps are ISO strings, not
+ * `Date`s) use {@link jsonCodec}. The `assigned-tasks` model is the FIRST that
+ * genuinely carries a `Date` field (`AssignedTask.task.created`, a real `Date`
+ * revived from `xsd:dateTime`), so it uses {@link dateRevivingCodec} — proving
+ * out the codec seam this registry exists for. If a JSON-plain model later gains
+ * a `Date`/`Set`/`Map`/`URL` field, switch its codec here (e.g. to
  * {@link dateRevivingCodec}) or drop it to memory-only — never let it ride the
  * identity codec with a non-plain field.
  */
@@ -179,6 +182,12 @@ const CODECS: readonly CodecRule[] = [
   { match: { exact: "connected-apps" }, codec: jsonCodec() },
   { match: { exact: "category-summaries" }, codec: jsonCodec() },
   { match: { exact: "recent-activity" }, codec: jsonCodec() },
+  // The "Assigned to me" federation view. Its only non-plain field is the nested
+  // `task.created` Date, so it round-trips via the date-reviving codec (encode is
+  // the identity — JSON.stringify lowers a Date to its ISO string; decode revives
+  // those ISO strings to Dates). Keep the cache-key string in sync with
+  // {@link file://../components/use-federation-tasks.ts ASSIGNED_TASKS_KEY}.
+  { match: { exact: "assigned-tasks" }, codec: dateRevivingCodec() },
   { match: { prefix: "category-items:" }, codec: jsonCodec() },
 ];
 

@@ -211,6 +211,10 @@ describe("durable-cache codec registry (serialisation safety, roborev finding)",
     // category-items is keyed with a dynamic category-id suffix (prefix match).
     expect(codecFor("category-items:identity")).not.toBeNull();
     expect(codecFor("category-items:anything-here")).not.toBeNull();
+    // The "Assigned to me" federation view (use-federation-tasks) — a real
+    // Date-carrying model, so it MUST be registered (else it would silently be
+    // memory-only and never hydrate on a cold open).
+    expect(codecFor("assigned-tasks")).not.toBeNull();
   });
 
   it("has NO codec for an unregistered key (it is memory-only)", () => {
@@ -332,8 +336,8 @@ describe("durable-cache real round-trip (write→localStorage→read)", () => {
   it("a model with a real Date field round-trips to EQUAL Dates via a date-reviving key", () => {
     // Register a temporary date-reviving codec for a throwaway key by exercising
     // the codec directly through the same JSON boundary readDurableCache uses.
-    // (The four production keys are JSON-plain today; this proves the seam works
-    //  for any FUTURE model that carries a real Date and registers a codec.)
+    // The `assigned-tasks` production key now uses this codec for real (see the
+    // round-trip below); this case proves the seam for any other FUTURE model.
     interface DatedModel {
       label: string;
       at: Date;
@@ -353,5 +357,57 @@ describe("durable-cache real round-trip (write→localStorage→read)", () => {
     expect(decoded.at).toBeInstanceOf(Date);
     expect(decoded.at.getTime()).toBe(model.at.getTime());
     expect(decoded).toEqual(model);
+  });
+
+  it("assigned-tasks (a real AssignedTask[] with a nested Date) round-trips through real storage", () => {
+    // The shape the "Assigned to me" federation view caches (use-federation-tasks):
+    // an AssignedTask carries `task.created` as a real Date revived from
+    // xsd:dateTime. Mirror the model here (no import needed — we assert the
+    // SERIALISATION contract, not the discovery logic) and round-trip it through
+    // the genuine write→localStorage→read path that the SwrCache uses.
+    const s = new MemoryStorage();
+    const created = new Date("2026-06-10T08:15:00.000Z");
+    const tasks = [
+      {
+        url: "https://bob.example/issues/42",
+        own: false,
+        source: "https://bob.example/profile/card#me",
+        task: {
+          title: "Review the federation PR",
+          description: "Please look before Friday",
+          state: "open" as const,
+          created,
+          assignee: WEBID_A,
+        },
+      },
+      {
+        url: "https://alice.example/issues/7",
+        own: true,
+        source: WEBID_A,
+        // A task with NO created date must also survive (the field is optional).
+        task: { title: "Tidy my pod", state: "closed" as const },
+      },
+    ];
+    writeDurableCache(WEBID_A, "assigned-tasks", tasks, s);
+    const back = readDurableCache<typeof tasks>(WEBID_A, "assigned-tasks", s);
+    expect(back).not.toBeNull();
+    // The nested Date hydrates as a Date (not the ISO string JSON parsed it as) —
+    // so the cold-open render sorts/formats correctly, matching a fresh fetch.
+    expect(back?.[0].task.created).toBeInstanceOf(Date);
+    expect((back?.[0].task.created as Date).getTime()).toBe(created.getTime());
+    // The whole model is otherwise byte-faithful, including the dateless task.
+    expect(back).toEqual(tasks);
+    expect(back?.[1].task.created).toBeUndefined();
+  });
+
+  it("assigned-tasks is WebID-scoped — another user never hydrates your assigned list", () => {
+    const s = new MemoryStorage();
+    const tasks = [
+      { url: "https://x/1", own: true, source: WEBID_A, task: { title: "mine", state: "open" as const } },
+    ];
+    writeDurableCache(WEBID_A, "assigned-tasks", tasks, s);
+    // Bob on the same browser must MISS — cross-pod task data is per-viewer.
+    expect(readDurableCache(WEBID_B, "assigned-tasks", s)).toBeNull();
+    expect(readDurableCache(WEBID_A, "assigned-tasks", s)).toEqual(tasks);
   });
 });

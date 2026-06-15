@@ -5,6 +5,7 @@ import { createMemoryPod, TEST_POD_ROOT, TEST_WEBID } from "../integrations/core
 import { issuesStore, ISSUE_CLASS, type Issue } from "../issues.js";
 import { validateAdvisory } from "./advisory.js";
 import type { AdvisoryNotice, AdvisoryHandler } from "./advisory.js";
+import * as validatorModule from "./validator.js";
 
 const WF = "http://www.w3.org/2005/01/wf/flow#";
 const DCT = "http://purl.org/dc/terms/";
@@ -107,8 +108,10 @@ describe("ProductivityStore write seam — advisory is non-blocking (pss-gc1)", 
     // The create must NOT throw — the write is never gated by validation.
     const { url } = await s.create(issue);
 
-    // The advisory surfaced exactly once...
-    expect(onAdvisory).toHaveBeenCalledTimes(1);
+    // The advisory is fire-and-forget (it runs detached AFTER create resolves),
+    // so poll until it surfaces — exactly once — rather than assuming it has
+    // already fired by the time the (non-blocking) write resolved.
+    await vi.waitFor(() => expect(onAdvisory).toHaveBeenCalledTimes(1));
     const notice = onAdvisory.mock.calls[0][0] as AdvisoryNotice;
     expect(notice.results.some((r) => r.path === `${DCT}title`)).toBe(true);
 
@@ -126,7 +129,8 @@ describe("ProductivityStore write seam — advisory is non-blocking (pss-gc1)", 
     onAdvisory.mockClear();
 
     await expect(s.update(url, { title: "", state: "open" })).resolves.toBeDefined();
-    expect(onAdvisory).toHaveBeenCalledTimes(1);
+    // Detached advisory — poll until it fires (the update already resolved).
+    await vi.waitFor(() => expect(onAdvisory).toHaveBeenCalledTimes(1));
     const read = await s.read(url);
     expect(read?.data.title).toBe("");
   });
@@ -143,5 +147,33 @@ describe("ProductivityStore write seam — advisory is non-blocking (pss-gc1)", 
     );
     await s.create({ title: "", state: "open" } as Issue);
     expect(onAdvisory).not.toHaveBeenCalled();
+  });
+
+  it("a slow/hanging validator does NOT delay the write (advisory is fire-and-forget)", async () => {
+    const { s } = setup();
+    // A validator that never resolves: if the write awaited the advisory, the
+    // create would hang forever. The fire-and-forget contract requires create
+    // to resolve as soon as the pod write does, independent of this latency.
+    let validateInvoked = false;
+    vi.spyOn(validatorModule, "getDefaultValidator").mockReturnValue({
+      validate: () =>
+        new Promise<validatorModule.ValidationReport>(() => {
+          validateInvoked = true;
+          /* never resolves */
+        }),
+    });
+
+    // Resolves promptly despite the hanging validator (a real timeout guards it
+    // — vitest fails the test if create does not settle).
+    const { url } = await s.create({ title: "", state: "open" } as Issue);
+    expect(url.startsWith(`${TEST_POD_ROOT}`)).toBe(true);
+
+    // The (non-conforming) item is genuinely persisted — the write happened.
+    const read = await s.read(url);
+    expect(read?.data.title).toBe("");
+
+    // And the validator was actually engaged (so we proved it was kicked off,
+    // not merely skipped), it just never gates the write.
+    await vi.waitFor(() => expect(validateInvoked).toBe(true));
   });
 });

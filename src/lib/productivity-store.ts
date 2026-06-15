@@ -115,18 +115,24 @@ export class ProductivityStore<T> {
   }
 
   /**
-   * Run advisory SHACL validation for a built graph, if this write-type opted
-   * in (`cfg.validate`). Fire-and-forget by contract: it surfaces a warning on
-   * a violation but NEVER throws and NEVER blocks the caller's write. Awaited
-   * only so the (swallowed) validation completes before the method returns; the
-   * write has already happened by the time this is called.
+   * Kick off advisory SHACL validation for a just-written graph, if this
+   * write-type opted in (`cfg.validate`). Fire-and-forget by contract: the
+   * caller does NOT await it, so a slow/hanging validator never delays the
+   * store op (the pod write has already succeeded by the time this is called).
+   * `validateAdvisory` already swallows every failure, but we add a defensive
+   * `.catch` on the detached promise so it can never become an unhandled
+   * rejection even if that contract regresses.
    */
-  private async runAdvisory(url: string, dataset: import("@rdfjs/types").DatasetCore): Promise<void> {
+  private runAdvisory(url: string, dataset: import("@rdfjs/types").DatasetCore): void {
     if (!this.cfg.validate) return;
-    await validateAdvisory(dataset, {
+    void validateAdvisory(dataset, {
       forClass: this.cfg.forClass,
       url,
       onAdvisory: this.onAdvisory,
+    }).catch((e) => {
+      // Defence in depth: validateAdvisory never rejects, but a detached
+      // promise must not surface an unhandled rejection if that ever changes.
+      console.warn(`[shacl] advisory validation promise rejected for ${url}:`, e);
     });
   }
 
@@ -260,9 +266,10 @@ export class ProductivityStore<T> {
       fetchImpl: this.fetchImpl,
       prefixes: this.cfg.prefixes,
     });
-    // ADVISORY ONLY (ADR-0014): validate AFTER the write so a violation can
-    // never block or delay it. A non-conforming graph still surfaces a warning.
-    await this.runAdvisory(url, dataset);
+    // ADVISORY ONLY (ADR-0014): validate AFTER the write, fire-and-forget, so a
+    // violation (or a slow/hanging validator) can never block or delay it. A
+    // non-conforming graph still surfaces a warning out-of-band.
+    this.runAdvisory(url, dataset);
     return { url, etag };
   }
 
@@ -283,9 +290,10 @@ export class ProductivityStore<T> {
       fetchImpl: this.fetchImpl,
       prefixes: this.cfg.prefixes,
     });
-    // ADVISORY ONLY (ADR-0014): validate AFTER the write so a violation can
-    // never block or delay it. A non-conforming graph still surfaces a warning.
-    await this.runAdvisory(url, dataset);
+    // ADVISORY ONLY (ADR-0014): validate AFTER the write, fire-and-forget, so a
+    // violation (or a slow/hanging validator) can never block or delay it. A
+    // non-conforming graph still surfaces a warning out-of-band.
+    this.runAdvisory(url, dataset);
     return result;
   }
 

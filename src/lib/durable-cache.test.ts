@@ -2,6 +2,9 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  ASSIGNED_TASKS_KEY_PREFIX,
+  assignedTasksCodec,
+  assignedTasksKey,
   clearAllDurableCache,
   clearDurableCacheEntry,
   clearDurableCacheForWebId,
@@ -211,6 +214,14 @@ describe("durable-cache codec registry (serialisation safety, roborev finding)",
     // category-items is keyed with a dynamic category-id suffix (prefix match).
     expect(codecFor("category-items:identity")).not.toBeNull();
     expect(codecFor("category-items:anything-here")).not.toBeNull();
+    // The "Assigned to me" federation view (use-federation-tasks) — a real
+    // Date-carrying model, so it MUST be registered (else it would silently be
+    // memory-only and never hydrate on a cold open). Its key is storage-scoped
+    // (`assigned-tasks:<storage>`), matched by PREFIX, so both the bare prefix and
+    // a real storage-suffixed key resolve to a codec.
+    expect(codecFor("assigned-tasks")).not.toBeNull();
+    expect(codecFor(assignedTasksKey("https://alice.example/"))).not.toBeNull();
+    expect(codecFor(ASSIGNED_TASKS_KEY_PREFIX)).not.toBeNull();
   });
 
   it("has NO codec for an unregistered key (it is memory-only)", () => {
@@ -332,8 +343,8 @@ describe("durable-cache real round-trip (write→localStorage→read)", () => {
   it("a model with a real Date field round-trips to EQUAL Dates via a date-reviving key", () => {
     // Register a temporary date-reviving codec for a throwaway key by exercising
     // the codec directly through the same JSON boundary readDurableCache uses.
-    // (The four production keys are JSON-plain today; this proves the seam works
-    //  for any FUTURE model that carries a real Date and registers a codec.)
+    // The `assigned-tasks` production key now uses this codec for real (see the
+    // round-trip below); this case proves the seam for any other FUTURE model.
     interface DatedModel {
       label: string;
       at: Date;
@@ -353,5 +364,158 @@ describe("durable-cache real round-trip (write→localStorage→read)", () => {
     expect(decoded.at).toBeInstanceOf(Date);
     expect(decoded.at.getTime()).toBe(model.at.getTime());
     expect(decoded).toEqual(model);
+  });
+
+  it("assigned-tasks (a real AssignedTask[] with a nested Date) round-trips through real storage", () => {
+    // The shape the "Assigned to me" federation view caches (use-federation-tasks):
+    // an AssignedTask carries `task.created` as a real Date revived from
+    // xsd:dateTime. Mirror the model here (no import needed — we assert the
+    // SERIALISATION contract, not the discovery logic) and round-trip it through
+    // the genuine write→localStorage→read path that the SwrCache uses.
+    const s = new MemoryStorage();
+    const key = assignedTasksKey("https://alice.example/");
+    const created = new Date("2026-06-10T08:15:00.000Z");
+    const endedAt = new Date("2026-06-12T09:00:00.000Z");
+    const tasks = [
+      {
+        url: "https://bob.example/issues/42",
+        own: false,
+        source: "https://bob.example/profile/card#me",
+        task: {
+          title: "Review the federation PR",
+          description: "Please look before Friday",
+          state: "closed" as const,
+          created,
+          endedAt, // prov:endedAtTime — the second real Date field
+          assignee: WEBID_A,
+        },
+      },
+      {
+        url: "https://alice.example/issues/7",
+        own: true,
+        source: WEBID_A,
+        // A task with NO created date must also survive (the field is optional).
+        task: { title: "Tidy my pod", state: "closed" as const },
+      },
+    ];
+    writeDurableCache(WEBID_A, key, tasks, s);
+    const back = readDurableCache<typeof tasks>(WEBID_A, key, s);
+    expect(back).not.toBeNull();
+    // Both nested Dates hydrate as Dates (not the ISO strings JSON parsed them as)
+    // — so the cold-open render sorts/formats correctly, matching a fresh fetch.
+    expect(back?.[0].task.created).toBeInstanceOf(Date);
+    expect((back?.[0].task.created as Date).getTime()).toBe(created.getTime());
+    expect(back?.[0].task.endedAt).toBeInstanceOf(Date);
+    expect((back?.[0].task.endedAt as Date).getTime()).toBe(endedAt.getTime());
+    // The whole model is otherwise byte-faithful, including the dateless task.
+    expect(back).toEqual(tasks);
+    expect(back?.[1].task.created).toBeUndefined();
+  });
+
+  it("assigned-tasks is WebID-scoped — another user never hydrates your assigned list", () => {
+    const s = new MemoryStorage();
+    const key = assignedTasksKey("https://alice.example/");
+    const tasks = [
+      { url: "https://x/1", own: true, source: WEBID_A, task: { title: "mine", state: "open" as const } },
+    ];
+    writeDurableCache(WEBID_A, key, tasks, s);
+    // Bob on the same browser must MISS — cross-pod task data is per-viewer.
+    expect(readDurableCache(WEBID_B, key, s)).toBeNull();
+    expect(readDurableCache(WEBID_A, key, s)).toEqual(tasks);
+  });
+});
+
+/**
+ * Round-2 roborev fixes: (1) the FIELD-AWARE assignedTasksCodec must not corrupt
+ * user-controlled strings that happen to look like ISO dates (the cold-open
+ * `.title.trim()` crash), and (2) the storage-scoped cache key must give each
+ * storage of one WebID its OWN slot (no stale cross-storage hit).
+ */
+describe("assigned-tasks codec + key (roborev round-2)", () => {
+  it("revives created/endedAt to Dates but leaves a date-LOOKING title/description/url as STRINGS", () => {
+    // The crash regression: a user can legitimately title a task with an ISO
+    // date. The generic dateRevivingCodec would hydrate that title as a Date, and
+    // the assigned page's `it.title.trim()` would throw on a cold open. The
+    // field-aware codec must revive ONLY the known date fields.
+    const created = new Date("2026-06-10T08:15:00.000Z");
+    const model = [
+      {
+        url: "https://bob.example/issues/2026-01-01T00:00:00.000Z", // date-shaped URL segment
+        own: false,
+        source: "https://bob.example/profile/card#me",
+        task: {
+          title: "2026-01-01T00:00:00.000Z", // a title that IS an ISO datetime
+          description: "1999-12-31T23:59:59.000Z", // ditto for the description
+          state: "open" as const,
+          created, // a REAL date field — must become a Date
+          assignee: WEBID_A,
+        },
+      },
+    ];
+    const codec = assignedTasksCodec<typeof model>();
+    // Through the genuine JSON boundary localStorage uses.
+    const decoded = codec.decode(JSON.parse(JSON.stringify(codec.encode(model))));
+    const t = decoded[0];
+    // The KNOWN date field is a Date…
+    expect(t.task.created).toBeInstanceOf(Date);
+    expect((t.task.created as Date).getTime()).toBe(created.getTime());
+    // …but the user-controlled strings stay STRINGS (the crash regression).
+    expect(typeof t.task.title).toBe("string");
+    expect(t.task.title).toBe("2026-01-01T00:00:00.000Z");
+    expect(() => (t.task.title as string).trim()).not.toThrow();
+    expect(typeof t.task.description).toBe("string");
+    expect(typeof t.url).toBe("string");
+    expect(t.url).toBe("https://bob.example/issues/2026-01-01T00:00:00.000Z");
+    expect(t.source).toBe("https://bob.example/profile/card#me");
+  });
+
+  it("the same date-shaped title would be CORRUPTED by the generic dateRevivingCodec (contrast)", () => {
+    // This documents WHY the field-aware codec is needed: the generic reviver
+    // turns the date-shaped title into a Date, which is exactly the corruption.
+    const model = [{ task: { title: "2026-01-01T00:00:00.000Z", state: "open" } }];
+    const generic = dateRevivingCodec<typeof model>();
+    const decoded = generic.decode(JSON.parse(JSON.stringify(generic.encode(model))));
+    expect(decoded[0].task.title).toBeInstanceOf(Date); // corruption the fix avoids
+  });
+
+  it("absent optional date fields are NOT materialised by the codec", () => {
+    const model = [{ url: "u", own: true, source: WEBID_A, task: { title: "x", state: "open" } }];
+    const codec = assignedTasksCodec<typeof model>();
+    const decoded = codec.decode(JSON.parse(JSON.stringify(codec.encode(model))));
+    expect("created" in decoded[0].task).toBe(false);
+    expect("endedAt" in decoded[0].task).toBe(false);
+    expect(decoded).toEqual(model);
+  });
+
+  it("a malformed (non-array / non-object) cached value degrades to an empty list, never throws", () => {
+    const codec = assignedTasksCodec();
+    expect(codec.decode("not-an-array" as never)).toEqual([]);
+    expect(codec.decode({} as never)).toEqual([]);
+    // A non-object array element is passed through untouched (no crash).
+    expect(codec.decode([42, null] as never)).toEqual([42, null]);
+  });
+
+  it("a different active storage yields a DIFFERENT cache key (no stale cross-storage hit)", () => {
+    const storageA = "https://alice.example/work/";
+    const storageB = "https://alice.example/personal/";
+    const keyA = assignedTasksKey(storageA);
+    const keyB = assignedTasksKey(storageB);
+    expect(keyA).not.toBe(keyB);
+    expect(keyA.startsWith(`${ASSIGNED_TASKS_KEY_PREFIX}:`)).toBe(true);
+    expect(keyB.startsWith(`${ASSIGNED_TASKS_KEY_PREFIX}:`)).toBe(true);
+  });
+
+  it("two storages of ONE WebID never share a durable slot — storage B never hydrates storage A's list", () => {
+    const s = new MemoryStorage();
+    const keyA = assignedTasksKey("https://alice.example/work/");
+    const keyB = assignedTasksKey("https://alice.example/personal/");
+    const workTasks = [
+      { url: "https://alice.example/work/1", own: true, source: WEBID_A, task: { title: "work item", state: "open" as const } },
+    ];
+    writeDurableCache(WEBID_A, keyA, workTasks, s);
+    // Switching to storage B (same WebID, same browser) is a MISS — it does NOT
+    // serve the work-pod list, which was the round-2 cross-storage stale bug.
+    expect(readDurableCache(WEBID_A, keyB, s)).toBeNull();
+    expect(readDurableCache(WEBID_A, keyA, s)).toEqual(workTasks);
   });
 });

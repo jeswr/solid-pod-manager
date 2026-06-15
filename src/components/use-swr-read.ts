@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSession } from "@/components/session-provider";
 import { useResourceNotifications } from "@/components/use-resource-notifications";
-import { readCache, type SwrCache } from "@/lib/swr-cache";
+import { deriveSwrInitialState, readCache, type SwrCache } from "@/lib/swr-cache";
 
 export interface SwrReadState<T> {
   /** Last-known value (cached or freshly fetched), or `undefined`. */
@@ -75,14 +75,45 @@ export function useSwrRead<T>(
   // Seed from the cache SYNCHRONOUSLY on first render: prefer the in-memory
   // value, else pull the durable snapshot into memory (cold open / app reopen).
   // This is what lets the first paint after a reload show data, not a spinner.
-  const initial = webId && key !== "" ? cache.hydrate<T>(webId, key) : undefined;
-  const [data, setData] = useState<T | undefined>(initial);
+  const initial = deriveSwrInitialState<T>(cache, webId, key);
+  const [data, setData] = useState<T | undefined>(initial.data);
   const [error, setError] = useState<Error | undefined>(undefined);
   // loading = nothing to show yet; revalidating = refreshing a shown value.
-  const [loading, setLoading] = useState(initial === undefined);
-  const [revalidating, setRevalidating] = useState(false);
+  const [loading, setLoading] = useState(initial.loading);
+  const [revalidating, setRevalidating] = useState(initial.revalidating);
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => setNonce((n) => n + 1), []);
+
+  // Key-change reset (derive-state-during-render, no extra paint): `useState`
+  // seeds only on the FIRST render, so without this a cache-KEY change (e.g. a
+  // storage switch, `assigned-tasks:<A>` → `:<B>`) would keep showing the
+  // PREVIOUS key's `data` for at least one paint — the revalidation effect only
+  // resets it AFTER commit. Tracking the active `(webId, key)` and resetting
+  // synchronously when it differs makes `data` reflect the NEW key immediately,
+  // so a key change never paints the old key's value even once. React discards
+  // this render and re-renders with the new state — no flash, no effect, no loop.
+  //
+  // The previous `(webId, key)` is tracked in `useState`, NOT a `useRef`, on
+  // purpose: this is React's documented "adjust state when a prop changes"
+  // pattern, and it is concurrent-SAFE. A ref mutated during render can leak a
+  // write from an ABANDONED render (one React started, then threw away), so a
+  // later COMMITTED render with that same key would see the ref already updated
+  // and skip the reset — the exact concurrent hazard roborev flagged. State set
+  // during render is scoped to the render that committed: React re-runs the
+  // component with the new state only for the render it keeps, so an abandoned
+  // render's `setActive` is discarded with it and never poisons a later commit.
+  const [active, setActive] = useState<{ webId: string | undefined; key: string }>({
+    webId,
+    key,
+  });
+  if (active.webId !== webId || active.key !== key) {
+    setActive({ webId, key });
+    const next = deriveSwrInitialState<T>(cache, webId, key);
+    setData(next.data);
+    setLoading(next.loading);
+    setRevalidating(next.revalidating);
+    setError(undefined);
+  }
 
   // Revalidate on a notification. We keep the cached value VISIBLE (stale)
   // while the background refetch runs — dropping it would flash a spinner — and

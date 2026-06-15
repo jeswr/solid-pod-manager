@@ -237,3 +237,56 @@ export class SwrCache {
  * on logout/account switch by the session bridge.
  */
 export const readCache = new SwrCache();
+
+/**
+ * The synchronously-derivable part of {@link useSwrRead}'s state for a given
+ * `(webId, key)` — what the very FIRST paint under that key must show. Kept a
+ * pure function (no React) so it is unit-testable and so the hook can use it
+ * BOTH on mount AND when the cache key changes mid-life: a key change
+ * (e.g. a storage switch, `assigned-tasks:<A>` → `:<B>`) must immediately
+ * reflect the NEW key's cache, never linger on the previous key's `data` for
+ * even one paint (roborev finding, use-federation-tasks via useSwrRead).
+ */
+export interface SwrInitialState<T> {
+  /** The cached value for the new key, hydrated cold from durable if needed. */
+  data: T | undefined;
+  /** True only when there is NOTHING cached for the new key (cold spinner). */
+  loading: boolean;
+  /** True when a cached value will be shown and a background refetch will run. */
+  revalidating: boolean;
+}
+
+/**
+ * Derive the initial SWR state for `(webId, key)` from the cache, hydrating the
+ * durable snapshot into memory if needed (so a cold open / a key change to an
+ * already-cached key both paint instantly).
+ *
+ * No WebID, or an empty key, means the read is not ready yet (session still
+ * resolving, or a storage not yet chosen) — there is NOTHING to show and no
+ * cache to touch, so it reports `loading: true` (matching the pre-existing hook
+ * behaviour: the empty-key/no-session phase showed a spinner, not an empty
+ * state). A consumer that resolves the empty-key case itself (e.g.
+ * `useCategoryItems` short-circuiting a no-data category) ignores this and never
+ * reaches it.
+ *
+ * @param cache - the SWR cache to read from.
+ * @param webId - the active WebID, or `undefined`/empty for "no session yet".
+ * @param key - the cache key, or `""` for "nothing to read here yet".
+ */
+export function deriveSwrInitialState<T>(
+  cache: SwrCache,
+  webId: string | undefined,
+  key: string,
+): SwrInitialState<T> {
+  if (!webId || key === "") {
+    // Not ready (no session / no key yet): show the spinner, touch no cache.
+    return { data: undefined, loading: true, revalidating: false };
+  }
+  const cached = cache.hydrate<T>(webId, key);
+  if (cached !== undefined) {
+    // Cached (in-memory or hydrated cold from durable): paint it, revalidate.
+    return { data: cached, loading: false, revalidating: true };
+  }
+  // Cold: first-ever load for this account/key — the spinner is correct.
+  return { data: undefined, loading: true, revalidating: false };
+}

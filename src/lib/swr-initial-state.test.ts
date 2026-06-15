@@ -1,0 +1,219 @@
+// AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate; see docs/MODEL-PROVENANCE.md
+
+/**
+ * Tests for {@link deriveSwrInitialState} — the pure function `useSwrRead` uses
+ * to seed (and, on a cache-KEY change, RE-seed) its visible state synchronously.
+ *
+ * The roborev finding this guards: changing the SWR key (e.g. a storage switch
+ * `assigned-tasks:<storageA>` → `:<storageB>`) must IMMEDIATELY reflect the new
+ * key's cache, never linger on the previous key's `data` for even one paint.
+ * `useSwrRead` reuses this helper in a derive-state-during-render guard so a key
+ * change resets `data`/`loading`/`revalidating` before commit; here we assert the
+ * helper itself returns the correct per-key state, which is what makes that work.
+ */
+
+import { describe, expect, it } from "vitest";
+import { SwrCache, deriveSwrInitialState, type DurableStore } from "./swr-cache.js";
+
+const WEBID = "https://alice.example/profile#me";
+const STORAGE_A = "https://alice.example/a/";
+const STORAGE_B = "https://alice.example/b/";
+const KEY_A = `assigned-tasks:${STORAGE_A}`;
+const KEY_B = `assigned-tasks:${STORAGE_B}`;
+
+/** In-memory durable fake (WebID+key scoped) so the cold-open path is testable. */
+class FakeDurable implements DurableStore {
+  readonly map = new Map<string, unknown>();
+  private k(webId: string, key: string) {
+    return `${webId}\u0000${key}`;
+  }
+  read<T>(webId: string, key: string): T | null {
+    return this.map.has(this.k(webId, key)) ? (this.map.get(this.k(webId, key)) as T) : null;
+  }
+  write<T>(webId: string, key: string, value: T): void {
+    this.map.set(this.k(webId, key), value);
+  }
+  clearEntry(webId: string, key: string): void {
+    this.map.delete(this.k(webId, key));
+  }
+  clearWebId(webId: string): void {
+    for (const k of [...this.map.keys()]) if (k.startsWith(`${webId}\u0000`)) this.map.delete(k);
+  }
+  clearAll(): void {
+    this.map.clear();
+  }
+}
+
+describe("deriveSwrInitialState", () => {
+  it("no WebID or empty key → not-ready spinner (no data, loading, no cache touched)", () => {
+    // Matches the pre-existing hook behaviour: the no-session / no-key phase
+    // (e.g. storage not yet chosen) shows a spinner, never an empty state.
+    const cache = new SwrCache(null);
+    expect(deriveSwrInitialState(cache, undefined, KEY_A)).toEqual({
+      data: undefined,
+      loading: true,
+      revalidating: false,
+    });
+    expect(deriveSwrInitialState(cache, WEBID, "")).toEqual({
+      data: undefined,
+      loading: true,
+      revalidating: false,
+    });
+  });
+
+  it("cold (nothing cached) → spinner state (loading, no data)", () => {
+    const cache = new SwrCache(null);
+    expect(deriveSwrInitialState(cache, WEBID, KEY_A)).toEqual({
+      data: undefined,
+      loading: true,
+      revalidating: false,
+    });
+  });
+
+  it("in-memory hit → instant paint + background revalidate (no spinner)", () => {
+    const cache = new SwrCache(null);
+    cache.set(WEBID, KEY_A, ["task-1"]);
+    expect(deriveSwrInitialState<string[]>(cache, WEBID, KEY_A)).toEqual({
+      data: ["task-1"],
+      loading: false,
+      revalidating: true,
+    });
+  });
+
+  it("durable-only hit hydrates SYNCHRONOUSLY → instant cold-open paint", () => {
+    const durable = new FakeDurable();
+    durable.write(WEBID, KEY_A, ["from-disk"]);
+    // Fresh cache (simulating a reload: in-memory map empty) hydrates from durable.
+    const cache = new SwrCache(durable);
+    expect(deriveSwrInitialState<string[]>(cache, WEBID, KEY_A)).toEqual({
+      data: ["from-disk"],
+      loading: false,
+      revalidating: true,
+    });
+    // Cold-open hydrate is preserved: the value is now in memory too.
+    expect(cache.get<string[]>(WEBID, KEY_A)).toEqual(["from-disk"]);
+  });
+
+  it("KEY CHANGE never returns the previous key's data (the storage-switch fix)", () => {
+    const cache = new SwrCache(null);
+    cache.set(WEBID, KEY_A, ["A-task"]); // storage A has cached tasks
+    // storage B has NOTHING cached yet — a switch A→B must NOT show A's tasks.
+    const onA = deriveSwrInitialState<string[]>(cache, WEBID, KEY_A);
+    const onB = deriveSwrInitialState<string[]>(cache, WEBID, KEY_B);
+    expect(onA.data).toEqual(["A-task"]);
+    // The new key reflects ITS OWN (empty) cache: cold spinner, never A's data.
+    expect(onB).toEqual({ data: undefined, loading: true, revalidating: false });
+    expect(onB.data).not.toEqual(onA.data);
+  });
+
+  it("KEY CHANGE to an ALREADY-cached key paints THAT key's data, not the old one", () => {
+    const cache = new SwrCache(null);
+    cache.set(WEBID, KEY_A, ["A-task"]);
+    cache.set(WEBID, KEY_B, ["B-task"]);
+    // Switching A→B immediately reflects B's cached value (no stale A paint).
+    expect(deriveSwrInitialState<string[]>(cache, WEBID, KEY_B)).toEqual({
+      data: ["B-task"],
+      loading: false,
+      revalidating: true,
+    });
+  });
+});
+
+/**
+ * The key-change reset GUARD itself (the render-phase `if (prev !== key)` block
+ * in `useSwrRead`), modelled in isolation. `useSwrRead` lives in `src/components`
+ * and the Vitest config runs the `node` environment with no DOM / React renderer,
+ * so we cannot mount the real hook here; instead we reproduce its guard EXACTLY
+ * and drive it through React's render/abandon/commit cycle by hand.
+ *
+ * Why this matters (the roborev finding): the guard tracks the previous
+ * `(webId, key)` in `useState`, NOT a `useRef`. A ref MUTATED DURING RENDER can
+ * leak a write from an ABANDONED render (one React began then discarded), so a
+ * later COMMITTED render with that key would see the tracker already advanced and
+ * SKIP the reset — the value would never be reset and a stale key's data would
+ * paint. State adjusted during render is scoped to the render that commits: an
+ * abandoned render's `setPrev` is thrown away with it, so a later commit still
+ * runs the reset. These tests assert that committed-state semantics — the closest
+ * proxy to a StrictMode/concurrent double render of a key change.
+ */
+describe("useSwrRead key-change reset guard (committed-state, concurrent-safe)", () => {
+  type Tracked = { webId: string | undefined; key: string };
+
+  /**
+   * One render PASS of the guard. Mirrors the production block 1:1: compare the
+   * COMMITTED tracker against the incoming key; on a change, schedule the new
+   * tracker + a reset derived from the cache. Returns whether a reset fired and
+   * the next tracker React would adopt IF this render commits. `committedPrev` is
+   * the state value React feeds in (last COMMITTED render's tracker) — never a
+   * value carried over from an abandoned render.
+   */
+  function guardPass(
+    cache: SwrCache,
+    committedPrev: Tracked,
+    webId: string | undefined,
+    key: string,
+  ): { didReset: boolean; nextTracker: Tracked; reset?: ReturnType<typeof deriveSwrInitialState> } {
+    if (committedPrev.webId !== webId || committedPrev.key !== key) {
+      // setPrev({ webId, key }) + the four reset set*()s — all during render.
+      return {
+        didReset: true,
+        nextTracker: { webId, key },
+        reset: deriveSwrInitialState(cache, webId, key),
+      };
+    }
+    return { didReset: false, nextTracker: committedPrev };
+  }
+
+  it("resets exactly once on a key change, then is idempotent on re-render with the same key", () => {
+    const cache = new SwrCache(null);
+    cache.set(WEBID, KEY_A, ["A-task"]);
+    cache.set(WEBID, KEY_B, ["B-task"]);
+
+    // Committed at KEY_A. Render with KEY_B → reset fires once.
+    const first = guardPass(cache, { webId: WEBID, key: KEY_A }, WEBID, KEY_B);
+    expect(first.didReset).toBe(true);
+    expect(first.reset).toEqual({ data: ["B-task"], loading: false, revalidating: true });
+
+    // React commits → tracker is now KEY_B. Re-render with the SAME key → no reset.
+    const second = guardPass(cache, first.nextTracker, WEBID, KEY_B);
+    expect(second.didReset).toBe(false);
+    expect(second.nextTracker).toEqual({ webId: WEBID, key: KEY_B });
+  });
+
+  it("StrictMode double-render of a key change still resets correctly (both passes derive the SAME committed-state reset)", () => {
+    const cache = new SwrCache(null);
+    cache.set(WEBID, KEY_A, ["A-task"]);
+    cache.set(WEBID, KEY_B, ["B-task"]);
+
+    // StrictMode renders the component body twice from the SAME committed state
+    // ({ KEY_A }) before commit. Both passes must compute the identical reset —
+    // because the comparison is against committed state, not a render-mutated ref.
+    const committed: Tracked = { webId: WEBID, key: KEY_A };
+    const pass1 = guardPass(cache, committed, WEBID, KEY_B);
+    const pass2 = guardPass(cache, committed, WEBID, KEY_B);
+    expect(pass1.didReset).toBe(true);
+    expect(pass2.didReset).toBe(true);
+    expect(pass2.reset).toEqual(pass1.reset);
+    expect(pass2.reset).toEqual({ data: ["B-task"], loading: false, revalidating: true });
+  });
+
+  it("an ABANDONED render does NOT poison the next COMMITTED render (the ref-during-render hazard this guards)", () => {
+    const cache = new SwrCache(null);
+    cache.set(WEBID, KEY_A, ["A-task"]);
+    cache.set(WEBID, KEY_B, ["B-task"]);
+
+    // React begins a render for KEY_B from committed { KEY_A } …then ABANDONS it
+    // (concurrent interruption). With a ref mutated during render, the ref would
+    // already read KEY_B; with `useState`, the abandoned render's setPrev is
+    // discarded and the COMMITTED tracker is still { KEY_A }.
+    const abandoned = guardPass(cache, { webId: WEBID, key: KEY_A }, WEBID, KEY_B);
+    expect(abandoned.didReset).toBe(true); // it would have reset, had it committed
+
+    // The later render that ACTUALLY commits still sees committed { KEY_A } (the
+    // abandoned render's would-be tracker is NOT fed back in) → it STILL resets.
+    // A ref-based guard would have skipped this and left the stale key's data.
+    const committedRender = guardPass(cache, { webId: WEBID, key: KEY_A }, WEBID, KEY_B);
+    expect(committedRender.didReset).toBe(true);
+    expect(committedRender.reset).toEqual({ data: ["B-task"], loading: false, revalidating: true });
+  });
+});

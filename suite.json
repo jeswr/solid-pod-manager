@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/jeswr/full-solid-ecosystem/main/tracking/schema/suite.schema.json",
   "id": "solid-pod-manager",
   "kind": "app",
   "name": "Solid Pod Manager",

@@ -34,12 +34,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return <>{children}</>;
   }
 
+  // While we silently restore a returning user's session (refresh-token grant,
+  // no popup), hold this brief loading state — never flash or route to the
+  // login screen. Login is shown ONLY once the restore decision lands as
+  // "logged-out" (no/expired/revoked token).
   if (status === "loading") {
     return (
       <div className="grid min-h-dvh place-items-center" role="status" aria-live="polite">
         <span className="flex items-center gap-2 text-muted-foreground">
           <Loader2 className="size-5 animate-spin" aria-hidden="true" />
-          Loading your pod…
+          Restoring your session…
         </span>
       </div>
     );

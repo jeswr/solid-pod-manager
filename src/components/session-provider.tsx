@@ -43,6 +43,7 @@ import {
   indexedDbAvailable,
   type SessionStore,
 } from "@/lib/session-persistence";
+import { decideSilentRestore } from "@/lib/session-restore";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 import { readCache } from "@/lib/swr-cache";
 
@@ -230,28 +231,47 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         typeof localStorage !== "undefined"
           ? localStorage.getItem(ACTIVE_WEBID_KEY)
           : null;
-      if (last) {
+
+      // The decision: can we restore the last session SILENTLY (refresh-token
+      // grant — a token-endpoint fetch, NO popup/iframe) or must we show login?
+      // Driven off the REFRESH-GRANT outcome, NOT a public-profile fetch — a
+      // returning user who only closed the tab keeps a valid persisted refresh
+      // token + DPoP key, so they land back on the app, never the login screen.
+      // (Gating "logged in" on the profile read was the bug: a transient
+      // profile-read blip used to bounce a fully-restored user to login.)
+      const decision = await decideSilentRestore({
+        lastActiveWebId: last,
+        remembered,
+        restoreIssuer: async (issuer) => {
+          const provider = await providerReadyRef.current;
+          // restoreIssuer never throws for the expired/revoked case (it returns
+          // undefined and clears the dead entry); a thrown error here is
+          // unexpected and decideSilentRestore treats it as "login" (fail-closed).
+          return provider?.restoreIssuer(new URL(issuer));
+        },
+      });
+      if (cancelled) return;
+
+      if (decision.outcome === "restored") {
+        // Live session rebuilt with no popup. Pin the issuer for logout + the
+        // 401-upgrade WebID resolver, mark logged-in immediately, THEN load the
+        // (cosmetic) profile — which is allowed to degrade without bouncing to
+        // login (the session is real regardless of a transient profile blip).
+        activeIssuerRef.current = decision.issuer;
+        pendingWebIdRef.current = decision.webId;
+        setWebId(decision.webId);
+        setStatus("logged-in");
         try {
-          // If a DPoP-bound refresh-token session was persisted for this
-          // account's issuer, restore it via a refresh grant FIRST — a plain
-          // token-endpoint fetch, NO popup/iframe. This is what removes the
-          // brief window a returning user used to see: the in-memory session is
-          // rebuilt before any private read can 401. On failure (expired /
-          // revoked refresh token) restoreIssuer clears the dead entry and
-          // returns undefined; we fall through to the public-profile restore,
-          // and a later private read re-auths silently while the IdP cookie
-          // lives — exactly the previous behaviour, still no popup on restore.
-          const issuer = remembered.find((a) => a.webId === last)?.issuer;
-          if (issuer) {
-            const provider = await providerReadyRef.current;
-            await provider?.restoreIssuer(new URL(issuer)).catch(() => undefined);
-            if (!cancelled) activeIssuerRef.current = issuer;
+          const p = await fetchProfile(decision.webId);
+          if (!cancelled) {
+            setProfile(p);
+            setActive(p.storages[0]);
           }
-          await restore(last);
         } catch {
-          if (!cancelled) setStatus("logged-out");
+          // The session stands; the profile can fill in on a later read. Do NOT
+          // drop to logged-out — that is the reopen-routes-through-login bug.
         }
-      } else if (!cancelled) {
+      } else {
         setStatus("logged-out");
       }
     })().catch(() => {
@@ -266,25 +286,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       void providerReadyRef.current?.then((p) => p?.teardown()).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const restore = useCallback(async (id: string) => {
-    // Silent restore: read the (public) profile; if a private read later 401s
-    // it re-auths silently while the IdP cookie lives.
-    //
-    // Seed pendingWebIdRef FIRST: the reactive provider's WebID resolver reads
-    // it on a 401 to know whose issuer to authenticate against. login() pins
-    // the issuer directly, but after a hard navigation / reload (tokens are
-    // in-memory only) only this restore path runs — without this, the first
-    // private read throws "No WebID provided for login" and the page hangs on
-    // its loading skeleton (e.g. an external app deep-linking into
-    // /connected-apps/grant). See connected-apps e2e.
-    pendingWebIdRef.current = id;
-    const p = await fetchProfile(id);
-    setWebId(id);
-    setProfile(p);
-    setActive(p.storages[0]);
-    setStatus("logged-in");
   }, []);
 
   /**

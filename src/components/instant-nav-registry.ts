@@ -236,6 +236,31 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
       }),
   },
   {
+    hook: "usePodSearch",
+    source: "use-pod-search.ts",
+    page: "/search (global pod search, task #97 — query-driven, exempt from prefetch)",
+    // Keyed per ACTIVE STORAGE + (encoded) query (`pod-search:<storage>:<q>`): the
+    // scan reads the active storage's stores + type index, so a SAME-WebID storage
+    // switch (or a new query) must change the key and re-scan rather than paint the
+    // previous pod's matches. A representative concrete key (the cache treats it as
+    // opaque, so the first-paint property holds for every concrete query).
+    key: `pod-search:${STORAGE}:${encodeURIComponent("budget")}`,
+    seed: (c) =>
+      c.set(WEBID, `pod-search:${STORAGE}:${encodeURIComponent("budget")}`, {
+        results: [
+          {
+            type: "note",
+            label: "Budget 2026",
+            url: `${STORAGE}notes/1`,
+            category: { id: "documents" },
+            href: `/notes/edit?id=${encodeURIComponent(`${STORAGE}notes/1`)}`,
+          },
+        ],
+        capped: false,
+        sourcesScanned: 8,
+      }),
+  },
+  {
     hook: "useCommunityFeed",
     source: "use-community.ts",
     page: "/community (Solid Community — forum + Matrix rooms)",
@@ -281,4 +306,8 @@ export const PREFETCH_EXEMPT_HOOKS: ReadonlySet<string> = new Set([
   // NOT the pod — warming it on app load would fire an unsolicited external request (and is
   // a no-op when the feature is unset); it loads on demand when the user opens /federations
   // (and is instant-nav cached thereafter), mirroring useCommunityFeed
+  "usePodSearch", // QUERY-driven global pod search (key pod-search:<storage>:<q>) — there is no
+  // single "likely next" query to warm ahead of the user typing one, so there's no prefetch
+  // target (mirrors useWebIdSearch); it goes through useSwrRead, so a re-typed query is still
+  // instant-nav cached. The page itself (/search) is reachable from the nav.
 ]);

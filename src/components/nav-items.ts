@@ -1,6 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Home,
+  Search,
   Database,
   FolderOpen,
   Plug,
@@ -47,6 +48,8 @@ export interface NavItem {
 /** Primary navigation (DESIGN.md §3). */
 export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/", label: "Home", icon: Home, primary: true },
+  // Global pod search (task #97) — find anything across categories from one box.
+  { href: "/search", label: "Search", icon: Search, primary: true },
   { href: "/my-data", label: "My data", icon: Database, primary: true },
   { href: "/files", label: "Files", icon: FolderOpen },
   { href: "/connect", label: "Connect", icon: Plug },

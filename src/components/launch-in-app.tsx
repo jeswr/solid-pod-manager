@@ -12,10 +12,16 @@
  * visible text is self-describing ("Open in Pod Drive"), so it reads correctly
  * out of context (WCAG 2.4.4/2.4.9) without leaning on `aria-label`. The
  * external-link icon is decorative (`aria-hidden`).
+ *
+ * When the user is signed in, the href carries the WebID as an
+ * `#autologin/<webId>` fragment so the target app can auto-authenticate without
+ * re-prompting (`podAppLaunchUrl`). The fragment is client-side only (never
+ * sent to the server); when signed out the link is the bare app URL.
  */
 import { ExternalLink } from "lucide-react";
+import { useSession } from "@/components/session-provider";
 import { Button } from "@/components/ui/button";
-import { podApp, type PodAppKey } from "@/lib/pod-apps";
+import { POD_APP_LABEL, podAppLaunchUrl, type PodAppKey } from "@/lib/pod-apps";
 
 export function LaunchInApp({
   app,
@@ -32,13 +38,16 @@ export function LaunchInApp({
   /** Button size, passed through to the underlying Button. */
   size?: React.ComponentProps<typeof Button>["size"];
 }) {
-  const { label: appName, url } = podApp(app);
+  const { webId } = useSession();
   // Self-describing visible text — readable out of context, no aria-label needed.
-  const text = label ?? `Open in ${appName}`;
+  const text = label ?? `Open in ${POD_APP_LABEL[app]}`;
+  // Signed in → carry the WebID so the target app auto-authenticates; signed
+  // out → bare app URL. The WebID lives only in the href fragment (never logged).
+  const href = podAppLaunchUrl(app, webId);
 
   return (
     <Button asChild variant={variant} size={size}>
-      <a href={url} target="_blank" rel="noopener noreferrer">
+      <a href={href} target="_blank" rel="noopener noreferrer">
         <ExternalLink aria-hidden="true" />
         {text}
       </a>

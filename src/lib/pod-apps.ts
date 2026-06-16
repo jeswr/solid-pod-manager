@@ -88,6 +88,25 @@ export function podApp(key: PodAppKey): PodApp {
 }
 
 /**
+ * The launch URL for a pod app, carrying the signed-in user's WebID so the
+ * target app can auto-authenticate (the media-kraken#54 autologin pattern).
+ *
+ * When `webId` is given, the WebID is appended as the `#autologin/<webId>`
+ * fragment — the target app strips the `#autologin/` prefix and
+ * `decodeURIComponent`s the rest. The WebID is URL-encoded so its own `#me`
+ * fragment (and any other reserved chars) cannot break the launch URL. When no
+ * `webId` is given (signed out), the bare app URL is returned — a plain link,
+ * no fragment.
+ *
+ * The fragment is never sent to the server (browsers don't transmit the hash),
+ * so the WebID stays client-side; do not log it.
+ */
+export function podAppLaunchUrl(key: PodAppKey, webId?: string): string {
+  const url = POD_APP_URL[key];
+  return webId ? `${url}#autologin/${encodeURIComponent(webId)}` : url;
+}
+
+/**
  * Which pod apps a data category maps to. A category page renders an "Open in
  * <app>" launcher for each key here — Media surfaces BOTH Photos and Music, so
  * the value is a list. A category with no matching app (Calendar, Contacts, …)

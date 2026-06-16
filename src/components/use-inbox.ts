@@ -20,6 +20,15 @@
  * runs once per login/storage switch, NOT on every reload, so a mark-read /
  * dismiss / live-notification never re-fetches the profile.
  *
+ * Discovery runs in an effect AFTER paint, so on a storage switch the discovery
+ * state (`inbox`/`inboxUrl`/`discovered`) still describes the PREVIOUS storage
+ * for the render before the effect re-runs. To stop that previous storage's
+ * inbox flashing for one render, discovery is a SINGLE object TAGGED with the
+ * storage it ran for ({@link InboxDiscovery}); the listing treats it as ready
+ * (and derives the `inbox:<inboxUrl>` key) only when `discovery.storage` equals
+ * the CURRENT `activeStorage` — otherwise the key is empty (cold) until
+ * discovery for the new storage settles (roborev finding).
+ *
  * SECURITY: the cache is render-only. `markRead`/`dismiss` act on the live
  * `inbox` handle (a fresh server write), then `reload()` to revalidate — they
  * never mutate the cached snapshot directly.
@@ -27,7 +36,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useSession } from "@/components/session-provider";
 import { useSwrRead } from "@/components/use-swr-read";
-import { Inbox, inboxFor, type InboxNotification } from "@/lib/inbox";
+import { inboxFor, type InboxNotification } from "@/lib/inbox";
+import {
+  type InboxDiscovery,
+  NO_DISCOVERY,
+  inboxCacheKey,
+  inboxDiscoveryReady,
+} from "@/lib/inbox-discovery";
 import type { RevalidatableState } from "@/components/use-pod-data";
 
 export interface UseInbox extends RevalidatableState<InboxNotification[]> {
@@ -40,33 +55,30 @@ export interface UseInbox extends RevalidatableState<InboxNotification[]> {
 
 export function useInbox(): UseInbox {
   const { webId, activeStorage, status } = useSession();
-  const [inbox, setInbox] = useState<Inbox | undefined>(undefined);
-  const [inboxUrl, setInboxUrl] = useState<string | undefined>(undefined);
-  /** Has discovery settled? Distinguishes "still discovering" from "no inbox". */
-  const [discovered, setDiscovered] = useState(false);
+  // Discovery state as a SINGLE object tagged with the storage it ran for, so a
+  // storage switch cannot leave a stale `inboxUrl` that the render trusts before
+  // the discovery effect re-runs (the one-render flash roborev flagged).
+  const [discovery, setDiscovery] = useState<InboxDiscovery>(NO_DISCOVERY);
 
   // Discovery: derive the inbox only when the session changes — NOT on reload,
   // so a mark-read / dismiss / live-notification does not re-fetch the profile.
   useEffect(() => {
     if (status !== "logged-in" || !webId || !activeStorage) {
-      setInbox(undefined);
-      setInboxUrl(undefined);
-      setDiscovered(false);
+      setDiscovery(NO_DISCOVERY);
       return;
     }
     let cancelled = false;
-    setDiscovered(false);
+    // Mark "discovering for THIS storage" immediately: until it settles, the
+    // render derives an empty key (cold), so the previous storage's inbox is
+    // not painted while discovery for the new storage is in flight.
+    setDiscovery({ storage: activeStorage, discovered: false });
     (async () => {
       const box = await inboxFor({ webId, activeStorage });
       if (cancelled) return;
-      setInbox(box);
-      setInboxUrl(box?.inboxUrl);
-      setDiscovered(true);
+      setDiscovery({ storage: activeStorage, inbox: box, inboxUrl: box?.inboxUrl, discovered: true });
     })().catch(() => {
       if (!cancelled) {
-        setInbox(undefined);
-        setInboxUrl(undefined);
-        setDiscovered(true);
+        setDiscovery({ storage: activeStorage, discovered: true });
       }
     });
     return () => {
@@ -74,18 +86,18 @@ export function useInbox(): UseInbox {
     };
   }, [webId, activeStorage, status]);
 
-  // Listing: read through the SWR cache, keyed per WebID under `inbox`. The
-  // fetcher waits until discovery has settled — before that, an empty key keeps
-  // the loading state and touches no cache (so a switch never lists a stale
-  // pod's inbox). Once discovered with no inbox, resolve to an empty list.
-  const ready = status === "logged-in" && Boolean(webId) && Boolean(activeStorage) && discovered;
-  // Key per discovered inbox URL once discovery settles. The inbox is
-  // active-storage-dependent, so the key carries the discovered URL → a storage
-  // switch (different discovered inbox) changes the key and revalidates against
-  // the new storage rather than painting the previous one. When discovery
-  // settles with NO inbox, fall back to a storage-scoped sentinel so the
-  // empty-list result still caches/paints without colliding across storages.
-  const key = ready ? (inboxUrl ? `inbox:${inboxUrl}` : `inbox:none:${activeStorage}`) : "";
+  // Listing: read through the SWR cache. The key is EMPTY (cold, no cache touch)
+  // until discovery has settled FOR THE CURRENT STORAGE — so a storage switch
+  // never lists (or paints) the previous pod's inbox, even for one render.
+  const inbox = inboxDiscoveryReady(discovery, status, webId, activeStorage)
+    ? discovery.inbox
+    : undefined;
+  // The discovered URL to WATCH for live updates — only once it belongs to the
+  // current storage, so we never subscribe to the previous storage's container.
+  const inboxUrl = inboxDiscoveryReady(discovery, status, webId, activeStorage)
+    ? discovery.inboxUrl
+    : undefined;
+  const key = inboxCacheKey(discovery, status, webId, activeStorage);
   const fetcher = useCallback(async (): Promise<InboxNotification[]> => {
     return inbox ? inbox.list() : [];
   }, [inbox]);

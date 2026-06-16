@@ -41,6 +41,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SwrCache, deriveSwrInitialState, type DurableStore } from "../lib/swr-cache.js";
+import {
+  type InboxDiscovery,
+  inboxCacheKey,
+  inboxDiscoveryReady,
+} from "../lib/inbox-discovery.js";
 
 const COMPONENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const WEBID = "https://alice.example/profile#me";
@@ -495,5 +500,92 @@ describe("instant-nav: structural guard — every READ hook uses useSwrRead", ()
     ];
     const missing = required.filter((h) => !registryHooks.has(h));
     expect(missing, `Registry missing entries for: ${missing.join(", ")}`).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (1c) useInbox cross-storage discovery LAG — the one-render flash roborev flagged.
+// ---------------------------------------------------------------------------
+
+/**
+ * The bug class (roborev finding, Medium): inbox discovery runs in an effect
+ * AFTER paint, so on a SAME-WebID storage switch the discovery state still
+ * describes the PREVIOUS storage for the render before the discovery effect
+ * re-runs. If the listing trusted `discovered`/`inboxUrl` without checking which
+ * storage they belong to, `ready` would stay true and the cache key would be the
+ * PREVIOUS storage's `inbox:<oldUrl>` for one render — flashing the previous
+ * storage's inbox under the new (scoped) slot.
+ *
+ * The fix tags discovery with the storage it ran for ({@link InboxDiscovery}) and
+ * gates readiness/key derivation on `discovery.storage === activeStorage`. These
+ * tests drive the pure {@link inboxDiscoveryReady}/{@link inboxCacheKey} logic the
+ * hook runs at render (the node env has no React renderer — same approach as the
+ * cache tests above) and assert that a storage switch yields an EMPTY (cold) key
+ * until discovery for the NEW storage settles, so the previous inbox never flashes.
+ */
+describe("instant-nav: useInbox never paints the previous storage's inbox during a switch", () => {
+  const LOGGED_IN = "logged-in";
+  const INBOX_A = `${STORAGE_A}inbox/`;
+  const INBOX_B = `${STORAGE_B}inbox/`;
+  /** Settled discovery for a storage with a discovered inbox URL. */
+  const settled = (storage: string, inboxUrl: string): InboxDiscovery => ({
+    storage,
+    inboxUrl,
+    discovered: true,
+    // `inbox` (the Inbox handle) is irrelevant to key/ready derivation; omitted.
+  });
+
+  it("settled discovery for the CURRENT storage → ready, keyed per discovered inbox URL", () => {
+    const d = settled(STORAGE_A, INBOX_A);
+    expect(inboxDiscoveryReady(d, LOGGED_IN, WEBID, STORAGE_A)).toBe(true);
+    expect(inboxCacheKey(d, LOGGED_IN, WEBID, STORAGE_A)).toBe(`inbox:${INBOX_A}`);
+  });
+
+  it("a storage switch (A→B) while discovery still belongs to A → NOT ready, EMPTY (cold) key", () => {
+    // The render between the switch and the discovery effect re-running: the
+    // active storage is now B, but discovery still describes A.
+    const stillA = settled(STORAGE_A, INBOX_A);
+    expect(
+      inboxDiscoveryReady(stillA, LOGGED_IN, WEBID, STORAGE_B),
+      "discovery tagged to A must NOT be ready for active storage B",
+    ).toBe(false);
+    const key = inboxCacheKey(stillA, LOGGED_IN, WEBID, STORAGE_B);
+    expect(key, "the key must be EMPTY (cold) so A's inbox key is never used for B").toBe("");
+    // Crucially, it must NOT be A's discovered key — that would flash A's inbox.
+    expect(key).not.toBe(`inbox:${INBOX_A}`);
+  });
+
+  it("re-discovery for B completes → ready, keyed to B's inbox (never A's)", () => {
+    const onB = settled(STORAGE_B, INBOX_B);
+    expect(inboxDiscoveryReady(onB, LOGGED_IN, WEBID, STORAGE_B)).toBe(true);
+    expect(inboxCacheKey(onB, LOGGED_IN, WEBID, STORAGE_B)).toBe(`inbox:${INBOX_B}`);
+    // The cache key changed from A's to B's, so useSwrRead revalidates against B
+    // and B starts cold (no A data) — proven via deriveSwrInitialState below.
+    const cache = new SwrCache(null);
+    cache.set(WEBID, `inbox:${INBOX_A}`, [{ id: "urn:notif:a" }]);
+    const firstPaintOnB = deriveSwrInitialState(cache, WEBID, `inbox:${INBOX_B}`);
+    expect(firstPaintOnB.data, "B must start cold — never A's notifications").toBeUndefined();
+    expect(firstPaintOnB.loading).toBe(true);
+  });
+
+  it("still-discovering for the current storage (not yet settled) → NOT ready, EMPTY key", () => {
+    const discovering: InboxDiscovery = { storage: STORAGE_A, discovered: false };
+    expect(inboxDiscoveryReady(discovering, LOGGED_IN, WEBID, STORAGE_A)).toBe(false);
+    expect(inboxCacheKey(discovering, LOGGED_IN, WEBID, STORAGE_A)).toBe("");
+  });
+
+  it("settled-but-NO-inbox for the current storage → ready, storage-scoped sentinel key", () => {
+    const none: InboxDiscovery = { storage: STORAGE_A, discovered: true };
+    expect(inboxDiscoveryReady(none, LOGGED_IN, WEBID, STORAGE_A)).toBe(true);
+    expect(inboxCacheKey(none, LOGGED_IN, WEBID, STORAGE_A)).toBe(`inbox:none:${STORAGE_A}`);
+    // The sentinel is storage-scoped, so a switch to B can't reuse A's empty slot.
+    expect(inboxCacheKey(none, LOGGED_IN, WEBID, STORAGE_B)).toBe("");
+  });
+
+  it("logged-out / no webId / no active storage → never ready, EMPTY key", () => {
+    const d = settled(STORAGE_A, INBOX_A);
+    expect(inboxCacheKey(d, "logged-out", WEBID, STORAGE_A)).toBe("");
+    expect(inboxCacheKey(d, LOGGED_IN, undefined, STORAGE_A)).toBe("");
+    expect(inboxCacheKey(d, LOGGED_IN, WEBID, undefined)).toBe("");
   });
 });

@@ -4,6 +4,7 @@
 import { useCallback } from "react";
 import { useSession } from "@/components/session-provider";
 import { useSwrRead } from "@/components/use-swr-read";
+import { useResourceNotifications } from "@/components/use-resource-notifications";
 import { CONTACTS_SLUG, contactsStore } from "@/lib/contacts";
 import { readKnows } from "@/lib/social";
 import { freshRdf } from "@/lib/rdf-read";
@@ -24,15 +25,21 @@ import type { RevalidatableState } from "@/components/use-pod-data";
  * `activeStorage`, so the key MUST carry it — keying the static `people` would
  * keep the same `(webId, key)` across a SAME-WebID storage switch and never
  * revalidate, painting the previous storage's contacts (roborev finding). The
- * profile doc AND the active storage's contacts container are watched so a
- * friend/contact change invalidates + refreshes it.
+ * fetcher reads from BOTH the contacts container AND the profile document
+ * (`foaf:knows` friends), so BOTH are watched for live changes: the contacts
+ * container via `useSwrRead`'s `topicUrl`, and the profile document via a
+ * second {@link useResourceNotifications} subscription wired to the same
+ * `reload` — so a friend/contact change on EITHER invalidates + refreshes the
+ * mounted picker (roborev finding: watching only the contacts container dropped
+ * profile/friend live-refresh).
  */
 export function usePeople(): RevalidatableState<PersonOption[]> & {
   reload: () => void;
 } {
   // `webId` is supplied to the fetcher as its argument by `useSwrRead` (the
-  // active WebID), so we only need `activeStorage` from the session here.
-  const { activeStorage } = useSession();
+  // active WebID); we also read it here to WATCH the profile document for live
+  // friend changes (the fetcher reads `foaf:knows` from it).
+  const { webId, activeStorage } = useSession();
 
   // The fetcher captures `activeStorage` (the pod whose contacts we read) from
   // the closure — `useSwrRead` keeps the freshest fetcher each render, so a
@@ -63,8 +70,7 @@ export function usePeople(): RevalidatableState<PersonOption[]> & {
 
   // The active storage's contacts container is the active-storage-dependent
   // resource the picker reads contacts from; watch it so a live contact
-  // add/edit/remove invalidates + refreshes this view. (Friend changes on the
-  // profile doc are still picked up on re-nav / reload, which re-reads both.)
+  // add/edit/remove invalidates + refreshes this view.
   const contactsContainer = activeStorage
     ? new URL(CONTACTS_SLUG, activeStorage).toString()
     : undefined;
@@ -74,6 +80,12 @@ export function usePeople(): RevalidatableState<PersonOption[]> & {
     fetcher,
     { topicUrl: contactsContainer },
   );
+
+  // The picker ALSO reads `foaf:knows` friends from the profile document, so a
+  // change there (e.g. adding a friend) must revalidate the mounted picker too.
+  // `useSwrRead` watches only the contacts container; subscribe to the profile
+  // document here, wired to the SAME `reload`, so BOTH topics keep it live.
+  useResourceNotifications(webId ? profileDocUrl(webId) : undefined, reload);
 
   return { data, error, loading, revalidating, reload };
 }

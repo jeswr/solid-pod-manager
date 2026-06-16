@@ -60,10 +60,11 @@ export function OnboardingDialog({ open, onDismiss }: OnboardingDialogProps) {
         <Dialog.Overlay
           className="fixed inset-0 z-50 bg-black/20 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0"
         />
-        <Dialog.Content
-          className="fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-2xl border border-border bg-card p-6 shadow-lg duration-150 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95 sm:max-w-md"
-          aria-label="Welcome to Pod Manager"
-        >
+        {/* No static aria-label: the dialog is labelled by the ACTIVE step's
+            Dialog.Title (and described by its Dialog.Description), so screen
+            readers announce the current step's heading as the dialog name — a
+            static label would override that (roborev). */}
+        <Dialog.Content className="fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-2xl border border-border bg-card p-6 shadow-lg duration-150 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95 sm:max-w-md">
           <OnboardingBody onDismiss={onDismiss} />
         </Dialog.Content>
       </Dialog.Portal>

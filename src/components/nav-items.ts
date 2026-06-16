@@ -19,6 +19,7 @@ import {
   Inbox,
   MessagesSquare,
   CalendarClock,
+  Globe,
 } from "lucide-react";
 
 export interface NavItem {
@@ -56,4 +57,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/inbox", label: "Inbox", icon: Inbox },
   { href: "/chat", label: "Chat", icon: MessagesSquare },
   { href: "/schedule", label: "Schedule", icon: CalendarClock },
+  // The Solid community's forum + chat rooms, unified (read-first) via
+  // @jeswr/solid-community-feeds. The forum works without any credentials.
+  { href: "/community", label: "Solid Community", icon: Globe },
 ] as const;

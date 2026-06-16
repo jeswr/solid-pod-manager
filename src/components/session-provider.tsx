@@ -52,6 +52,19 @@ import {
 } from "@/lib/session-profile";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 import { readCache } from "@/lib/swr-cache";
+import { captureNativeFetch } from "@/lib/native-fetch";
+import {
+  clearCommunityCredentials,
+  clearCommunityCredentialsIfOwnerChanged,
+} from "@/lib/community-credentials";
+
+// Capture the pristine native `fetch` at THIS module's evaluation — which is at
+// app boot (this provider is mounted by the root layout), before the reactive
+// auth `fetch` patch is installed in the effect below. Community-feed requests
+// to third-party public hosts (matrix.org / forum.solidproject.org) then use it
+// to bypass the Solid auth layer entirely (no risk of attaching a pod
+// credential to a non-pod host). Idempotent — the first capture wins.
+captureNativeFetch();
 
 type Status = "loading" | "logged-out" | "authenticating" | "logged-in";
 
@@ -463,6 +476,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           if (prev && prev !== id) readCache.clearWebId(prev);
           return id;
         });
+        // Account switch (no /community mounted to run the owner-guard): drop any
+        // in-memory community credentials whose owner is not the new WebID, so the
+        // previous account's Matrix token never carries into this session. No-op
+        // when the owner already matches `id` (idempotent). roborev.
+        clearCommunityCredentialsIfOwnerChanged(id);
         enterSwitchLoading(id);
         // The token grant succeeded → the session is real; mark logged-in. The
         // (cosmetic) profile/storage load runs through the SHARED loader, so the
@@ -565,6 +583,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // a render-speed optimization only; clearing it here is the security
     // boundary for the read snapshots (writes already re-read fresh).
     readCache.clearAll();
+    // Drop the in-memory community (Matrix/Discourse) credentials too: they are
+    // module-scoped and survive the /community unmount, so an explicit logout
+    // must wipe a pasted Matrix token from the tab (it must not outlive sign-out;
+    // the in-effect owner-guard only runs if /community is mounted). roborev.
+    clearCommunityCredentials();
     setWebId(undefined);
     setProfile(undefined);
     setActive(undefined);

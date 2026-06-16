@@ -199,6 +199,22 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
     key: `assigned-tasks:${STORAGE}`,
     seed: (c) => c.set(WEBID, `assigned-tasks:${STORAGE}`, [{ task: { title: "t" } }]),
   },
+  {
+    hook: "useCommunityFeed",
+    source: "use-community.ts",
+    page: "/community (Solid Community — forum + Matrix rooms)",
+    // Keyed on the user's prefs snapshot + Matrix-connected flag
+    // (`community:<m|_>:<latest>:<rooms>:<topics>:<marks>`), a representative
+    // concrete value (the cache treats the key as opaque, so the first-paint
+    // property holds for every concrete prefs digest).
+    key: "community:_:1:#solid_project:matrix.org::",
+    seed: (c) =>
+      c.set(WEBID, "community:_:1:#solid_project:matrix.org::", {
+        threads: [{ id: "discourse:t:1", source: "discourse", title: "Welcome" }],
+        totalUnread: 0,
+        errors: [],
+      }),
+  },
 ];
 
 /**
@@ -222,4 +238,7 @@ export const PREFETCH_EXEMPT_HOOKS: ReadonlySet<string> = new Set([
   "useDomain", // a single domain binding by name
   "useChat", // a specific chat container the user opens
   "useCategoryItems", // a category's items by route id (summaries ARE prefetched)
+  "useCommunityFeed", // reads THIRD-PARTY public hosts (matrix.org / forum.solidproject.org),
+  // NOT the pod — warming it on app load would fire unsolicited external requests; it loads
+  // on demand when the user opens /community (and is instant-nav cached thereafter)
 ]);

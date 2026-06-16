@@ -18,7 +18,7 @@ import {
   resolvePrivateIndex,
   typeIndexLinks,
 } from "./type-index.js";
-import { preferencesFileLink } from "./preferences.js";
+import { preferencesFileLink, ProfilePreferencesAnchor } from "./preferences.js";
 import { ISSUE_CLASS, ISSUES_CONFIG, ISSUES_SLUG } from "./issues.js";
 
 const PREFS_URL = `${TEST_POD_ROOT}settings/preferences.ttl`;
@@ -212,9 +212,9 @@ describe("private type index — preferences file + legacy migration (task #87)"
     expect(resolved.privateIndex).toBe(LEGACY_INDEX);
   });
 
-  it("(c) when both card (legacy) and prefs hold a link, prefs wins and the card is cleaned", async () => {
+  it("(c) when both card (legacy) and prefs hold a link, PREFS WINS and the card is cleaned", async () => {
     const pod = createMemoryPod();
-    // First bootstrap: link in prefs.
+    // First bootstrap: compliant link in prefs (LEGACY_INDEX).
     await ensureTypeRegistrations({
       webId: TEST_WEBID,
       podRoot: TEST_POD_ROOT,
@@ -236,14 +236,13 @@ describe("private type index — preferences file + legacy migration (task #87)"
     });
 
     expect(result.migrated).toBe(true);
-    // The card's stale legacy link is removed; the prefs file is authoritative.
+    // The card's stale legacy link is removed; the COMPLIANT prefs value is kept
+    // authoritative — a stale card value must NEVER clobber it (roborev High).
     const card = pod.dataset(TEST_PROFILE_DOC);
     expect(typeIndexLinks(TEST_WEBID, card).privateIndex).toBeUndefined();
     const resolved = await resolvePrivateIndex(TEST_WEBID, card, pod.fetch);
     expect(resolved.source).toBe("preferences");
-    // The migration overwrites the prefs link with the card's value (the move),
-    // so after a re-run the prefs link is whichever the card carried last.
-    expect(resolved.privateIndex).toBe(stale);
+    expect(resolved.privateIndex).toBe(LEGACY_INDEX); // prefs value kept, NOT `stale`
   });
 
   it("(d) migration is idempotent — a second run is a no-op (no writes)", async () => {
@@ -287,6 +286,62 @@ describe("private type index — preferences file + legacy migration (task #87)"
     expect([...auths[0].agent]).toEqual([TEST_WEBID]);
     expect(auths[0].accessibleToAny).toBe(false);
     expect(auths[0].accessibleToAuthenticated).toBe(false);
+  });
+
+  it("(f) locks an EXISTING public prefs file owner-only before writing the private-index link", async () => {
+    const pod = createMemoryPod();
+    // Seed: card links an existing prefs file AND carries a legacy private-index
+    // link to migrate. (seedLegacyCard sets the legacy link; add the prefs link
+    // alongside it via the typed anchors.)
+    const res = await pod.fetch(TEST_WEBID, { method: "GET" });
+    const etag = res.headers.get("etag");
+    const card = await parseRdf(await res.text(), "text/turtle", { baseIRI: TEST_PROFILE_DOC });
+    new ProfileTypeIndexAnchor(TEST_WEBID, card, DataFactory).privateIndex = LEGACY_INDEX;
+    new ProfilePreferencesAnchor(TEST_WEBID, card, DataFactory).preferencesFile = PREFS_URL;
+    await pod.fetch(TEST_PROFILE_DOC, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle", ...(etag ? { "if-match": etag } : {}) },
+      body: await turtle(card),
+    });
+    // The prefs file exists but is PUBLIC-readable.
+    await pod.fetch(PREFS_URL, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `<${PREFS_URL}> a <http://www.w3.org/ns/pim/space#ConfigurationFile> .`,
+    });
+    await pod.fetch(`${PREFS_URL}.acl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix acl: <http://www.w3.org/ns/auth/acl#>.
+        @prefix foaf: <http://xmlns.com/foaf/0.1/>.
+        <#public> a acl:Authorization ;
+          acl:agentClass foaf:Agent ;
+          acl:accessTo <${PREFS_URL}> ;
+          acl:mode acl:Read .`,
+    });
+
+    await ensureTypeRegistrations({
+      webId: TEST_WEBID,
+      podRoot: TEST_POD_ROOT,
+      registrations: [{ forClass: MUSIC, container: CONTAINER }],
+      fetchImpl: pod.fetch,
+    });
+
+    // The prefs file's ACL was re-locked owner-only BEFORE the private-index URL
+    // landed in it — the URL is never written into a public document.
+    const aclDs = await parseRdf(pod.get(`${PREFS_URL}.acl`) ?? "", "text/turtle", {
+      baseIRI: `${PREFS_URL}.acl`,
+    });
+    const auths = [...new AclResource(aclDs, DataFactory).authorizations];
+    expect(auths.some((a) => a.agentClass.has("http://xmlns.com/foaf/0.1/Agent"))).toBe(false);
+    expect(auths.some((a) => a.agent.has(TEST_WEBID))).toBe(true);
+    // …and the link did land in (the now-locked) prefs file.
+    const prefsAnchor = new ProfileTypeIndexAnchor(
+      PREFS_URL,
+      pod.dataset(PREFS_URL),
+      DataFactory,
+    );
+    expect(prefsAnchor.privateIndex).toBe(LEGACY_INDEX);
   });
 });
 

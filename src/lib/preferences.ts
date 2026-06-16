@@ -36,11 +36,18 @@ import { RdfFetchError } from "@jeswr/fetch-rdf";
 import { freshRdf } from "./rdf-read.js";
 import { writeResource } from "./pod-data.js";
 import { aclUrlFromLinkHeader } from "./permissions.js";
-import { AclDiscoveryError, AclWriteError, ResourceWriteError } from "./errors.js";
+import {
+  AclDiscoveryError,
+  AclReadError,
+  AclWriteError,
+  AcpUnsupportedError,
+  ResourceWriteError,
+} from "./errors.js";
 
 const SPACE = "http://www.w3.org/ns/pim/space#";
 const RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const ACL = "http://www.w3.org/ns/auth/acl#";
+const ACP = "http://www.w3.org/ns/solid/acp#";
 
 /** Turtle prefixes for a readable preferences document. */
 const PREFERENCES_PREFIXES = { space: SPACE } as const;
@@ -161,27 +168,40 @@ export async function ensurePreferencesFile(opts: {
   return { preferencesFile, created: true };
 }
 
-/**
- * Write an owner-only WAC ACL for a resource: a single `acl:Authorization`
- * granting the owner Read/Write/Control and NO ONE else. Built through the
- * typed `@solid/object` `Authorization` wrapper — never hand-built triples
- * (the `solid-wac` house rule).
- *
- * Discovers the resource's own `.acl` slot from its `Link: rel="acl"` header
- * (never guessed) and PUTs the ACL there.
- *
- * @throws AclDiscoveryError when the ACL slot can't be located, AclWriteError on
- *   a write rejection (fail-closed — a prefs file with no/loose ACL is a leak).
- */
-export async function lockOwnerOnly(
-  resourceUrl: string,
-  ownerWebId: string,
-  fetchImpl?: typeof fetch,
-): Promise<void> {
-  const call = fetchImpl ?? fetch;
+/** True for a clearly-ACP control document (`.acr`), which we don't write. */
+function isAcpControlUrl(aclUrl: string): boolean {
+  try {
+    return new URL(aclUrl).pathname.endsWith(".acr");
+  } catch {
+    return aclUrl.endsWith(".acr");
+  }
+}
 
-  // Discover the ACL slot (GET so the auth-patched fetch replays a 401→DPoP
-  // upgrade; only the Link header matters).
+/** True when a dataset carries ACP-namespace triples (an ACP document). */
+function datasetUsesAcp(dataset: DatasetCore): boolean {
+  for (const q of dataset) {
+    if (q.predicate.value.startsWith(ACP)) return true;
+    if (q.object.termType === "NamedNode" && q.object.value.startsWith(ACP)) return true;
+  }
+  return false;
+}
+
+/**
+ * Discover a resource's WAC ACL slot from its `Link: rel="acl"` header (never
+ * guessed). Fails closed on an ACP (`.acr`) slot — this app only writes WAC, and
+ * silently writing WAC triples into an ACP control resource (or, worse, leaving
+ * a prefs file unprotected) would re-open the leak this change closes.
+ *
+ * @throws AclDiscoveryError when the slot can't be located,
+ *   AcpUnsupportedError when the pod is ACP-backed (roborev Medium — ACP).
+ */
+async function discoverWacAclUrl(
+  resourceUrl: string,
+  fetchImpl?: typeof fetch,
+): Promise<string> {
+  const call = fetchImpl ?? fetch;
+  // GET (not HEAD) so the auth-patched fetch replays a 401→DPoP upgrade; only the
+  // Link header matters.
   let res: Response;
   try {
     res = await call(resourceUrl, { method: "GET" });
@@ -192,7 +212,16 @@ export async function lockOwnerOnly(
   if (!res.ok) throw new AclDiscoveryError(resourceUrl);
   const aclUrl = aclUrlFromLinkHeader(res.headers.get("link"), resourceUrl);
   if (!aclUrl) throw new AclDiscoveryError(resourceUrl);
+  if (isAcpControlUrl(aclUrl)) throw new AcpUnsupportedError(resourceUrl);
+  return aclUrl;
+}
 
+/** Build the owner-only WAC ACL dataset for a resource (typed wrapper only). */
+function ownerOnlyAcl(
+  aclUrl: string,
+  resourceUrl: string,
+  ownerWebId: string,
+): DatasetCore {
   const dataset: DatasetCore = new Store();
   const auth = new Authorization(`${aclUrl}#owner`, dataset, DataFactory);
   auth.type.add(`${ACL}Authorization`);
@@ -201,14 +230,19 @@ export async function lockOwnerOnly(
   auth.canRead = true;
   auth.canWrite = true;
   auth.canReadWriteAcl = true; // Control — the owner manages the ACL itself.
-  // No public / authenticated / group / origin subject is ever added: this is
-  // the whole point — owner-only.
-
-  // Defence-in-depth: the wrapper is the only writer, but assert the result
-  // grants no broad subject before we PUT it (a loose prefs ACL would re-open
-  // the very leak we're closing).
+  // No public / authenticated / group / origin subject is ever added.
+  // Defence-in-depth: assert the result grants no broad subject before use.
   assertOwnerOnly(dataset, resourceUrl, ownerWebId);
+  return dataset;
+}
 
+/** PUT an ACL dataset, mapping failures to a fail-closed AclWriteError. */
+async function putAcl(
+  aclUrl: string,
+  dataset: DatasetCore,
+  fetchImpl?: typeof fetch,
+): Promise<void> {
+  const call = fetchImpl ?? fetch;
   let put: Response;
   try {
     put = await call(aclUrl, {
@@ -220,6 +254,94 @@ export async function lockOwnerOnly(
     throw new AclWriteError(aclUrl, undefined, { cause });
   }
   if (!put.ok) throw new AclWriteError(aclUrl, `PUT ${aclUrl} -> ${put.status}`);
+}
+
+/**
+ * Write an owner-only WAC ACL for a resource: a single `acl:Authorization`
+ * granting the owner Read/Write/Control and NO ONE else. Built through the
+ * typed `@solid/object` `Authorization` wrapper — never hand-built triples
+ * (the `solid-wac` house rule). Unconditional — overwrites whatever is there.
+ *
+ * @throws AclDiscoveryError when the ACL slot can't be located,
+ *   AcpUnsupportedError on an ACP pod, AclWriteError on a write rejection
+ *   (fail-closed — a prefs file with no/loose ACL is a leak).
+ */
+export async function lockOwnerOnly(
+  resourceUrl: string,
+  ownerWebId: string,
+  fetchImpl?: typeof fetch,
+): Promise<void> {
+  const aclUrl = await discoverWacAclUrl(resourceUrl, fetchImpl);
+  await putAcl(aclUrl, ownerOnlyAcl(aclUrl, resourceUrl, ownerWebId), fetchImpl);
+}
+
+/**
+ * Ensure a resource's ACL is owner-only, locking it if it is not (idempotent).
+ *
+ * Reads the existing ACL: if it is ALREADY owner-only (only the owner agent, no
+ * public/authenticated/group/origin/other-agent on this resource) it is left
+ * untouched (no write). Otherwise — missing, loose, or shared — it is
+ * (re-)written owner-only, fail-closed. This is what makes reusing an EXISTING
+ * linked preferences file safe before writing the private-index link into it
+ * (roborev High): a public/shared prefs document is locked down first.
+ *
+ * @throws AcpUnsupportedError on an ACP pod (fail-closed — we don't speak ACP),
+ *   AclWriteError on a write rejection.
+ */
+export async function ensureOwnerOnly(
+  resourceUrl: string,
+  ownerWebId: string,
+  fetchImpl?: typeof fetch,
+): Promise<void> {
+  const aclUrl = await discoverWacAclUrl(resourceUrl, fetchImpl);
+
+  // Read the existing ACL. A 404 means there is no own ACL — it must be created
+  // owner-only (an unprotected resource may be world-readable via an ancestor
+  // default, so never leave it without an explicit own ACL).
+  let existing: { dataset: DatasetCore } | undefined;
+  try {
+    const { dataset } = await freshRdf(aclUrl, fetchImpl);
+    existing = { dataset };
+  } catch (e) {
+    if (e instanceof RdfFetchError && e.status === 404) existing = undefined;
+    else throw new AclReadError(aclUrl, { cause: e });
+  }
+
+  if (existing) {
+    // A hybrid server could serve an ACP document at a `.acl`-named slot — refuse
+    // to treat it as WAC (fail-closed).
+    if (datasetUsesAcp(existing.dataset)) throw new AcpUnsupportedError(resourceUrl);
+    if (isAlreadyOwnerOnly(existing.dataset, resourceUrl, ownerWebId)) return; // no write
+  }
+
+  await putAcl(aclUrl, ownerOnlyAcl(aclUrl, resourceUrl, ownerWebId), fetchImpl);
+}
+
+/**
+ * True when `dataset`'s authorizations governing `resourceUrl` grant access to
+ * NO ONE but the owner agent (no public/authenticated/group/origin/other-agent),
+ * AND the owner actually holds an authorization. Conservative: any
+ * non-owner-only or owner-absent shape returns false (→ re-lock).
+ */
+function isAlreadyOwnerOnly(
+  dataset: DatasetCore,
+  resourceUrl: string,
+  ownerWebId: string,
+): boolean {
+  const acl = new AclResource(dataset, DataFactory);
+  let ownerHasRule = false;
+  for (const auth of acl.authorizations) {
+    if (!authTargetsResource(auth, resourceUrl)) continue;
+    if (auth.accessibleToAny || auth.accessibleToAuthenticated) return false;
+    if (auth.agentClass.size > 0 || auth.origin.size > 0 || auth.agentGroup !== undefined) {
+      return false;
+    }
+    for (const agent of auth.agent) {
+      if (agent !== ownerWebId) return false;
+      ownerHasRule = true;
+    }
+  }
+  return ownerHasRule;
 }
 
 /**

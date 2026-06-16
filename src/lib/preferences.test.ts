@@ -15,12 +15,13 @@ import {
   TEST_WEBID,
 } from "./integrations/core/testing.js";
 import {
+  ensureOwnerOnly,
   ensurePreferencesFile,
   lockOwnerOnly,
   preferencesFileLink,
   ProfilePreferencesAnchor,
 } from "./preferences.js";
-import { AclWriteError } from "./errors.js";
+import { AclWriteError, AcpUnsupportedError } from "./errors.js";
 
 const PREFS_URL = `${TEST_POD_ROOT}settings/preferences.ttl`;
 const FOAF_AGENT = "http://xmlns.com/foaf/0.1/Agent";
@@ -171,5 +172,69 @@ describe("lockOwnerOnly", () => {
     await expect(lockOwnerOnly(PREFS_URL, TEST_WEBID, fetchImpl)).rejects.toBeInstanceOf(
       AclWriteError,
     );
+  });
+
+  it("fails closed (AcpUnsupportedError) on an ACP pod (.acr slot)", async () => {
+    // The resource advertises an ACP `.acr` control slot — we don't speak ACP.
+    const fetchImpl: typeof fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return new Response("", {
+        status: 200,
+        headers: { "content-type": "text/turtle", link: `<${url}.acr>; rel="acl"` },
+      });
+    }) as typeof fetch;
+
+    await expect(lockOwnerOnly(PREFS_URL, TEST_WEBID, fetchImpl)).rejects.toBeInstanceOf(
+      AcpUnsupportedError,
+    );
+  });
+});
+
+describe("ensureOwnerOnly", () => {
+  it("re-locks a PUBLIC/shared existing ACL down to owner-only (the leak guard)", async () => {
+    const pod = createMemoryPod();
+    // Create the prefs resource, then plant a PUBLIC-readable ACL on it.
+    await pod.fetch(PREFS_URL, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `<${PREFS_URL}> a <http://www.w3.org/ns/pim/space#ConfigurationFile> .`,
+    });
+    await pod.fetch(`${PREFS_URL}.acl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix acl: <http://www.w3.org/ns/auth/acl#>.
+        @prefix foaf: <http://xmlns.com/foaf/0.1/>.
+        <#public> a acl:Authorization ;
+          acl:agentClass foaf:Agent ;
+          acl:accessTo <${PREFS_URL}> ;
+          acl:mode acl:Read .`,
+    });
+
+    await ensureOwnerOnly(PREFS_URL, TEST_WEBID, pod.fetch);
+
+    // The ACL is now owner-only: no public agent class survives.
+    const aclDs = await parseRdf(pod.get(`${PREFS_URL}.acl`) ?? "", "text/turtle", {
+      baseIRI: `${PREFS_URL}.acl`,
+    });
+    const auths = [...new AclResource(aclDs, DataFactory).authorizations];
+    expect(auths.some((a) => a.agentClass.has(FOAF_AGENT))).toBe(false);
+    expect(auths.some((a) => a.accessibleToAny)).toBe(false);
+    expect(auths.some((a) => a.agent.has(TEST_WEBID))).toBe(true);
+  });
+
+  it("is a no-op when the existing ACL is already owner-only (no write)", async () => {
+    const pod = createMemoryPod();
+    await pod.fetch(PREFS_URL, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `<${PREFS_URL}> a <http://www.w3.org/ns/pim/space#ConfigurationFile> .`,
+    });
+    // Lock it once.
+    await lockOwnerOnly(PREFS_URL, TEST_WEBID, pod.fetch);
+    const putsBefore = pod.putCount;
+
+    // A second ensureOwnerOnly sees it is already owner-only → no write.
+    await ensureOwnerOnly(PREFS_URL, TEST_WEBID, pod.fetch);
+    expect(pod.putCount).toBe(putsBefore);
   });
 });

@@ -16,7 +16,7 @@ import { RdfFetchError } from "@jeswr/fetch-rdf";
 import { freshRdf } from "./rdf-read.js";
 import { ResourceWriteError } from "./errors.js";
 import { writeResource } from "./pod-data.js";
-import { ensurePreferencesFile, readPreferences } from "./preferences.js";
+import { ensureOwnerOnly, ensurePreferencesFile, readPreferences } from "./preferences.js";
 import {
   ProfileTypeIndexAnchor,
   TypeIndexDataset,
@@ -185,24 +185,26 @@ export async function ensurePrivateIndexLink(opts: {
     profileEtag,
     fetchImpl,
   });
-  await setPrivateIndexInPreferences(preferencesFile, indexUrl, fetchImpl);
+  await setPrivateIndexInPreferences(preferencesFile, indexUrl, webId, fetchImpl);
   return { indexUrl, bootstrapped: true, migrated };
 }
 
 /**
  * Migrate a legacy `solid:privateTypeIndex` link off the world-readable card and
  * into the owner-private preferences file (task #87). Idempotent — a card with
- * no legacy link, or whose link already lives in prefs, is a no-op (returns
- * `false`).
+ * no legacy link is a no-op (returns `false`).
  *
- * The move is done conditionally, foreign triples preserved:
- *   - copy the link into the prefs file (creating + WAC-locking it if absent);
+ * THE PREFS FILE IS AUTHORITATIVE. When the prefs file ALREADY holds a private
+ * index, that compliant value WINS — we do NOT overwrite it with the (possibly
+ * stale) card value (roborev High). We only:
+ *   - seed the prefs link from the card when prefs has NONE yet (creating +
+ *     WAC-locking the prefs file if absent); then
  *   - remove ONLY the `solid:privateTypeIndex` triple from the card (every other
  *     card triple — name, storage, public index, inbox — is left untouched).
  *
  * The public type index stays on the card (it is meant to be public).
  *
- * @returns true when a migration was performed.
+ * @returns true when a migration was performed (the card link was moved/cleaned).
  */
 export async function migratePrivateIndexLink(opts: {
   webId: string;
@@ -215,8 +217,8 @@ export async function migratePrivateIndexLink(opts: {
   const legacy = cardAnchor.privateIndex;
   if (!legacy) return false; // nothing on the card → nothing to migrate (no-op)
 
-  // Move it into the prefs file FIRST (create + WAC-lock if needed), so the link
-  // is never momentarily absent from both documents.
+  // Ensure (create + WAC-lock if needed) the prefs file FIRST, so the link is
+  // never momentarily absent from both documents.
   const { preferencesFile } = await ensurePreferencesFile({
     webId,
     podRoot,
@@ -224,7 +226,11 @@ export async function migratePrivateIndexLink(opts: {
     profileEtag,
     fetchImpl,
   });
-  await setPrivateIndexInPreferences(preferencesFile, legacy, fetchImpl);
+  // Seed the prefs link from the card ONLY when prefs has none — never clobber an
+  // existing compliant prefs value with a stale card value (roborev High).
+  await setPrivateIndexInPreferences(preferencesFile, legacy, webId, fetchImpl, {
+    onlyIfAbsent: true,
+  });
 
   // Re-read the card: ensurePreferencesFile may have written it (adding the
   // prefs link), invalidating our ETag. Then strip ONLY the legacy private-index
@@ -241,19 +247,40 @@ export async function migratePrivateIndexLink(opts: {
  * Set `solid:privateTypeIndex` in the preferences file (read-modify-write,
  * conditional, foreign triples preserved). Idempotent — re-setting the same
  * value writes nothing.
+ *
+ * SECURITY: before writing the private-index link, the prefs file's WAC is
+ * verified owner-only and, if not, locked owner-only — so the private-index URL
+ * is never written into a public/shared prefs document (roborev High).
+ *
+ * @param opts.onlyIfAbsent - when true, do NOT overwrite an existing
+ *   `solid:privateTypeIndex` in the prefs file (the prefs value stays
+ *   authoritative); used by the migration so a stale card value never clobbers a
+ *   compliant prefs value.
  */
 async function setPrivateIndexInPreferences(
   preferencesFile: string,
   indexUrl: string,
+  ownerWebId: string,
   fetchImpl?: typeof fetch,
+  opts: { onlyIfAbsent?: boolean } = {},
 ): Promise<void> {
+  // SECURITY (roborev High): before writing the private-index URL into the prefs
+  // file, ensure that file is owner-only — a public/shared prefs document would
+  // leak the URL. ensureOwnerOnly is idempotent (a no-op when already locked) and
+  // runs BEFORE the read-modify-write below so the (possibly re-read) dataset
+  // reflects the locked state. It fails closed on an ACP pod.
+  await ensureOwnerOnly(preferencesFile, ownerWebId, fetchImpl);
+
   const prefs = await readPreferences(preferencesFile, fetchImpl);
   // The prefs file was just created/linked by ensurePreferencesFile, so a
   // missing read here is unexpected — fail loudly rather than silently skip.
   if (!prefs) throw new ResourceWriteError(preferencesFile, 404);
   const dataset: DatasetCore = prefs.dataset;
   const anchor = new ProfileTypeIndexAnchor(preferencesFile, dataset, DataFactory);
-  if (anchor.privateIndex === indexUrl) return; // already set — no write
+  const current = anchor.privateIndex;
+  if (current === indexUrl) return; // already set — no write
+  if (opts.onlyIfAbsent && current !== undefined) return; // prefs wins — no write
+
   anchor.privateIndex = indexUrl;
   await writeResource(preferencesFile, dataset, {
     etag: prefs.etag,

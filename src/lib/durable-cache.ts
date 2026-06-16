@@ -524,3 +524,64 @@ export function clearAllDurableCache(
     /* best-effort */
   }
 }
+
+/**
+ * Remove EVERY snapshot whose MODEL KEY starts with `modelKeyPrefix`, across all
+ * WebIDs. Used by one-time client migrations that retire a model key from the
+ * durable layer — e.g. the `community:` feed, which carries PRIVATE Matrix
+ * content and must be MEMORY-ONLY: this purges any snapshot a prior build (or a
+ * future codec MISregistration) might have written, so private content cannot
+ * survive on disk until the next logout/account-switch (roborev finding, HIGH).
+ *
+ * Belt-and-braces: the `community:` key has no registered codec, so
+ * {@link writeDurableCache} never persisted it on ANY build of this branch — but
+ * a boot migration ({@link purgeRetiredDurableKeys}) makes the "never on disk"
+ * guarantee independent of the codec registry's state and provable by a test
+ * (the regression test seeds a legacy `community:` envelope directly and asserts
+ * the migration removes it). It also closes the gap if a future change ever
+ * (re)registers a codec for a memory-only key by mistake.
+ *
+ * The storage key is `${PREFIX}${webId}${SEP}${modelKey}`; we match on the
+ * substring after `SEP` (WebIDs never contain the NUL `SEP`).
+ */
+export function purgeDurableCacheByKeyPrefix(
+  modelKeyPrefix: string,
+  storage: SyncStorage | null = defaultStorage(),
+): void {
+  if (!storage || !modelKeyPrefix) return;
+  try {
+    for (const k of ourKeys(storage)) {
+      const sep = k.indexOf(SEP);
+      if (sep < 0) continue;
+      const modelKey = k.slice(sep + SEP.length);
+      if (modelKey.startsWith(modelKeyPrefix)) storage.removeItem(k);
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Model-key prefixes that are MEMORY-ONLY and must NEVER live on disk, so any
+ * snapshot a prior build (or a mistaken codec registration) wrote is purged once
+ * at app start. Keep this in lock-step with the memory-only caches in
+ * `swr-cache.ts`: a key routed through {@link memoryReadCache} because its value
+ * can hold private third-party content (the `community:` feed interleaves PRIVATE
+ * Matrix messages) belongs here so the durable layer is swept clean of it too.
+ */
+const RETIRED_DURABLE_KEY_PREFIXES: readonly string[] = ["community:"];
+
+/**
+ * One-time boot migration: purge every durable snapshot under a memory-only key
+ * prefix ({@link RETIRED_DURABLE_KEY_PREFIXES}) across all WebIDs. Called once
+ * from the app shell so private content a prior build may have persisted does not
+ * linger on disk until the next logout. Idempotent + best-effort: re-running it
+ * (or running it when nothing is present) is a no-op and never throws.
+ */
+export function purgeRetiredDurableKeys(
+  storage: SyncStorage | null = defaultStorage(),
+): void {
+  for (const prefix of RETIRED_DURABLE_KEY_PREFIXES) {
+    purgeDurableCacheByKeyPrefix(prefix, storage);
+  }
+}

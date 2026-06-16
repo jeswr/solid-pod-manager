@@ -52,6 +52,7 @@ import {
 } from "@/lib/session-profile";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 import { memoryReadCache, readCache } from "@/lib/swr-cache";
+import { purgeRetiredDurableKeys } from "@/lib/durable-cache";
 import { captureNativeFetch } from "@/lib/native-fetch";
 import {
   clearCommunityCredentials,
@@ -218,6 +219,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         }),
     });
     return controllerRef.current;
+  }, []);
+
+  // One-time boot migration: sweep the durable cache clean of any MEMORY-ONLY
+  // model key (the `community:` feed carries PRIVATE Matrix content) that a prior
+  // build — or a future codec misregistration — might have persisted, so private
+  // content never lingers on disk until the next logout/account-switch (roborev
+  // HIGH). Best-effort + idempotent; runs before any session-dependent read.
+  useEffect(() => {
+    purgeRetiredDurableKeys();
   }, []);
 
   // Register the reactive fetch manager exactly once, as early as possible.

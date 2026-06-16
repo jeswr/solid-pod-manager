@@ -14,6 +14,8 @@ import {
   dateRevivingCodec,
   jsonCodec,
   MAX_AGE_MS,
+  purgeDurableCacheByKeyPrefix,
+  purgeRetiredDurableKeys,
   readDurableCache,
   reviveDatesDeep,
   type SyncStorage,
@@ -524,5 +526,67 @@ describe("assigned-tasks codec + key (roborev round-2)", () => {
     // serve the work-pod list, which was the round-2 cross-storage stale bug.
     expect(readDurableCache(WEBID_A, keyB, s)).toBeNull();
     expect(readDurableCache(WEBID_A, keyA, s)).toEqual(workTasks);
+  });
+});
+
+describe("durable-cache retired-key purge (private community feed boot migration, roborev HIGH)", () => {
+  /** A LEGACY community: envelope carrying a private Matrix message body. */
+  const SECRET = "PRIVATE-MATRIX-SECRET-must-not-survive-on-disk";
+  const COMMUNITY_KEY = "community:m:1::9856:";
+  /** Forge a snapshot the way a (hypothetical) build with a community codec would
+   *  have — the migration must remove it REGARDLESS of how it got there. */
+  const legacyEnvelope = (webId: string) =>
+    JSON.stringify({
+      v: VERSION,
+      at: Date.now(),
+      webId,
+      key: COMMUNITY_KEY,
+      value: { threads: [{ messages: [{ body: SECRET }] }], errors: [] },
+    });
+
+  it("purges a persisted community: snapshot containing a Matrix body, across WebIDs", () => {
+    const s = new MemoryStorage();
+    // Two accounts each have a legacy private community snapshot on disk...
+    s.setItem(storageKey(WEBID_A, COMMUNITY_KEY), legacyEnvelope(WEBID_A));
+    s.setItem(storageKey(WEBID_B, COMMUNITY_KEY), legacyEnvelope(WEBID_B));
+    // ...plus a LEGITIMATE registered durable snapshot that MUST be kept.
+    writeDurableCache(WEBID_A, APPS, { ok: true }, s);
+    expect(s.length).toBe(3);
+
+    purgeRetiredDurableKeys(s); // the one-time boot migration
+
+    // Both private community snapshots are gone (no secret survives on disk)...
+    expect(s.getItem(storageKey(WEBID_A, COMMUNITY_KEY))).toBeNull();
+    expect(s.getItem(storageKey(WEBID_B, COMMUNITY_KEY))).toBeNull();
+    // ...and the unrelated registered snapshot is untouched.
+    expect(readDurableCache(WEBID_A, APPS, s)).toEqual({ ok: true });
+    expect(s.length).toBe(1);
+  });
+
+  it("purgeDurableCacheByKeyPrefix matches on the MODEL key, not the WebID, and spares other keys", () => {
+    const s = new MemoryStorage();
+    s.setItem(storageKey(WEBID_A, COMMUNITY_KEY), legacyEnvelope(WEBID_A));
+    s.setItem(storageKey(WEBID_A, "community:_:0:::"), legacyEnvelope(WEBID_A)); // disconnected slot
+    writeDurableCache(WEBID_A, ACTIVITY, [1, 2, 3], s); // a registered, non-community key
+    purgeDurableCacheByKeyPrefix("community:", s);
+    expect(s.getItem(storageKey(WEBID_A, COMMUNITY_KEY))).toBeNull();
+    expect(s.getItem(storageKey(WEBID_A, "community:_:0:::"))).toBeNull();
+    expect(readDurableCache(WEBID_A, ACTIVITY, s)).toEqual([1, 2, 3]); // spared
+  });
+
+  it("is idempotent + a no-op when nothing matches, and never throws", () => {
+    const s = new MemoryStorage();
+    writeDurableCache(WEBID_A, APPS, { ok: true }, s);
+    // Nothing to purge: a no-op that leaves the registered snapshot intact.
+    expect(() => purgeRetiredDurableKeys(s)).not.toThrow();
+    expect(s.length).toBe(1);
+    // Re-running after a purge is also a no-op (idempotent).
+    s.setItem(storageKey(WEBID_A, COMMUNITY_KEY), legacyEnvelope(WEBID_A));
+    purgeRetiredDurableKeys(s);
+    purgeRetiredDurableKeys(s);
+    expect(s.getItem(storageKey(WEBID_A, COMMUNITY_KEY))).toBeNull();
+    // Empty prefix and null storage are guarded (best-effort).
+    expect(() => purgeDurableCacheByKeyPrefix("", s)).not.toThrow();
+    expect(() => purgeDurableCacheByKeyPrefix("community:", null)).not.toThrow();
   });
 });

@@ -1,47 +1,39 @@
 // AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate; see docs/MODEL-PROVENANCE.md
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
 import { useSession } from "@/components/session-provider";
+import { useSwrRead } from "@/components/use-swr-read";
 import { freshRdf } from "@/lib/rdf-read";
 import { profileDocUrl } from "@/lib/profile-edit";
 import {
   listAllRegistrations,
   type ManagedTypeIndex,
 } from "@/lib/type-index-manage";
-import type { AsyncState } from "@/components/use-pod-data";
+import type { RevalidatableState } from "@/components/use-pod-data";
 
 /**
  * Load the signed-in user's full type-index management view (public + private
  * registrations). Production paths pass NO `fetch` (auth-patched global runs).
- * Re-loads on login + on demand (`reload`).
+ *
+ * Stale-while-revalidate: the view goes through the shared {@link useSwrRead}
+ * cache (keyed `type-index`), so navigating back to the page paints the
+ * last-known registrations INSTANTLY and revalidates in the background; the
+ * profile doc is watched so a type-index change there invalidates + refreshes.
  */
-export function useTypeIndex(): AsyncState<ManagedTypeIndex> & { reload: () => void } {
-  const { webId, status } = useSession();
-  const [state, setState] = useState<AsyncState<ManagedTypeIndex>>({ loading: true });
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
+export function useTypeIndex(): RevalidatableState<ManagedTypeIndex> & {
+  reload: () => void;
+} {
+  const { webId } = useSession();
+  const { data, error, loading, revalidating, reload } =
+    useSwrRead<ManagedTypeIndex>(
+      "type-index",
+      async (id) => {
+        const { dataset } = await freshRdf(profileDocUrl(id));
+        return listAllRegistrations(id, dataset);
+      },
+      // Watch the profile doc: a type-index registration change invalidates this.
+      { topicUrl: webId ? profileDocUrl(webId) : undefined },
+    );
 
-  useEffect(() => {
-    if (status !== "logged-in" || !webId) {
-      setState({ loading: true });
-      return;
-    }
-    let cancelled = false;
-    setState({ loading: true });
-    (async () => {
-      const { dataset } = await freshRdf(profileDocUrl(webId));
-      const view = await listAllRegistrations(webId, dataset);
-      if (!cancelled) setState({ loading: false, data: view });
-    })().catch((e: unknown) => {
-      if (!cancelled) {
-        setState({ loading: false, error: e instanceof Error ? e : new Error(String(e)) });
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [webId, status, nonce]);
-
-  return { ...state, reload };
+  return { data, error, loading, revalidating, reload };
 }

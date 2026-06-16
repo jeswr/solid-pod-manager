@@ -1,14 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
+import { useSwrRead } from "@/components/use-swr-read";
 import {
   type ProductivityStore,
   type StoredItem,
 } from "@/lib/productivity-store";
 import type { AdvisoryHandler } from "@/lib/shacl/advisory";
-import type { AsyncState } from "@/components/use-pod-data";
+import type { RevalidatableState } from "@/components/use-pod-data";
 
 /**
  * The default advisory-validation surface (ADR-0014 Phase 1): a non-blocking
@@ -58,80 +59,56 @@ export function useStore<T>(
 
 /**
  * List items from a store, with loading / empty / error state and a `reload`.
- * Re-lists whenever the bound store changes (login / storage switch).
+ *
+ * Stale-while-revalidate: the listing goes through the shared {@link useSwrRead}
+ * cache, keyed PER STORE CONTAINER (`productivity:<container>`), so navigating
+ * back to a Notes / Calendar / Contacts list paints the last-seen items
+ * INSTANTLY and revalidates in the background; the store's container is watched
+ * so an add/edit/delete there invalidates + refreshes it. The store carries the
+ * WebID it is bound to via the session, and `useSwrRead` partitions by WebID, so
+ * two accounts never share a slot. SECURITY: the cache is render-only; the page
+ * mutates through the `store` (a fresh server write), not the cached snapshot.
  */
 export function useItems<T>(
   store: ProductivityStore<T> | undefined,
-): AsyncState<StoredItem<T>[]> & { reload: () => void } {
-  const [state, setState] = useState<AsyncState<StoredItem<T>[]>>({ loading: true });
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-
-  useEffect(() => {
-    if (!store) {
-      setState({ loading: true });
-      return;
-    }
-    let cancelled = false;
-    setState({ loading: true });
-    store
-      .list()
-      .then((items) => {
-        if (!cancelled) setState({ loading: false, data: items });
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) {
-          setState({
-            loading: false,
-            error: e instanceof Error ? e : new Error(String(e)),
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [store, nonce]);
-
-  return { ...state, reload };
+): RevalidatableState<StoredItem<T>[]> & { reload: () => void } {
+  // Per-container key; no store yet → empty key (no fetch, loading state),
+  // matching the previous "no store → loading" behaviour exactly.
+  const key = store ? `productivity:${store.container}` : "";
+  const fetcher = useCallback(
+    () => (store ? store.list() : Promise.resolve<StoredItem<T>[]>([])),
+    [store],
+  );
+  const { data, error, loading, revalidating, reload } = useSwrRead<StoredItem<T>[]>(
+    key,
+    fetcher,
+    { topicUrl: store?.container },
+  );
+  return { data, error, loading, revalidating, reload };
 }
 
 /**
  * Read a single item by URL from a store. Used by the detail/edit views.
+ *
+ * Stale-while-revalidate: keyed PER ITEM URL (`productivity-item:<url>`), so
+ * re-opening an item you have viewed paints it INSTANTLY and revalidates; the
+ * item resource is watched for live changes. SECURITY: render-only cache; edits
+ * go through the `store`, not the cached snapshot.
  */
 export function useItem<T>(
   store: ProductivityStore<T> | undefined,
   url: string | undefined,
-): AsyncState<StoredItem<T> | undefined> & { reload: () => void } {
-  const [state, setState] = useState<AsyncState<StoredItem<T> | undefined>>({
-    loading: true,
-  });
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-
-  useEffect(() => {
-    if (!store || !url) {
-      setState({ loading: true });
-      return;
-    }
-    let cancelled = false;
-    setState({ loading: true });
-    store
-      .read(url)
-      .then((item) => {
-        if (!cancelled) setState({ loading: false, data: item });
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) {
-          setState({
-            loading: false,
-            error: e instanceof Error ? e : new Error(String(e)),
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [store, url, nonce]);
-
-  return { ...state, reload };
+): RevalidatableState<StoredItem<T> | undefined> & { reload: () => void } {
+  const key = store && url ? `productivity-item:${url}` : "";
+  const fetcher = useCallback(
+    () =>
+      store && url
+        ? store.read(url)
+        : Promise.resolve<StoredItem<T> | undefined>(undefined),
+    [store, url],
+  );
+  const { data, error, loading, revalidating, reload } = useSwrRead<
+    StoredItem<T> | undefined
+  >(key, fetcher, { topicUrl: url });
+  return { data, error, loading, revalidating, reload };
 }

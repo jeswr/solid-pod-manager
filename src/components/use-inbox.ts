@@ -4,15 +4,27 @@
 /**
  * Inbox hook — binds the user's OWN LDN inbox to the active session, lists the
  * notifications, and exposes mark-read / dismiss. Production paths pass NO
- * `fetch` (the auth-patched global runs). Re-lists on login / storage switch and
- * on live notifications (wired by the page via `useResourceNotifications`).
+ * `fetch` (the auth-patched global runs).
+ *
+ * Stale-while-revalidate: the LISTING goes through the shared {@link useSwrRead}
+ * cache (keyed `inbox`), so navigating back to the inbox paints the last-known
+ * notifications INSTANTLY and revalidates in the background; the discovered
+ * inbox container is watched so a new notification invalidates + refreshes it.
+ * Inbox DISCOVERY (which container) stays a cheap effect off the session — it
+ * runs once per login/storage switch, NOT on every reload, so a mark-read /
+ * dismiss / live-notification never re-fetches the profile.
+ *
+ * SECURITY: the cache is render-only. `markRead`/`dismiss` act on the live
+ * `inbox` handle (a fresh server write), then `reload()` to revalidate — they
+ * never mutate the cached snapshot directly.
  */
 import { useCallback, useEffect, useState } from "react";
 import { useSession } from "@/components/session-provider";
+import { useSwrRead } from "@/components/use-swr-read";
 import { Inbox, inboxFor, type InboxNotification } from "@/lib/inbox";
-import type { AsyncState } from "@/components/use-pod-data";
+import type { RevalidatableState } from "@/components/use-pod-data";
 
-export interface UseInbox extends AsyncState<InboxNotification[]> {
+export interface UseInbox extends RevalidatableState<InboxNotification[]> {
   /** The discovered inbox container URL (for live-update subscription). */
   inboxUrl?: string;
   reload: () => void;
@@ -22,13 +34,10 @@ export interface UseInbox extends AsyncState<InboxNotification[]> {
 
 export function useInbox(): UseInbox {
   const { webId, activeStorage, status } = useSession();
-  const [state, setState] = useState<AsyncState<InboxNotification[]>>({ loading: true });
   const [inbox, setInbox] = useState<Inbox | undefined>(undefined);
   const [inboxUrl, setInboxUrl] = useState<string | undefined>(undefined);
   /** Has discovery settled? Distinguishes "still discovering" from "no inbox". */
   const [discovered, setDiscovered] = useState(false);
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
 
   // Discovery: derive the inbox only when the session changes — NOT on reload,
   // so a mark-read / dismiss / live-notification does not re-fetch the profile.
@@ -37,12 +46,10 @@ export function useInbox(): UseInbox {
       setInbox(undefined);
       setInboxUrl(undefined);
       setDiscovered(false);
-      setState({ loading: true });
       return;
     }
     let cancelled = false;
     setDiscovered(false);
-    setState({ loading: true }); // avoid showing the previous pod's inbox during a switch
     (async () => {
       const box = await inboxFor({ webId, activeStorage });
       if (cancelled) return;
@@ -61,31 +68,22 @@ export function useInbox(): UseInbox {
     };
   }, [webId, activeStorage, status]);
 
-  // Listing: re-list whenever the discovered inbox changes or `reload` fires.
-  useEffect(() => {
-    if (status !== "logged-in" || !webId || !activeStorage) return;
-    if (!discovered) return; // wait for discovery to settle before deciding
-    if (!inbox) {
-      // Discovery settled with no inbox advertised → genuinely empty.
-      setState({ loading: false, data: [] });
-      return;
-    }
-    let cancelled = false;
-    setState({ loading: true });
-    inbox
-      .list()
-      .then((items) => {
-        if (!cancelled) setState({ loading: false, data: items });
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) {
-          setState({ loading: false, error: e instanceof Error ? e : new Error(String(e)) });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [inbox, discovered, status, webId, activeStorage, nonce]);
+  // Listing: read through the SWR cache, keyed per WebID under `inbox`. The
+  // fetcher waits until discovery has settled — before that, an empty key keeps
+  // the loading state and touches no cache (so a switch never lists a stale
+  // pod's inbox). Once discovered with no inbox, resolve to an empty list.
+  const ready = status === "logged-in" && Boolean(webId) && Boolean(activeStorage) && discovered;
+  const key = ready ? "inbox" : "";
+  const fetcher = useCallback(async (): Promise<InboxNotification[]> => {
+    return inbox ? inbox.list() : [];
+  }, [inbox]);
+
+  const { data, error, loading, revalidating, reload } = useSwrRead<InboxNotification[]>(
+    key,
+    fetcher,
+    // Watch the discovered inbox container so a new notification refreshes it.
+    { topicUrl: inboxUrl },
+  );
 
   const markRead = useCallback(
     async (url: string) => {
@@ -107,5 +105,5 @@ export function useInbox(): UseInbox {
     [inbox, reload],
   );
 
-  return { ...state, inboxUrl, reload, markRead, dismiss };
+  return { data, error, loading, revalidating, inboxUrl, reload, markRead, dismiss };
 }

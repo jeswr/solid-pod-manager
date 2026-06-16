@@ -1,12 +1,12 @@
 // AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate; see docs/MODEL-PROVENANCE.md
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { useSession } from "@/components/session-provider";
-import { useResourceNotifications } from "@/components/use-resource-notifications";
+import { useSwrRead } from "@/components/use-swr-read";
 import { isInOwnPods } from "@/lib/pod-scope";
 import { asContainerUrl, listFolder, type PodItem } from "@/lib/files";
-import type { AsyncState } from "@/components/use-pod-data";
+import type { RevalidatableState } from "@/components/use-pod-data";
 
 /**
  * The active storage root the files browser is scoped to, plus a guard the UI
@@ -38,47 +38,39 @@ export function useFilesScope(): {
  * manual `reload`, and live invalidation via Solid notifications (best-effort —
  * a server without notifications just keeps fetch-on-mount + reload).
  *
- * Production paths pass NO `fetch` to the data layer — the auth-patched global
- * runs (AGENTS.md §Reading data). Re-lists whenever the container or session
- * changes.
+ * Stale-while-revalidate (PM home/files-slowness fix): the listing goes through
+ * the shared {@link useSwrRead} cache keyed PER CONTAINER (`files:<container>`),
+ * so navigating back into the files browser — or re-opening a folder you have
+ * already viewed, or a cold open / app reopen (the durable snapshot) — paints
+ * the last-seen listing for THAT container INSTANTLY and revalidates in the
+ * background, instead of re-running `listFolder` behind a spinner every time.
+ * The container is the cache key AND the notification topic, so opening a
+ * different folder reads its own slot (no cross-folder flash) and a change to
+ * the container invalidates + refreshes its entry. Production paths pass NO
+ * `fetch` to the data layer — the auth-patched global runs (AGENTS.md §Reading
+ * data).
  */
 export function useFolder(
   container: string | undefined,
-): AsyncState<PodItem[]> & { reload: () => void } {
-  const { status } = useSession();
-  const [state, setState] = useState<AsyncState<PodItem[]>>({ loading: true });
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-
-  useEffect(() => {
-    if (status !== "logged-in" || !container) {
-      setState({ loading: true });
-      return;
-    }
-    let cancelled = false;
-    setState({ loading: true });
-    listFolder(container)
-      .then((items) => {
-        if (!cancelled) setState({ loading: false, data: items });
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) {
-          setState({
-            loading: false,
-            error: e instanceof Error ? e : new Error(String(e)),
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [container, status, nonce]);
-
-  // Live-refresh the listing when the container changes on the server.
-  useResourceNotifications(
-    status === "logged-in" ? container : undefined,
-    reload,
+): RevalidatableState<PodItem[]> & { reload: () => void } {
+  // Per-container key; empty key (no container yet) is a no-op in useSwrRead and
+  // reports the loading state, matching the previous "no container → loading"
+  // behaviour exactly. The WebID partition is added by useSwrRead.
+  const key = container ? `files:${container}` : "";
+  const fetcher = useCallback(
+    // Only invoked when the key is non-empty (a container is set), so `container`
+    // is defined here; assert it for the type without changing behaviour.
+    () => listFolder(container as string),
+    [container],
   );
-
-  return useMemo(() => ({ ...state, reload }), [state, reload]);
+  const { data, error, loading, revalidating, reload } = useSwrRead<PodItem[]>(
+    key,
+    fetcher,
+    // Watch the container so an edit/add/delete there invalidates + refreshes.
+    { topicUrl: container },
+  );
+  return useMemo(
+    () => ({ data, error, loading, revalidating, reload }),
+    [data, error, loading, revalidating, reload],
+  );
 }

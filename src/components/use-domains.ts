@@ -10,7 +10,9 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSession } from "@/components/session-provider";
-import type { AsyncState } from "@/components/use-pod-data";
+import { useSwrRead } from "@/components/use-swr-read";
+import { readCache } from "@/lib/swr-cache";
+import type { AsyncState, RevalidatableState } from "@/components/use-pod-data";
 import {
   detectPurchaseFeature,
   domainsApiBase,
@@ -21,7 +23,7 @@ import {
   type DomainBinding,
 } from "@/lib/domains";
 
-export interface DomainsListState extends AsyncState<DomainBinding[]> {
+export interface DomainsListState extends RevalidatableState<DomainBinding[]> {
   /** The API origin (the pod server) once the session knows its storage. */
   base?: string;
   /** The pod root domains are claimed for (the active storage). */
@@ -29,35 +31,27 @@ export interface DomainsListState extends AsyncState<DomainBinding[]> {
   reload: () => void;
 }
 
-/** The account's domain bindings, from the user's own pod server. */
+/**
+ * The account's domain bindings, from the user's own pod server.
+ *
+ * Stale-while-revalidate: the list goes through the shared {@link useSwrRead}
+ * cache (keyed `domains`), so navigating back to the settings page paints the
+ * last-known bindings INSTANTLY and revalidates in the background.
+ */
 export function useDomains(): DomainsListState {
-  const { status, activeStorage } = useSession();
-  const [state, setState] = useState<AsyncState<DomainBinding[]>>({ loading: true });
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-
+  const { activeStorage } = useSession();
   const base = activeStorage ? domainsApiBase(activeStorage) : undefined;
 
-  useEffect(() => {
-    if (status !== "logged-in" || !base) return;
-    let cancelled = false;
-    setState({ loading: true });
-    listDomains(base)
-      .then((domains) => {
-        if (!cancelled) setState({ loading: false, data: domains });
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setState({ loading: false, error: error as Error });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [status, base, nonce]);
+  const { data, error, loading, revalidating, reload } = useSwrRead<DomainBinding[]>(
+    base ? "domains" : "",
+    // Only invoked when the key is non-empty (base/storage known).
+    () => listDomains(base as string),
+  );
 
-  return { ...state, base, podRoot: activeStorage, reload };
+  return { data, error, loading, revalidating, base, podRoot: activeStorage, reload };
 }
 
-export interface DomainDetailState extends AsyncState<DomainBinding> {
+export interface DomainDetailState extends RevalidatableState<DomainBinding> {
   base?: string;
   /** True while a check (manual or polled) is running. */
   checking: boolean;
@@ -67,55 +61,49 @@ export interface DomainDetailState extends AsyncState<DomainBinding> {
 }
 
 /**
- * One binding's detail + the verify loop. `checkNow` drives POST verify; a
- * background poll re-runs it every 30 s while the state is pollable and the
- * document is visible — DNS propagation takes time, the user shouldn't have
- * to hammer a button.
+ * One binding's detail + the verify loop, with stale-while-revalidate caching
+ * (keyed per domain, `domain:<domain>`) so re-opening a binding paints instantly.
+ * `checkNow` drives POST verify; a background poll re-runs it every 30 s while
+ * the state is pollable and the document is visible — DNS propagation takes
+ * time, the user shouldn't have to hammer a button. A successful check writes
+ * the AUTHORITATIVE binding back through the cache (the verify POST is itself
+ * authoritative; the cache only renders its result).
  */
 export function useDomain(domain: string | undefined): DomainDetailState {
-  const { status, activeStorage } = useSession();
-  const [state, setState] = useState<AsyncState<DomainBinding>>({ loading: true });
+  const { webId, activeStorage } = useSession();
   const [checking, setChecking] = useState(false);
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
   const checkingRef = useRef(false);
 
   const base = activeStorage ? domainsApiBase(activeStorage) : undefined;
+  const key = base && domain ? `domain:${domain}` : "";
 
-  useEffect(() => {
-    if (status !== "logged-in" || !base || !domain) return;
-    let cancelled = false;
-    setState({ loading: true });
-    getDomain(base, domain)
-      .then((binding) => {
-        if (!cancelled) setState({ loading: false, data: binding });
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setState({ loading: false, error: error as Error });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [status, base, domain, nonce]);
+  const { data, error, loading, revalidating, reload } = useSwrRead<DomainBinding>(
+    key,
+    // Only invoked when the key is non-empty (base + domain known).
+    () => getDomain(base as string, domain as string),
+  );
 
   const checkNow = useCallback(async (): Promise<DomainBinding | undefined> => {
-    if (!base || !domain || checkingRef.current) return undefined;
+    if (!base || !domain || !webId || checkingRef.current) return undefined;
     checkingRef.current = true;
     setChecking(true);
     try {
+      // The verify POST is authoritative; push its result into the cache so the
+      // rendered binding reflects it at once (render-only cache, never a write
+      // decision).
       const binding = await verifyDomain(base, domain);
-      setState({ loading: false, data: binding });
+      readCache.set(webId, `domain:${domain}`, binding);
       return binding;
     } finally {
       checkingRef.current = false;
       setChecking(false);
     }
-  }, [base, domain]);
+  }, [base, domain, webId]);
 
   // Polite polling: only while pending, only while the tab is visible. The
   // cadence comes from the binding: ~60 s during purchase phases (each verify
   // advances the server's registration pipeline), 30 s for DNS convergence.
-  const interval = state.data !== undefined ? pollIntervalMs(state.data) : undefined;
+  const interval = data !== undefined ? pollIntervalMs(data) : undefined;
   useEffect(() => {
     if (interval === undefined) return;
     const timer = setInterval(() => {
@@ -126,7 +114,7 @@ export function useDomain(domain: string | undefined): DomainDetailState {
     return () => clearInterval(timer);
   }, [interval, checkNow]);
 
-  return { ...state, base, checking, checkNow, reload };
+  return { data, error, loading, revalidating, base, checking, checkNow, reload };
 }
 
 /**

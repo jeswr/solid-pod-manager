@@ -4,16 +4,25 @@
 /**
  * Chat hook — opens a chat at a container URL (scope-guarded to the user's own
  * pods via `openChat`/`ChatScopeError`), lists messages, and sends. Production
- * paths pass NO `fetch`. Re-lists on reload (wired to live notifications by the
- * page).
+ * paths pass NO `fetch`.
+ *
+ * Stale-while-revalidate: the message LISTING goes through the shared
+ * {@link useSwrRead} cache, keyed PER CHAT container (`chat:<containerUrl>`), so
+ * re-opening a chat you have already viewed paints the last-seen messages
+ * INSTANTLY and revalidates in the background; the container is watched so a new
+ * message invalidates + refreshes it. An out-of-scope or not-yet-opened chat
+ * uses an empty key (no fetch, no cache entry). SECURITY: the cache is
+ * render-only; `send` writes a fresh message via the live `chat` handle and
+ * `reload()`s — it never mutates the cached snapshot.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { useSession } from "@/components/session-provider";
+import { useSwrRead } from "@/components/use-swr-read";
 import { openChat, type Chat, type ChatMessage } from "@/lib/chat";
 import { ChatScopeError } from "@/lib/errors";
-import type { AsyncState } from "@/components/use-pod-data";
+import type { RevalidatableState } from "@/components/use-pod-data";
 
-export interface UseChat extends AsyncState<ChatMessage[]> {
+export interface UseChat extends RevalidatableState<ChatMessage[]> {
   reload: () => void;
   send: (content: string) => Promise<void>;
   /** True when the container URL is out of the user's own pods (blocked). */
@@ -22,9 +31,6 @@ export interface UseChat extends AsyncState<ChatMessage[]> {
 
 export function useChat(containerUrl: string | undefined): UseChat {
   const { webId, activeStorage, profile, status } = useSession();
-  const [state, setState] = useState<AsyncState<ChatMessage[]>>({ loading: true });
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
 
   // Scope against ALL of the user's own pods (not just the active one), so a chat
   // saved/invited in another of the user's storages is still in scope. Memoise on
@@ -52,35 +58,18 @@ export function useChat(containerUrl: string | undefined): UseChat {
     }
   }, [status, webId, storages, containerUrl]);
 
-  useEffect(() => {
-    if (!containerUrl) {
-      setState({ loading: true });
-      return;
-    }
-    if (outOfScope) {
-      setState({ loading: false, error: new ChatScopeError(containerUrl, "your pods") });
-      return;
-    }
-    if (!chat) {
-      setState({ loading: true });
-      return;
-    }
-    let cancelled = false;
-    setState({ loading: true });
-    chat
-      .messages()
-      .then((m) => {
-        if (!cancelled) setState({ loading: false, data: m });
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) {
-          setState({ loading: false, error: e instanceof Error ? e : new Error(String(e)) });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [chat, outOfScope, containerUrl, nonce]);
+  // Per-chat cache key; an out-of-scope / not-yet-opened chat uses an empty key
+  // (no fetch, no cache entry), matching the previous loading/blocked behaviour.
+  const key = chat && containerUrl ? `chat:${containerUrl}` : "";
+  const fetcher = useCallback(
+    () => (chat ? chat.messages() : Promise.resolve<ChatMessage[]>([])),
+    [chat],
+  );
+  const { data, error, loading, revalidating, reload } = useSwrRead<ChatMessage[]>(
+    key,
+    fetcher,
+    { topicUrl: containerUrl },
+  );
 
   const send = useCallback(
     async (content: string) => {
@@ -92,5 +81,19 @@ export function useChat(containerUrl: string | undefined): UseChat {
     [chat, reload],
   );
 
-  return { ...state, reload, send, outOfScope };
+  // An out-of-scope container is a hard error, not a load — surface it directly
+  // (no fetch happens for it, the key is empty).
+  if (outOfScope && containerUrl) {
+    return {
+      data: undefined,
+      error: new ChatScopeError(containerUrl, "your pods"),
+      loading: false,
+      revalidating: false,
+      reload,
+      send,
+      outOfScope: true,
+    };
+  }
+
+  return { data, error, loading, revalidating, reload, send, outOfScope };
 }

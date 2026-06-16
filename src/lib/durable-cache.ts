@@ -237,6 +237,28 @@ export const assignedTasksKey = (activeStorage: string): string =>
   `${ASSIGNED_TASKS_KEY_PREFIX}:${activeStorage}`;
 
 /**
+ * The SWR / durable cache key PREFIX for the Connected-apps read model. The full
+ * key is storage-scoped (see {@link connectedAppsKey}) because the model is the
+ * ACL grants of ONE storage's resources — a WebID with more than one storage has
+ * a DIFFERENT set of app-permissions per storage, so each gets its own cache
+ * slot. Lives here (the durable layer) so the key is the single source of truth
+ * for the hook, the prefetch target, AND the codec rule below.
+ */
+export const CONNECTED_APPS_KEY_PREFIX = "connected-apps";
+
+/**
+ * The full, storage-scoped durable/SWR cache key for the Connected-apps model:
+ * `connected-apps:<activeStorage>`. Storage-scoped for the SAME reason as
+ * {@link assignedTasksKey} (roborev finding, Medium): keying it the static
+ * `connected-apps` would keep the same `(webId, key)` across a SAME-WebID storage
+ * switch, so `useSwrRead` would NOT revalidate and would paint the PREVIOUS pod's
+ * app-permissions for the new pod. Different storage ⇒ different key ⇒ a separate
+ * cache slot that revalidates on switch. Matched by the `prefix` codec rule below.
+ */
+export const connectedAppsKey = (activeStorage: string): string =>
+  `${CONNECTED_APPS_KEY_PREFIX}:${activeStorage}`;
+
+/**
  * The codec registry — the SINGLE place that declares which durable keys may
  * persist and how each round-trips. A key absent here is memory-only (no
  * persist, no hydrate). Two match forms:
@@ -267,7 +289,11 @@ interface CodecRule {
 }
 
 const CODECS: readonly CodecRule[] = [
-  { match: { exact: "connected-apps" }, codec: jsonCodec() },
+  // Connected-apps is storage-scoped (`connected-apps:<activeStorage>`, built by
+  // {@link connectedAppsKey}) so two storages of one WebID never share a grants
+  // slot — hence a PREFIX match (the prefix MUST equal CONNECTED_APPS_KEY_PREFIX,
+  // the codec and the key being two ends of one snapshot). It is JSON-plain.
+  { match: { prefix: CONNECTED_APPS_KEY_PREFIX }, codec: jsonCodec() },
   { match: { exact: "category-summaries" }, codec: jsonCodec() },
   { match: { exact: "recent-activity" }, codec: jsonCodec() },
   // The "Assigned to me" federation view. The key is storage-scoped

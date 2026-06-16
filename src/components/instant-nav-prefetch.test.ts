@@ -143,7 +143,10 @@ import {
   runPrefetch,
   type PrefetchContext,
 } from "../lib/prefetch.js";
-import { assignedTasksKey } from "../lib/durable-cache.js";
+import { assignedTasksKey, connectedAppsKey } from "../lib/durable-cache.js";
+// The SHARED read-page registry — the prefetch completeness guard derives from
+// it so a new read page added there can't slip past un-prefetched (roborev Low).
+import { READ_PAGE_HOOKS, PREFETCH_EXEMPT_HOOKS } from "./instant-nav-registry.js";
 
 const CTX: PrefetchContext = { webId: WEBID, activeStorage: STORAGE, storages: [STORAGE] };
 
@@ -166,7 +169,7 @@ const EXPECTED_WARM_KEYS: ExpectedKey[] = [
   { label: "useTypeIndex", key: "type-index" },
   { label: "useCategorySummaries", key: "category-summaries" },
   { label: "useRecentActivity", key: "recent-activity" },
-  { label: "useConnectedApps", key: "connected-apps" },
+  { label: "useConnectedApps", key: connectedAppsKey(STORAGE) },
   { label: "usePeople", key: `people:${STORAGE}` },
   { label: "useDomains", key: `domains:${new URL(STORAGE).origin}` },
   { label: "useAssignedTasks", key: assignedTasksKey(STORAGE) },
@@ -266,35 +269,37 @@ describe("prefetch: COMPLETENESS — a read page added without a prefetch target
     expect(new Set(keys).size, "duplicate prefetch target keys").toBe(keys.length);
   });
 
-  it("the prefetch surface matches the instant-nav read-hook registry one-to-one", async () => {
-    // Cross-check against instant-nav.test.ts's enumerated read-page hooks so the
-    // two systematic registries cannot drift. Every read hook that the SWR layer
-    // covers (and that prefetch can warm without per-route params) is represented.
-    const prefetchLabels = new Set(
-      buildPrefetchTargets(CTX)
-        .map((t) => t.label)
-        .concat("useInbox"),
+  it("the prefetch surface is DERIVED from the instant-nav registry (a new read page can't slip past)", async () => {
+    // Derive the set of hooks prefetch MUST warm DIRECTLY from the SHARED
+    // READ_PAGE_HOOKS registry (the single source of truth, also used by
+    // instant-nav.test.ts) MINUS the explicitly exempt per-route-param detail
+    // hooks. This is the roborev-Low fix: the guard reads the REGISTRY, not a
+    // hard-coded list — so adding a NEW read page to READ_PAGE_HOOKS without a
+    // prefetch target (and without exempting it) breaks THIS build.
+    const required = READ_PAGE_HOOKS.map((e) => e.hook).filter(
+      (h) => !PREFETCH_EXEMPT_HOOKS.has(h),
     );
-    // The hooks prefetch warms (those keyed by webId / activeStorage / a known
-    // root container — NOT the per-route-param detail hooks useItem / useDomain /
-    // useChat / useCategoryItems, which need a specific id/url the user picks and
-    // are warmed on demand by their own SWR read on navigation).
-    const required = [
-      "useFriends",
-      "useTypeIndex",
-      "useCategorySummaries",
-      "useRecentActivity",
-      "useConnectedApps",
-      "usePeople",
-      "useDomains",
-      "useAssignedTasks",
-      "useInbox",
-    ];
-    const missing = required.filter((h) => !prefetchLabels.has(h));
+
+    // The labels prefetch actually warms. `useFolder(root)` warms a SPECIFIC
+    // container (the storage root), so normalise its label to `useFolder` for
+    // the membership check; the inbox target's label is already `useInbox`.
+    const inbox = await discoverInboxTarget(CTX);
+    const targets = inbox ? [...buildPrefetchTargets(CTX), inbox] : buildPrefetchTargets(CTX);
+    const prefetchHooks = new Set(targets.map((t) => t.label.replace(/\(.*\)$/, "")));
+
+    const missing = required.filter((h) => !prefetchHooks.has(h));
     expect(
       missing,
-      `Read hook(s) in the instant-nav registry with no prefetch target: ${missing.join(", ")}`,
+      `Read hook(s) in the instant-nav registry with NO prefetch target: ${missing.join(", ")}. ` +
+        `Add a target in src/lib/prefetch.ts, or add the hook to PREFETCH_EXEMPT_HOOKS ` +
+        `(instant-nav-registry.ts) with a reason if it is an on-demand per-route-param read.`,
     ).toEqual([]);
+
+    // And the exemptions are real (every exempt hook IS in the registry — no
+    // stale exemption for a hook that no longer exists).
+    const registryHooks = new Set(READ_PAGE_HOOKS.map((e) => e.hook));
+    const staleExemptions = [...PREFETCH_EXEMPT_HOOKS].filter((h) => !registryHooks.has(h));
+    expect(staleExemptions, `PREFETCH_EXEMPT_HOOKS lists hook(s) not in the registry`).toEqual([]);
   });
 });
 
@@ -321,7 +326,7 @@ describe("prefetch: non-blocking + a per-page failure is isolated", () => {
 
     // The other storage-scoped/webid-scoped pages still warmed.
     expect(cache.has(WEBID, "category-summaries")).toBe(true);
-    expect(cache.has(WEBID, "connected-apps")).toBe(true);
+    expect(cache.has(WEBID, connectedAppsKey(STORAGE))).toBe(true);
     expect(cache.has(WEBID, `productivity:${STORAGE}notes/`)).toBe(true);
 
     // And runPrefetch reported the failure without throwing — isolation, not abort.

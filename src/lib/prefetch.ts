@@ -44,7 +44,7 @@ import { listAllRegistrations } from "./type-index-manage.js";
 import { contactsStore } from "./contacts.js";
 import { buildPeopleOptions } from "./people-search.js";
 import { listDomains, domainsApiBase } from "./domains.js";
-import { assignedTasksKey } from "./durable-cache.js";
+import { assignedTasksKey, connectedAppsKey } from "./durable-cache.js";
 import { discoverAssignedTasks } from "./federation-tasks.js";
 import { inboxFor } from "./inbox.js";
 import { listFolder, asContainerUrl } from "./files.js";
@@ -160,10 +160,11 @@ export function buildPrefetchTargets(ctx: PrefetchContext): PrefetchTarget[] {
   // --- Storage-scoped (only when a storage is chosen). ---
 
   if (activeStorage) {
-    // useConnectedApps — `connected-apps` (the SAME exported fetcher).
+    // useConnectedApps — `connected-apps:<activeStorage>` (storage-scoped, the
+    // SAME `connectedAppsKey` builder + the SAME exported fetcher the hook uses).
     targets.push({
       label: "useConnectedApps",
-      key: "connected-apps",
+      key: connectedAppsKey(activeStorage),
       fetch: (id) => loadConnectedApps(id, activeStorage),
     });
 

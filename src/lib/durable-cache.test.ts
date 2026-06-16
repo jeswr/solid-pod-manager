@@ -5,6 +5,8 @@ import {
   ASSIGNED_TASKS_KEY_PREFIX,
   assignedTasksCodec,
   assignedTasksKey,
+  CONNECTED_APPS_KEY_PREFIX,
+  connectedAppsKey,
   clearAllDurableCache,
   clearDurableCacheEntry,
   clearDurableCacheForWebId,
@@ -222,6 +224,11 @@ describe("durable-cache codec registry (serialisation safety, roborev finding)",
     expect(codecFor("assigned-tasks")).not.toBeNull();
     expect(codecFor(assignedTasksKey("https://alice.example/"))).not.toBeNull();
     expect(codecFor(ASSIGNED_TASKS_KEY_PREFIX)).not.toBeNull();
+    // Connected-apps is now storage-scoped too (`connected-apps:<storage>`,
+    // PREFIX-matched), so both the bare prefix AND a storage-suffixed key resolve
+    // to a codec (roborev finding, Medium — the model is per-storage ACL grants).
+    expect(codecFor(CONNECTED_APPS_KEY_PREFIX)).not.toBeNull();
+    expect(codecFor(connectedAppsKey("https://alice.example/storage/"))).not.toBeNull();
   });
 
   it("has NO codec for an unregistered key (it is memory-only)", () => {

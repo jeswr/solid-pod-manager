@@ -13,6 +13,7 @@ import { useSwrRead } from "@/components/use-swr-read";
 import type { AsyncState } from "@/components/use-pod-data";
 import { discoverRegistrations } from "@/lib/type-index";
 import { summariseCategories } from "@/lib/pod-data";
+import { connectedAppsKey } from "@/lib/durable-cache";
 import {
   WacPermissionsBackend,
   fetchAppIdentity,
@@ -104,14 +105,23 @@ export async function loadConnectedApps(
 export function useConnectedApps(): ConnectedAppsState {
   const { webId, activeStorage } = useSession();
 
+  // PER ACTIVE STORAGE (`connected-apps:<activeStorage>`): the model is the ACL
+  // grants of THIS storage's resources, so the key MUST carry it — keying the
+  // static `connected-apps` would keep the same `(webId, key)` across a SAME-WebID
+  // storage switch, so `useSwrRead` would NOT revalidate and would paint the
+  // PREVIOUS pod's app-permissions for the new pod (roborev finding, Medium). An
+  // empty key until a storage is chosen is a no-op in useSwrRead — the previous
+  // "throw if no storage" fetcher guard becomes "don't read yet" (same effect:
+  // nothing is read/cached until a storage is set). The key is built by the shared
+  // `connectedAppsKey` (durable layer) so the hook, the prefetch target, and the
+  // codec rule all derive it ONE way.
+  const key = activeStorage ? connectedAppsKey(activeStorage) : "";
+
   const { data, error, loading, revalidating, reload } = useSwrRead<ConnectedAppsModel>(
-    "connected-apps",
-    // The SWR layer only calls this when logged-in with a webId; activeStorage
-    // is required to build ctx — guard so a missing storage can't crash.
-    async (id) => {
-      if (!activeStorage) throw new Error("No active storage selected yet.");
-      return loadConnectedApps(id, activeStorage);
-    },
+    key,
+    // Only invoked when the key is non-empty (a storage is set), so activeStorage
+    // is defined here; assert it for the type without changing behaviour.
+    (id) => loadConnectedApps(id, activeStorage as string),
     // Watch the pod root so a grant/revoke made elsewhere invalidates + refreshes.
     { topicUrl: activeStorage },
   );

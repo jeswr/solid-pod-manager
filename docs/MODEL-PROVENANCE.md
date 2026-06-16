@@ -269,3 +269,36 @@ Touched:
   `Link: rel="acl"` header so ACL discovery works in write-path tests.
 - `src/lib/type-index-write.test.ts`, `src/lib/assign-task.test.ts` — updated to
   the prefs-file-hosted private index + migration coverage.
+
+## Federations discovery view (`/federations`, pss #90) — Opus 4.8
+
+Gated, read-only directory of registry-asserted federation memberships consumed
+from `@jeswr/federation-client`'s `discoverFromRegistry`. Feature-gated on
+`NEXT_PUBLIC_FEDERATION_REGISTRY` (ships dark). Authored by Claude Opus 4.8
+(Fable unavailable) — re-review/upgrade candidate.
+
+New:
+
+- `src/lib/federation-registry.ts` — env-gated config + thin SDK consumer;
+  passes the pristine pre-patch native fetch to the third-party registry origin.
+- `src/lib/federation-members.ts` — pure presentation helpers (friendly name,
+  status badge variant, authority label, document-error builder).
+- `src/components/use-federation-registry.ts` — `useFederationMembers` over
+  `useSwrRead` (instant-nav), gated + empty-key-inert.
+- `src/app/federations/page.tsx` — the read-only list view (honest, no-crypto-
+  trust copy).
+- `src/lib/node-net-browser-shim.ts` / `src/lib/empty-module.ts` — browser
+  replacements for the SDK's Node-only `node:net`/`node:dns/promises` (static
+  export). Tracked upstream follow-up: a browser-safe DNS-less SSRF mode in
+  `@jeswr/federation-client`.
+- Tests: `use-federation-registry.test.ts`, `federations-page.test.tsx`,
+  `nav-items.test.ts`, `federation-members.test.ts`.
+
+Touched (additive):
+
+- `src/components/nav-items.ts` — one conditional `/federations` nav entry +
+  `visibleNavItems()`; `src/components/sidebar-nav.tsx` renders `visibleNavItems()`.
+- `src/components/instant-nav-registry.ts` / `instant-nav.test.ts` — registry +
+  READ_HOOKS + PREFETCH_EXEMPT entries for the new read hook.
+- `package.json` — `@jeswr/federation-client` (github:#main); `next.config.ts` —
+  `NormalModuleReplacementPlugin` for the SDK's `node:` builtins.

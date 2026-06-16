@@ -221,6 +221,21 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
       }),
   },
   {
+    hook: "useFederationMembers",
+    source: "use-federation-registry.ts",
+    page: "/federations (registry-asserted federation memberships)",
+    // Keyed on the (URL-encoded) configured registry URL — a single build-time
+    // constant, so one representative concrete key (the cache treats it as
+    // opaque). A re-deploy that re-points the registry changes the key.
+    key: `federation-members:${encodeURIComponent("https://registry.example/federation")}`,
+    seed: (c) =>
+      c.set(WEBID, `federation-members:${encodeURIComponent("https://registry.example/federation")}`, {
+        members: [{ id: "https://app.example/clientid.jsonld", source: "https://registry.example/federation", membership: { app: "https://app.example/clientid.jsonld" }, trusted: true, valid: true, issues: [] }],
+        valid: true,
+        issues: [],
+      }),
+  },
+  {
     hook: "useCommunityFeed",
     source: "use-community.ts",
     page: "/community (Solid Community — forum + Matrix rooms)",
@@ -262,4 +277,8 @@ export const PREFETCH_EXEMPT_HOOKS: ReadonlySet<string> = new Set([
   "useCommunityFeed", // reads THIRD-PARTY public hosts (matrix.org / forum.solidproject.org),
   // NOT the pod — warming it on app load would fire unsolicited external requests; it loads
   // on demand when the user opens /community (and is instant-nav cached thereafter)
+  "useFederationMembers", // reads a THIRD-PARTY registry origin (NEXT_PUBLIC_FEDERATION_REGISTRY),
+  // NOT the pod — warming it on app load would fire an unsolicited external request (and is
+  // a no-op when the feature is unset); it loads on demand when the user opens /federations
+  // (and is instant-nav cached thereafter), mirroring useCommunityFeed
 ]);

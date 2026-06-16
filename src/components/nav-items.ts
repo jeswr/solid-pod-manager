@@ -20,7 +20,12 @@ import {
   MessagesSquare,
   CalendarClock,
   Globe,
+  Network,
 } from "lucide-react";
+// Import the flag from the SDK-FREE config module (NOT federation-registry.ts,
+// which pulls @jeswr/federation-client) so the nav — in the primary app bundle —
+// never bundles the federation SDK when the feature is dark (roborev finding).
+import { isFederationRegistryEnabled } from "@/lib/federation-registry-config";
 
 export interface NavItem {
   href: string;
@@ -30,6 +35,13 @@ export interface NavItem {
   stub?: boolean;
   /** Show in the mobile bottom bar (kept to the most-used destinations). */
   primary?: boolean;
+  /**
+   * Optional render gate. When present and it returns `false`, the item is
+   * hidden from the nav entirely (used to feature-gate an integration on a
+   * build-time `NEXT_PUBLIC_*` env). Items WITHOUT a gate always show. Filter on
+   * this via {@link visibleNavItems} at render — never mutate the static array.
+   */
+  gate?: () => boolean;
 }
 
 /** Primary navigation (DESIGN.md §3). */
@@ -60,4 +72,23 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // The Solid community's forum + chat rooms, unified (read-first) via
   // @jeswr/solid-community-feeds. The forum works without any credentials.
   { href: "/community", label: "Solid Community", icon: Globe },
+  // Federation discovery (read-only): apps a federation registry lists as
+  // members. GATED on NEXT_PUBLIC_FEDERATION_REGISTRY — hidden until configured,
+  // so the integration ships dark. Display-only; does NOT affect task trust.
+  {
+    href: "/federations",
+    label: "Federations",
+    icon: Network,
+    gate: () => isFederationRegistryEnabled,
+  },
 ] as const;
+
+/**
+ * The nav items visible right now — every ungated item, plus each gated item
+ * whose `gate()` currently returns `true`. The static {@link NAV_ITEMS} array is
+ * never mutated (so it stays a stable build-time constant); render sites
+ * (`SidebarNav` / `BottomNav`) map over THIS instead. Pure.
+ */
+export function visibleNavItems(): readonly NavItem[] {
+  return NAV_ITEMS.filter((item) => item.gate === undefined || item.gate());
+}

@@ -339,6 +339,7 @@ const READ_HOOKS: readonly string[] = [
   "use-webid-search.ts", // useWebIdSearch/useIsIndexed (query-driven panel reads, see NON_REGISTRY note)
   "use-community.ts", // useCommunityFeed (useCommunityPrefs facades useAppPrefs, exempt below)
   "use-app-prefs.ts", // useAppPrefs (pod-backed app preferences, task #89)
+  "use-federation-registry.ts", // useFederationMembers (registry-asserted memberships, /federations)
 ];
 
 /**

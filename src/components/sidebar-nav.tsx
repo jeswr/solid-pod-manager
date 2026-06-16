@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { NAV_ITEMS } from "@/components/nav-items";
+import { visibleNavItems } from "@/components/nav-items";
 import { cn } from "@/lib/utils";
 
 function isActive(pathname: string, href: string): boolean {
@@ -20,7 +20,7 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <nav aria-label="Primary" className="flex flex-col gap-1">
-      {NAV_ITEMS.map(({ href, label, icon: Icon, stub }) => {
+      {visibleNavItems().map(({ href, label, icon: Icon, stub }) => {
         const active = isActive(pathname, href);
         return (
           <Link
@@ -56,7 +56,7 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
 /** The compact bottom bar shown on mobile (primary destinations only). */
 export function BottomNav() {
   const pathname = usePathname();
-  const items = NAV_ITEMS.filter((i) => i.primary);
+  const items = visibleNavItems().filter((i) => i.primary);
 
   return (
     <nav

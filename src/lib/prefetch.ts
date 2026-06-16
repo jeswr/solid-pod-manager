@@ -278,14 +278,34 @@ export interface RunPrefetchOptions {
    * that only want the synchronous targets can turn it off.
    */
   includeInbox?: boolean;
+  /**
+   * SESSION-RACE GUARD (roborev finding, High). A prefetch fetch is async and the
+   * idle callback fires AFTER the effect's cleanup can run, so the session can
+   * change (logout / account switch) WHILE a warm-up is in flight. `logout()` /
+   * `clearWebId()` clear the cache synchronously, but an in-flight `runPrefetch`
+   * resolving afterwards would write the OLD account's data BACK into the (now
+   * cleared) cache + durable storage — a stale, cross-account write.
+   *
+   * `isCurrent` is checked IMMEDIATELY BEFORE every `cache.set` (and before the
+   * run starts): when it returns `false` the write is SUPPRESSED (outcome
+   * `"stale"`), so a prefetch can never resurrect a logged-out / switched-away
+   * account's data. `usePrefetch` passes a guard comparing the live session
+   * identity against the one the warm-up was scheduled for; omitted ⇒ always
+   * current (tests / a one-shot non-React caller).
+   */
+  isCurrent?: () => boolean;
 }
 
 /** A per-target prefetch outcome (for diagnostics + tests). */
 export interface PrefetchOutcome {
   label: string;
   key: string;
-  /** `"warmed"` if the value landed in the cache, `"failed"` if the fetch threw. */
-  status: "warmed" | "failed";
+  /**
+   * `"warmed"` if the value landed in the cache; `"failed"` if the fetch threw or
+   * resolved nothing; `"stale"` if the session changed mid-flight so the write
+   * was suppressed (never warms another/older account's slot).
+   */
+  status: "warmed" | "failed" | "stale";
   error?: unknown;
 }
 
@@ -313,7 +333,11 @@ export async function runPrefetch(
 ): Promise<PrefetchOutcome[]> {
   const cache = options.cache ?? readCache;
   const includeInbox = options.includeInbox ?? true;
+  // Always-current when no guard is supplied (tests / one-shot non-React caller).
+  const isCurrent = options.isCurrent ?? (() => true);
   if (!ctx.webId) return [];
+  // The session already changed before we even started — warm nothing.
+  if (!isCurrent()) return [];
 
   const targets = buildPrefetchTargets(ctx);
   if (includeInbox) {
@@ -326,6 +350,11 @@ export async function runPrefetch(
     targets.map(async (t): Promise<PrefetchOutcome> => {
       try {
         const value = await t.fetch(ctx.webId);
+        // SESSION-RACE GUARD: re-check the session AFTER the async fetch resolved
+        // and IMMEDIATELY BEFORE the write. If the user logged out / switched
+        // account mid-flight, suppress the write so we never resurrect an old
+        // account's data into a cache `logout()` just cleared (roborev High).
+        if (!isCurrent()) return { label: t.label, key: t.key, status: "stale" };
         // Only warm a real value. `undefined` means "nothing to show" — set()
         // would no-op the durable write anyway; skip to keep the slot cold so a
         // later cold-load is honest rather than caching an empty placeholder.

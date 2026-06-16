@@ -355,3 +355,96 @@ describe("prefetch: non-blocking + a per-page failure is isolated", () => {
     expect(cache.has(WEBID, `domains:${base}`), "undefined must NOT warm the slot").toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// (4) SESSION-RACE GUARD — a session change mid-flight suppresses the write.
+// ---------------------------------------------------------------------------
+
+/**
+ * The bug class (roborev finding, High): a prefetch fetch is async and the idle
+ * callback fires AFTER the mounting effect's cleanup could run, so the session
+ * can change (logout / account switch / storage switch) WHILE a warm-up is in
+ * flight. `logout()` / a switch clear the cache + durable store SYNCHRONOUSLY,
+ * but an in-flight `runPrefetch` resolving afterwards would write the OLD
+ * account's data BACK into the (now cleared) cache — a stale, cross-account
+ * write that resurrects data the session change just purged.
+ *
+ * The fix: `runPrefetch` takes an `isCurrent` guard checked (1) before the run
+ * starts and (2) IMMEDIATELY BEFORE every `cache.set`. When it returns `false`
+ * the write is SUPPRESSED (outcome `"stale"`), so the cache is never warmed for
+ * a session that is no longer live. `usePrefetch` supplies a guard comparing the
+ * live `(webId, activeStorage, status)` against the scope the warm-up was
+ * scheduled for; these tests drive `runPrefetch` directly with a controllable
+ * `isCurrent` (the node env has no React renderer — same approach as elsewhere).
+ */
+describe("prefetch: a session change mid-flight suppresses the write (never warms a stale account)", () => {
+  it("isCurrent already false at start → warms NOTHING (the run is abandoned)", async () => {
+    const cache = new SwrCache(null);
+    const outcomes = await runPrefetch(CTX, {
+      cache,
+      isCurrent: () => false, // the session changed before the idle callback fired
+    });
+    expect(outcomes, "an already-stale run must short-circuit to no outcomes").toEqual([]);
+    for (const { key } of EXPECTED_WARM_KEYS) {
+      expect(cache.has(WEBID, key), "no slot may warm for a session that already changed").toBe(
+        false,
+      );
+    }
+  });
+
+  it("isCurrent flips false AFTER the fetches resolve → every write is SUPPRESSED (status 'stale')", async () => {
+    const cache = new SwrCache(null);
+    // Current at run-start (so the run proceeds + the fetches fire), but stale by
+    // the time each value resolves and we are about to write — exactly the
+    // logout/switch-mid-flight race. Flip on the FIRST call (the pre-run check)
+    // so every pre-write check then sees `false`.
+    let calls = 0;
+    const isCurrent = () => {
+      calls += 1;
+      return calls === 1; // only the initial pre-run gate passes; all writes suppressed
+    };
+
+    const outcomes = await runPrefetch(CTX, { cache, isCurrent, includeInbox: false });
+
+    // Nothing landed in the cache — the in-flight writes were all suppressed.
+    for (const { key } of EXPECTED_WARM_KEYS) {
+      if (key === `inbox:${INBOX_URL}`) continue; // inbox disabled here
+      expect(cache.has(WEBID, key), "a stale write must NOT warm the slot").toBe(false);
+    }
+    // And every outcome reports the suppression as `"stale"` (not warmed, not failed).
+    expect(outcomes.length, "the run still produced per-target outcomes").toBeGreaterThan(0);
+    expect(
+      outcomes.every((o) => o.status === "stale"),
+      `every outcome must be 'stale'; saw: ${outcomes.map((o) => o.status).join(",")}`,
+    ).toBe(true);
+    expect(outcomes.some((o) => o.status === "warmed"), "no slot may warm after going stale").toBe(
+      false,
+    );
+  });
+
+  it("isCurrent stays true throughout → warms normally (the guard does not regress the happy path)", async () => {
+    const cache = new SwrCache(null);
+    const outcomes = await runPrefetch(CTX, { cache, isCurrent: () => true, includeInbox: false });
+    // The storage/webid-scoped pages warmed as usual — the guard is transparent
+    // when the session never changes.
+    expect(cache.has(WEBID, "category-summaries")).toBe(true);
+    expect(cache.has(WEBID, `productivity:${STORAGE}notes/`)).toBe(true);
+    expect(outcomes.some((o) => o.status === "warmed"), "warming must still happen").toBe(true);
+    expect(outcomes.some((o) => o.status === "stale"), "nothing is stale when always current").toBe(
+      false,
+    );
+  });
+
+  it("a suppressed write never clears an already-warm slot (only WARMS, never invalidates)", async () => {
+    // A real read for THIS page already warmed the slot (the user visited it).
+    // A later stale prefetch resolving must leave that warm value untouched.
+    const cache = new SwrCache(null);
+    const existing = [{ category: { id: "notes" }, hasData: true, real: true }];
+    cache.set(WEBID, "category-summaries", existing);
+
+    await runPrefetch(CTX, { cache, isCurrent: () => false, includeInbox: false });
+
+    const first = deriveSwrInitialState(cache, WEBID, "category-summaries");
+    expect(first.data, "a stale prefetch must not disturb an already-warm slot").toEqual(existing);
+  });
+});

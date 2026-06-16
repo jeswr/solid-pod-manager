@@ -21,7 +21,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { scopeKey } from "./prefetch-scope.js";
+import { decidePrefetch, scopeKey } from "./prefetch-scope.js";
 
 const WEBID = "https://alice.example/profile#me";
 const STORAGE = "https://alice.example/storage/";
@@ -82,5 +82,58 @@ describe("usePrefetch scopeKey: built ONE way (isCurrent never silently disables
     expect(noStorage).toBe(scopeKey("logged-in", WEBID, undefined));
     // And it differs from the with-storage scope, so storage landing re-warms.
     expect(noStorage).not.toBe(scopeKey("logged-in", WEBID, STORAGE));
+  });
+});
+
+/**
+ * `decidePrefetch` — the once-per-scope guard logic, including the logout-RESET
+ * roborev flagged (Medium): `usePrefetch` stays MOUNTED on the logged-out screen,
+ * so a logout that clears the cache must also clear `warmedFor`, or a re-login to
+ * the SAME account reproduces the same scope key and the "already warmed" check
+ * skips the warm-up — leaving the freshly-cleared session COLD. We drive the
+ * decision as a pure reducer over `(prevWarmedFor, warmKey)` to pin the full
+ * lifecycle without a React renderer.
+ */
+describe("usePrefetch decidePrefetch: once-per-scope, but RESET across logout (re-login re-warms)", () => {
+  const scopeA = scopeKey("logged-in", WEBID, STORAGE);
+  const scopeB = scopeKey("logged-in", OTHER_WEBID, STORAGE);
+
+  it("first login (no prior scope) → WARMS and records the scope", () => {
+    expect(decidePrefetch(undefined, scopeA)).toEqual({ shouldWarm: true, nextWarmedFor: scopeA });
+  });
+
+  it("re-render within the SAME session → does NOT re-warm (idempotent)", () => {
+    expect(decidePrefetch(scopeA, scopeA)).toEqual({ shouldWarm: false, nextWarmedFor: scopeA });
+  });
+
+  it("account / storage switch (a NEW non-empty scope) → re-WARMS for the new scope", () => {
+    expect(decidePrefetch(scopeA, scopeB)).toEqual({ shouldWarm: true, nextWarmedFor: scopeB });
+  });
+
+  it("logout (empty scope) → never warms AND RESETS warmedFor to undefined", () => {
+    // The hook stays mounted; an empty live scope must clear the guard so the
+    // next login re-warms (logout cleared the cache).
+    expect(decidePrefetch(scopeA, "")).toEqual({ shouldWarm: false, nextWarmedFor: undefined });
+  });
+
+  it("THE ROBOREV SCENARIO: login(A) → logout → login(A) again RE-WARMS the cleared cache", () => {
+    // 1. Login to A: warms, records scope(A).
+    const afterLogin = decidePrefetch(undefined, scopeA);
+    expect(afterLogin.shouldWarm).toBe(true);
+    expect(afterLogin.nextWarmedFor).toBe(scopeA);
+
+    // 2. Logout (cache cleared): the hook is still mounted; the guard must reset.
+    const afterLogout = decidePrefetch(afterLogin.nextWarmedFor, "");
+    expect(afterLogout.shouldWarm).toBe(false);
+    expect(afterLogout.nextWarmedFor, "logout must reset the once-per-scope guard").toBeUndefined();
+
+    // 3. Log back into the SAME account: must WARM again (the cache is cold). With
+    //    the old (buggy) `warmKey===prev` skip this returned false — the bug.
+    const afterRelogin = decidePrefetch(afterLogout.nextWarmedFor, scopeA);
+    expect(
+      afterRelogin.shouldWarm,
+      "re-login to the same account after logout must re-warm the cleared cache",
+    ).toBe(true);
+    expect(afterRelogin.nextWarmedFor).toBe(scopeA);
   });
 });

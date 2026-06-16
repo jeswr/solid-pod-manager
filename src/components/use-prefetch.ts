@@ -28,7 +28,7 @@
 import { useEffect, useRef } from "react";
 import { useSession } from "@/components/session-provider";
 import { runPrefetch, type RunPrefetchOptions } from "@/lib/prefetch";
-import { scopeKey } from "@/lib/prefetch-scope";
+import { decidePrefetch, scopeKey } from "@/lib/prefetch-scope";
 
 /** A cancel handle for whichever idle/timeout primitive we scheduled with. */
 type ScheduleHandle = { cancel: () => void };
@@ -97,13 +97,23 @@ export function usePrefetch(options: RunPrefetchOptions = {}): void {
   liveKeyRef.current = scopeKey(status, webId, activeStorage);
 
   useEffect(() => {
-    if (status !== "logged-in" || !webId) return;
     // Storage-scoped pages need a storage; until one is chosen, only the
     // WebID-scoped targets would warm — still worth doing, but we re-warm once
     // storage lands (the key below changes), so a no-storage pass is fine too.
     const warmKey = scopeKey(status, webId, activeStorage);
-    if (warmedFor.current === warmKey) return;
-    warmedFor.current = warmKey;
+
+    // The once-per-scope decision (factored into `decidePrefetch`, unit-tested for
+    // the logout→same-account-login lifecycle). It also RESETS `warmedFor` when
+    // there is no live scope: this hook stays MOUNTED on the logged-out screen
+    // (AppShell never unmounts it), and logout clears `readCache`, so without the
+    // reset a re-login to the SAME WebID/storage would reproduce the same warmKey
+    // and be skipped — leaving the freshly-cleared session COLD (roborev Medium).
+    const { shouldWarm, nextWarmedFor } = decidePrefetch(warmedFor.current, warmKey);
+    warmedFor.current = nextWarmedFor;
+    // `shouldWarm` is true only for a non-empty `warmKey`, which `scopeKey` returns
+    // solely when logged-in WITH a WebID — so `webId` is defined here. The explicit
+    // check both narrows the type and is a defensive belt.
+    if (!shouldWarm || !webId) return;
 
     const storages = profile?.storages;
     // The scope this warm-up was scheduled FOR; `isCurrent` holds only while the

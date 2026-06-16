@@ -28,3 +28,40 @@ export function scopeKey(
   if (status !== "logged-in" || !webId) return "";
   return `${webId} ${activeStorage ?? ""}`;
 }
+
+/** The once-per-scope decision `usePrefetch` makes on each render. */
+export interface PrefetchDecision {
+  /** Warm now? (true exactly once per NEW non-empty scope). */
+  shouldWarm: boolean;
+  /** The value to write back into the `warmedFor` ref after this render. */
+  nextWarmedFor: string | undefined;
+}
+
+/**
+ * The once-per-scope guard logic, factored OUT of the hook so the logout→login
+ * lifecycle is unit-testable without a React renderer.
+ *
+ * `usePrefetch` is MOUNTED for the app's whole life (AppShell never unmounts it —
+ * it renders on the logged-out screen too). So the guard cannot merely "warm when
+ * the key changes"; it must also RESET when there is no live scope. Otherwise:
+ * login(A) warms + records `warmedFor = scope(A)`; logout clears `readCache` but
+ * leaves `warmedFor` stale; login(A) again reproduces the SAME `scope(A)` and the
+ * "already warmed" check skips it — leaving the freshly-cleared session COLD
+ * (roborev finding, Medium). Resetting to `undefined` on every empty-scope render
+ * makes the next login re-warm.
+ *
+ *   - `warmKey === ""` (logged-out / no WebID): never warm; RESET `warmedFor` so
+ *     the next login re-warms the cleared cache.
+ *   - `warmKey === prevWarmedFor` (same live scope already warmed): skip (idempotent
+ *     across re-renders/navigations within one session).
+ *   - otherwise (a NEW non-empty scope — first login, account switch, storage
+ *     switch, or a re-login after a logout reset): WARM, and record the scope.
+ */
+export function decidePrefetch(
+  prevWarmedFor: string | undefined,
+  warmKey: string,
+): PrefetchDecision {
+  if (warmKey === "") return { shouldWarm: false, nextWarmedFor: undefined };
+  if (prevWarmedFor === warmKey) return { shouldWarm: false, nextWarmedFor: warmKey };
+  return { shouldWarm: true, nextWarmedFor: warmKey };
+}

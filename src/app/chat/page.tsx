@@ -18,6 +18,7 @@ import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { useChat } from "@/components/use-chat";
 import { useResourceNotifications } from "@/components/use-resource-notifications";
+import { LaunchInApp } from "@/components/launch-in-app";
 import { PeoplePicker } from "@/components/people-picker";
 import { EmptyState, ErrorState } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -65,19 +66,22 @@ function ChatView({ containerUrl }: { containerUrl: string }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <header className="flex items-start gap-4">
-        <span
-          aria-hidden="true"
-          className="grid size-12 shrink-0 place-items-center rounded-xl bg-accent text-accent-foreground"
-        >
-          <MessagesSquare className="size-6" />
-        </span>
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Chat</h1>
-          <p className="measure mt-1 text-sm text-muted-foreground text-pretty break-all">
-            {containerUrl}
-          </p>
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-start gap-4">
+          <span
+            aria-hidden="true"
+            className="grid size-12 shrink-0 place-items-center rounded-xl bg-accent text-accent-foreground"
+          >
+            <MessagesSquare className="size-6" />
+          </span>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Chat</h1>
+            <p className="measure mt-1 text-sm text-muted-foreground text-pretty break-all">
+              {containerUrl}
+            </p>
+          </div>
         </div>
+        <LaunchInApp app="chat" />
       </header>
 
       {error ? (

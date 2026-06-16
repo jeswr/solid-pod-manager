@@ -16,7 +16,9 @@ function rawTurtle(): Plugin {
   };
 }
 
-// Vitest covers the data layer (`src/lib/**`) plus the serving script
+// Vitest covers the data layer (`src/lib/**`) plus the cache/SWR behaviour of
+// hooks under `src/components/**` (asserted against the shared SwrCache — no
+// React render, the `node` env has no DOM) and the serving script
 // (`scripts/*.test.mjs` spawns scripts/serve-static.mjs as a real process).
 // The e2e suite (Playwright, `e2e/**`) starts a real CSS and drives the
 // browser — keep the two runners fully separate so `vitest run` never tries
@@ -25,7 +27,11 @@ export default defineConfig({
   plugins: [rawTurtle()],
   test: {
     environment: "node",
-    include: ["src/lib/**/*.test.ts", "scripts/**/*.test.mjs"],
+    include: [
+      "src/lib/**/*.test.ts",
+      "src/components/**/*.test.ts",
+      "scripts/**/*.test.mjs",
+    ],
     exclude: ["e2e/**", "node_modules/**"],
   },
   resolve: {

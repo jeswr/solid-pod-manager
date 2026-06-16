@@ -182,6 +182,9 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA}TextDigitalDocument`,
       `${SCHEMA}DigitalDocument`,
       `${SCHEMA_HTTP}TextDigitalDocument`,
+      // Pod Docs (suite app) writes documents typed as pd:Document — surface them under Documents
+      // instead of the Uncategorised "Other data" fallback (cross-app interop verification 2026-06-16).
+      "https://w3id.org/jeswr/pod-docs#Document",
       `${BOOKMARK}Bookmark`,
       // First-party Issues tracker stores issues as wf:Task.
       "http://www.w3.org/2005/01/wf/flow#Task",

@@ -239,6 +239,29 @@ export class SwrCache {
 export const readCache = new SwrCache();
 
 /**
+ * A SECOND, MEMORY-ONLY SWR cache, reserved for read models whose value can
+ * contain PRIVATE third-party content that must NEVER be written to disk — the
+ * unified Community feed is the first consumer (its `FeedResult` interleaves
+ * PRIVATE Matrix room messages with the public Solid forum). Constructing it
+ * with `durable: null` disables the localStorage snapshot layer entirely, so:
+ *
+ *   - Private Matrix message bodies are kept in memory for the tab's lifetime
+ *     ONLY — they never touch `localStorage`, so they cannot outlive the session
+ *     or be read off disk later (the privacy leak roborev flagged: the default
+ *     {@link readCache} mirrors every value to a durable, persisted snapshot).
+ *   - The instant-nav UX is still preserved WITHIN the session: in-memory
+ *     cross-mount sharing, subscriptions, and stale-while-revalidate all work
+ *     exactly as with {@link readCache}; only the cold-open durable hydration is
+ *     dropped (a fresh fetch on a cold reload is correct here — and a fresh
+ *     reload should not paint last session's private chat from disk anyway).
+ *
+ * Like {@link readCache} it is module-scoped (one per tab) and MUST be cleared
+ * on logout / account switch by the session bridge — it holds per-WebID private
+ * content and is wiped alongside `readCache` there.
+ */
+export const memoryReadCache = new SwrCache(null);
+
+/**
  * The synchronously-derivable part of {@link useSwrRead}'s state for a given
  * `(webId, key)` — what the very FIRST paint under that key must show. Kept a
  * pure function (no React) so it is unit-testable and so the hook can use it

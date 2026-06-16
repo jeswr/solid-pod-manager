@@ -22,7 +22,11 @@ import { useMemo, useState } from "react";
 import { ExternalLink, MessagesSquare, Plug, RefreshCw, Unplug } from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
-import { useCommunityFeed, useCommunityPrefs } from "@/components/use-community";
+import {
+  clearCommunityFeedCache,
+  useCommunityFeed,
+  useCommunityPrefs,
+} from "@/components/use-community";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Button } from "@/components/ui/button";
@@ -88,6 +92,11 @@ export default function CommunityPage() {
     if (!token) return;
     // Record the owning WebID so the token is dropped on an account switch.
     setCommunityCredentials({ matrixAccessToken: token }, webId);
+    // Drop any cached pre-connect feed slots so the connected feed is fetched
+    // fresh (and a previously-cached disconnected slot can't linger). The cache
+    // is memory-only, so private content never touched disk — this is the
+    // in-memory hygiene companion to the disconnect clear below.
+    clearCommunityFeedCache(webId);
     setTokenInput("");
     setConnecting(false);
     toast.success("Matrix connected — loading your rooms…");
@@ -96,6 +105,12 @@ export default function CommunityPage() {
 
   function disconnectMatrix() {
     clearCommunityCredentials();
+    // Evict the memory-cached feed for this WebID: it holds the (now
+    // disconnected) account's PRIVATE Matrix room content, which must not linger
+    // in memory after an explicit disconnect or be reused on a later reconnect
+    // (roborev finding, Medium). The feed key flips m→_, so the connected slot
+    // would otherwise sit in memory until logout.
+    clearCommunityFeedCache(webId);
     toast.message("Matrix disconnected.");
     reload();
   }

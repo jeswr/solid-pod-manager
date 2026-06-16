@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSession } from "@/components/session-provider";
 import { useSwrRead } from "@/components/use-swr-read";
+import { memoryReadCache } from "@/lib/swr-cache";
 import type { RevalidatableState } from "@/components/use-pod-data";
 import { fetchCommunityFeed, type FeedResult } from "@/lib/community-feeds";
 import {
@@ -120,6 +121,32 @@ function prefsKey(prefs: CommunityPrefs, matrixConnected: boolean): string {
 }
 
 /**
+ * Evict EVERY cached community-feed slot for `webId` from the memory-only cache.
+ *
+ * Call this whenever the Matrix connection changes for the SAME WebID (connect,
+ * disconnect, or replacing the token) — NOT just on account switch/logout. The
+ * feed key folds `matrixConnected` (`community:m:…` vs `community:_:…`), so a
+ * disconnect already stops the connected slot from being SERVED; but the entry
+ * with the private Matrix content would otherwise LINGER in memory and be reused
+ * on a later reconnect with the same rooms (roborev finding, Medium). Dropping
+ * the whole partition guarantees private chat content does not survive a
+ * disconnect in memory and that a reconnect always re-fetches fresh, never
+ * serving pre-disconnect content.
+ *
+ * `invalidate` (not `clearWebId`) drops the keyed entries AND notifies any
+ * mounted `useCommunityFeed`, so the page revalidates rather than showing stale
+ * content; without a `webId` (logged out) there is nothing to clear.
+ */
+export function clearCommunityFeedCache(webId: string | undefined): void {
+  if (!webId) return;
+  // Drop both credential-state slots ("m" connected / "_" disconnected) plus
+  // any in-flight ones; clearWebId removes the whole WebID partition in memory
+  // and notifies subscribers, which is exactly the "forget this account's feed"
+  // semantics we want on a credential change.
+  memoryReadCache.clearWebId(webId);
+}
+
+/**
  * `useCommunityFeed` — load the unified community feed (Solid forum + Matrix
  * rooms) for the given prefs, with stale-while-revalidate so navigating back to
  * the Community page paints the last feed INSTANTLY and refreshes in the
@@ -129,6 +156,16 @@ function prefsKey(prefs: CommunityPrefs, matrixConnected: boolean): string {
  * Forum read works WITHOUT credentials (out of the box); Matrix rooms only
  * appear once a Matrix token is connected. The fetcher uses the pristine native
  * `fetch` (public hosts, not the pod — see `community-feeds.ts`).
+ *
+ * PRIVACY — MEMORY-ONLY CACHE: the feed `FeedResult` interleaves PRIVATE Matrix
+ * room messages with the public forum, so it is cached through the MEMORY-ONLY
+ * {@link memoryReadCache} (a `SwrCache` constructed with no durable store), NOT
+ * the default durable {@link readCache}. This keeps the instant-nav SWR UX
+ * (cross-mount in-memory sharing + background revalidate) while guaranteeing
+ * private Matrix message bodies are NEVER written to `localStorage` — so they
+ * cannot persist to disk past the session or be read off disk later (roborev
+ * finding, HIGH). The memory cache is wiped on logout / account switch by the
+ * session bridge, like every other per-WebID slot.
  *
  * @param loaded - pass `useCommunityPrefs().loaded`. While `false` the feed does
  *   NOT fetch (empty key), so it never fires external requests off the UNSAVED
@@ -153,6 +190,10 @@ export function useCommunityFeed(
   // Capture the current prefs for the fetcher without making the closure
   // identity a fetch trigger (the key already encodes prefs changes).
   const fetcher = useCallback((): Promise<FeedResult> => fetchCommunityFeed(prefs), [prefs]);
-  const { data, error, loading, revalidating, reload } = useSwrRead<FeedResult>(key, fetcher);
+  // MEMORY-ONLY cache (no durable/localStorage snapshot) so PRIVATE Matrix
+  // message bodies in the FeedResult are never persisted to disk (roborev HIGH).
+  const { data, error, loading, revalidating, reload } = useSwrRead<FeedResult>(key, fetcher, {
+    cache: memoryReadCache,
+  });
   return { data, error, loading, revalidating, reload };
 }

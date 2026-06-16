@@ -51,7 +51,7 @@ import {
   type ProfileStatus,
 } from "@/lib/session-profile";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
-import { readCache } from "@/lib/swr-cache";
+import { memoryReadCache, readCache } from "@/lib/swr-cache";
 import { captureNativeFetch } from "@/lib/native-fetch";
 import {
   clearCommunityCredentials,
@@ -473,7 +473,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         // window). `enterSwitchLoading` clears both refs + state on a real
         // WebID change; the shared loader then resolves to B's own profile.
         setWebId((prev) => {
-          if (prev && prev !== id) readCache.clearWebId(prev);
+          if (prev && prev !== id) {
+            readCache.clearWebId(prev);
+            // The memory-only community feed cache holds the PREVIOUS account's
+            // private Matrix content — drop its partition too on an account
+            // switch (it is not mirrored to localStorage, but it MUST not linger
+            // in memory across accounts). Mirrors the readCache clear above.
+            memoryReadCache.clearWebId(prev);
+          }
           return id;
         });
         // Account switch (no /community mounted to run the owner-guard): drop any
@@ -583,6 +590,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // a render-speed optimization only; clearing it here is the security
     // boundary for the read snapshots (writes already re-read fresh).
     readCache.clearAll();
+    // Drop the memory-only community feed cache too — it holds this account's
+    // private Matrix room content in memory; an explicit logout must wipe it
+    // alongside the durable read cache (it never reaches disk, but it must not
+    // outlive the session in memory either).
+    memoryReadCache.clearAll();
     // Drop the in-memory community (Matrix/Discourse) credentials too: they are
     // module-scoped and survive the /community unmount, so an explicit logout
     // must wipe a pasted Matrix token from the tab (it must not outlive sign-out;

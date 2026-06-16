@@ -97,6 +97,18 @@ describe("useCommunityFeed structural wiring", () => {
     expect(SOURCE).toContain("hasMatrixCredential()");
   });
 
+  it("routes the feed through the MEMORY-ONLY cache (no durable persistence of private Matrix content)", () => {
+    // The unified FeedResult interleaves private Matrix messages with the public
+    // forum, so the hook MUST pass the memory-only cache to useSwrRead — never
+    // the default durable readCache (roborev finding, HIGH; behavioural proof in
+    // use-community-privacy.test.ts). A regression that dropped this override
+    // would re-enable localStorage persistence of private chat.
+    expect(SOURCE).toContain("memoryReadCache");
+    expect(SOURCE).toMatch(/useSwrRead<FeedResult>\([\s\S]*cache:\s*memoryReadCache/);
+    // It must NOT fall back to the default (durable) cache for this feed.
+    expect(SOURCE).not.toMatch(/useSwrRead<FeedResult>\(\s*key,\s*fetcher\s*\)/);
+  });
+
   it("does NOT fetch the feed off default prefs before saved prefs load (loaded gate)", () => {
     // The feed key is "" until prefs are loaded for the WebID, so no external
     // request fires off the unsaved defaults (roborev finding, Medium). Prefs are

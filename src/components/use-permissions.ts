@@ -59,8 +59,14 @@ export interface ConnectedAppsState extends AsyncState<ConnectedApp[]> {
   getFreshModel: () => Promise<ConnectedAppsModel>;
 }
 
-/** The uncached discovery chain (profile → type index → ACLs → identities). */
-async function loadConnectedApps(
+/**
+ * The uncached discovery chain (profile → type index → ACLs → identities).
+ *
+ * Exported so the PROACTIVE PREFETCH orchestrator ({@link file://../lib/prefetch.ts})
+ * can warm the `connected-apps` cache from the EXACT SAME fetcher this hook uses
+ * — single source of truth, no duplicated fetch logic.
+ */
+export async function loadConnectedApps(
   webId: string,
   activeStorage: string,
 ): Promise<ConnectedAppsModel> {

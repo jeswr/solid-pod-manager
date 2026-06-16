@@ -16,8 +16,14 @@ import { buildRecentChanges, type ActivityEntry, type CategoryItems } from "@/li
  */
 const MAX_FEED = 50;
 
-/** The full uncached chain: profile → registrations → list each category → feed. */
-async function loadRecentActivity(webId: string): Promise<ActivityEntry[]> {
+/**
+ * The full uncached chain: profile → registrations → list each category → feed.
+ *
+ * Exported so the PROACTIVE PREFETCH orchestrator ({@link file://../lib/prefetch.ts})
+ * can warm the `recent-activity` cache from the EXACT SAME fetcher this hook uses
+ * — single source of truth, no duplicated fetch logic.
+ */
+export async function loadRecentActivity(webId: string): Promise<ActivityEntry[]> {
   const { dataset } = await freshRdf(webId);
   const { locations } = await discoverRegistrations(webId, dataset);
   const withData = summariseCategories(locations).filter((s) => s.hasData);

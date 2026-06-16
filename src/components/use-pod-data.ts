@@ -24,8 +24,14 @@ export interface RevalidatableState<T> extends AsyncState<T> {
   revalidating: boolean;
 }
 
-/** The uncached type-index discovery chain (profile → registrations). */
-async function loadCategorySummaries(webId: string): Promise<CategorySummary[]> {
+/**
+ * The uncached type-index discovery chain (profile → registrations).
+ *
+ * Exported so the PROACTIVE PREFETCH orchestrator ({@link file://../lib/prefetch.ts})
+ * can warm the `category-summaries` cache from the EXACT SAME fetcher this hook
+ * uses — single source of truth, no duplicated fetch logic.
+ */
+export async function loadCategorySummaries(webId: string): Promise<CategorySummary[]> {
   // The profile carries the type-index links — fetch it (public read,
   // revalidated: a just-bootstrapped index link must not be cache-hidden).
   const { dataset } = await freshRdf(webId);

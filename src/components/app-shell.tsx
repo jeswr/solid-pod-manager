@@ -4,6 +4,7 @@ import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { Loader2, Menu, TriangleAlert } from "lucide-react";
 import { useSession } from "@/components/session-provider";
+import { usePrefetch } from "@/components/use-prefetch";
 import { LoginScreen } from "@/components/login-screen";
 import { SidebarNav, BottomNav } from "@/components/sidebar-nav";
 import { Brand } from "@/components/brand";
@@ -30,6 +31,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { status, profileStatus, retryProfile } = useSession();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const pathname = usePathname();
+
+  // PROACTIVE PREFETCH (PM #65 Phase 2): once logged in, warm the SWR read cache
+  // for the likely-next pages during browser idle time, so the user's FIRST
+  // navigation to any read page is instant. Self-gates on `status:"logged-in"`
+  // and runs once per (webId, activeStorage); it is a side-effect scheduled off
+  // the render path, so it never delays this shell's paint. Mounted here — once,
+  // in the authenticated frame — so it covers the whole app, not just Home.
+  usePrefetch();
 
   if (pathname !== null && PUBLIC_ROUTES.has(pathname)) {
     return <>{children}</>;

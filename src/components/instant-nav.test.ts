@@ -447,6 +447,10 @@ const ACTION_HOOKS: readonly string[] = [
   "use-resource-notifications.ts", // notification subscription utility (no read model)
   "use-resource.ts", // single-resource viewer that DELIBERATELY revalidates no-cache (post-edit ETag)
   "use-swr-read.ts", // the cache hook itself
+  "use-prefetch.ts", // PROACTIVE PREFETCH orchestrator (PM #65 Phase 2): a side-effect
+  // that WARMS the read cache for the likely-next pages; it has no navigable read
+  // model of its own (it warms the OTHER hooks' slots), so it is not a READ hook.
+  // Its instant-FIRST-visit guarantee is asserted in instant-nav-prefetch.test.ts.
 ];
 
 /** Every `use-*.ts` (excluding tests) under src/components. */

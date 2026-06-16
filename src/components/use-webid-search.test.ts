@@ -18,9 +18,9 @@ import { describe, expect, it } from "vitest";
 import { indexedKey, searchKey } from "./use-webid-search.js";
 
 describe("searchKey — gating + keying", () => {
-  it("keys on the trimmed query when enabled", () => {
+  it("keys on the trimmed, URL-encoded query when enabled", () => {
     expect(searchKey("ada", true)).toBe("webid-search:ada");
-    expect(searchKey("  ada lovelace  ", true)).toBe("webid-search:ada lovelace");
+    expect(searchKey("  ada lovelace  ", true)).toBe("webid-search:ada%20lovelace");
   });
 
   it("includes the limit in the key (different page sizes => different slots)", () => {
@@ -28,6 +28,13 @@ describe("searchKey — gating + keying", () => {
     expect(searchKey("ada", true, 20)).toBe("webid-search:ada:limit:20");
     // No limit => no limit segment (back-compat with the unsized key).
     expect(searchKey("ada", true)).toBe("webid-search:ada");
+  });
+
+  it("encodes the query so a `:limit:`-bearing query cannot forge a limit segment", () => {
+    // The collision roborev flagged: query `ada:limit:5` (no limit) must NOT
+    // equal query `ada` + limit 5. Encoding the `:` defeats it.
+    expect(searchKey("ada:limit:5", true)).not.toBe(searchKey("ada", true, 5));
+    expect(searchKey("ada:limit:5", true)).toBe("webid-search:ada%3Alimit%3A5");
   });
 
   it("returns an EMPTY key (no fetch) when the feature is disabled", () => {

@@ -46,7 +46,12 @@ export interface WebIdSearchState extends SwrReadState<IndexPage> {
 export function searchKey(query: string, enabled: boolean, limit?: number): string {
   const q = query.trim();
   if (!enabled || !q) return "";
-  return limit !== undefined ? `webid-search:${q}:limit:${limit}` : `webid-search:${q}`;
+  // `encodeURIComponent` the query so a `limit` segment can never be forged by a
+  // query that literally contains `:limit:` — e.g. the query `ada:limit:5` with
+  // no limit must NOT collide with query `ada` + limit 5 (roborev finding). The
+  // encoded form has no bare `:`, so the structure is unambiguous.
+  const enc = encodeURIComponent(q);
+  return limit !== undefined ? `webid-search:${enc}:limit:${limit}` : `webid-search:${enc}`;
 }
 
 /** The SWR cache key for an isIndexed check. Pure + exported (see {@link searchKey}). */

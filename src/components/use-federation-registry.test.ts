@@ -112,10 +112,46 @@ describe("federation-registry config — security: passes the UNPATCHED native f
   });
 
   it("reads the env as a DIRECT property access so Next inlines it in the static export", () => {
-    // A computed `process.env[...]` key would defeat Next's build-time
-    // replacement; it MUST be the direct property form.
-    expect(cfg.includes("process.env.NEXT_PUBLIC_FEDERATION_REGISTRY")).toBe(true);
-    expect(/process\.env\[/.test(cfg)).toBe(false);
+    // The env read lives in the SDK-FREE config module; it MUST be the direct
+    // property form (a computed `process.env[...]` key would defeat Next's
+    // build-time replacement) AND trimmed once so blank == unset everywhere.
+    const flagCfg = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "federation-registry-config.ts"),
+      "utf8",
+    );
+    expect(flagCfg.includes("process.env.NEXT_PUBLIC_FEDERATION_REGISTRY")).toBe(true);
+    expect(/process\.env\[/.test(flagCfg)).toBe(false);
+    // The trim guarantees the flag, the cache key, and the fetch all agree (no
+    // whitespace-only "enabled-but-never-fetches" state) — roborev finding (Low).
+    expect(/\)\s*\.trim\(\)/.test(flagCfg)).toBe(true);
+    expect(flagCfg.includes('FEDERATION_REGISTRY_URL !== ""')).toBe(true);
+  });
+});
+
+describe("federation-registry — DARK FOOTPRINT: nav reads the flag without the SDK", () => {
+  it("nav-items imports the flag from the SDK-FREE config, not the SDK consumer", () => {
+    // roborev finding (Medium): the nav (in the primary app bundle) must NOT
+    // import federation-registry.ts (which top-level imports
+    // @jeswr/federation-client). It must read the flag from the lightweight
+    // federation-registry-config.ts so a dark feature has ZERO bundle footprint.
+    const nav = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "nav-items.ts"),
+      "utf8",
+    );
+    expect(nav.includes('from "@/lib/federation-registry-config"')).toBe(true);
+    expect(nav.includes('from "@/lib/federation-registry"')).toBe(false);
+  });
+
+  it("the SDK-free config module does NOT IMPORT @jeswr/federation-client", () => {
+    const flagCfg = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "federation-registry-config.ts"),
+      "utf8",
+    );
+    // Check for an actual import/require (the doc comment NAMES the SDK to explain
+    // WHY it is kept out — that prose is fine; an import is not).
+    expect(
+      /(?:import[^;]*from|require\s*\()\s*["']@jeswr\/federation-client["']/.test(flagCfg),
+    ).toBe(false);
   });
 });
 

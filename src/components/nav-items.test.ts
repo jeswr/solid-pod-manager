@@ -16,7 +16,7 @@ afterEach(() => {
 
 describe("nav-items: /federations is conditional + additive", () => {
   it("the static NAV_ITEMS always carries the gated /federations entry (never mutated)", async () => {
-    vi.doMock("@/lib/federation-registry", () => ({ isFederationRegistryEnabled: false }));
+    vi.doMock("@/lib/federation-registry-config", () => ({ isFederationRegistryEnabled: false }));
     const { NAV_ITEMS } = await import("./nav-items.js");
     const fed = NAV_ITEMS.find((i) => i.href === "/federations");
     expect(fed, "the entry exists in the static array").toBeDefined();
@@ -24,7 +24,7 @@ describe("nav-items: /federations is conditional + additive", () => {
   });
 
   it("visibleNavItems HIDES /federations when the registry is unset", async () => {
-    vi.doMock("@/lib/federation-registry", () => ({ isFederationRegistryEnabled: false }));
+    vi.doMock("@/lib/federation-registry-config", () => ({ isFederationRegistryEnabled: false }));
     const { visibleNavItems } = await import("./nav-items.js");
     expect(visibleNavItems().some((i) => i.href === "/federations")).toBe(false);
     // ... but ungated items still show (the filter only drops failing gates).
@@ -32,13 +32,13 @@ describe("nav-items: /federations is conditional + additive", () => {
   });
 
   it("visibleNavItems SHOWS /federations when the registry is configured", async () => {
-    vi.doMock("@/lib/federation-registry", () => ({ isFederationRegistryEnabled: true }));
+    vi.doMock("@/lib/federation-registry-config", () => ({ isFederationRegistryEnabled: true }));
     const { visibleNavItems } = await import("./nav-items.js");
     expect(visibleNavItems().some((i) => i.href === "/federations")).toBe(true);
   });
 
   it("every ungated item is always visible (gate is opt-in)", async () => {
-    vi.doMock("@/lib/federation-registry", () => ({ isFederationRegistryEnabled: false }));
+    vi.doMock("@/lib/federation-registry-config", () => ({ isFederationRegistryEnabled: false }));
     const { NAV_ITEMS, visibleNavItems } = await import("./nav-items.js");
     const visible = visibleNavItems();
     for (const item of NAV_ITEMS) {

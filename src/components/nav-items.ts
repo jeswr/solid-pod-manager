@@ -22,7 +22,10 @@ import {
   Globe,
   Network,
 } from "lucide-react";
-import { isFederationRegistryEnabled } from "@/lib/federation-registry";
+// Import the flag from the SDK-FREE config module (NOT federation-registry.ts,
+// which pulls @jeswr/federation-client) so the nav — in the primary app bundle —
+// never bundles the federation SDK when the feature is dark (roborev finding).
+import { isFederationRegistryEnabled } from "@/lib/federation-registry-config";
 
 export interface NavItem {
   href: string;

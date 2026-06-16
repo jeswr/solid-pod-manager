@@ -6,14 +6,12 @@
  * The whole feature is gated on ONE build-time env var,
  * `NEXT_PUBLIC_FEDERATION_REGISTRY` — the URL of a `fedreg:Registry` document
  * (a federation Catalogue/Registry served by a `@jeswr/federation-registry`
- * deployment). `NEXT_PUBLIC_*` vars are inlined by Next at build, so this
- * resolves to a static string in the static export; the env read is a DIRECT
- * `process.env.NEXT_PUBLIC_FEDERATION_REGISTRY` property access (NOT a computed
- * key) so Next's static replacement can see it (mirrors `webid-index.ts`).
- *
- * When the var is UNSET (the default), {@link isFederationRegistryEnabled} is
- * `false`, so the view + its nav entry are hidden entirely. Configure it ONLY
- * when a registry is deployed; the feature ships dark.
+ * deployment). The flag + URL live in `federation-registry-config.ts` (a
+ * lightweight, SDK-free module so the NAV can read the flag without pulling
+ * `@jeswr/federation-client` into the primary bundle — this module, which DOES
+ * import the SDK, is only loaded by the page/hook data path). When the var is
+ * UNSET (the default) the view + its nav entry are hidden entirely; the feature
+ * ships dark.
  *
  * FETCH SEAM — IMPORTANT (the same foreign-origin boundary as `webid-index.ts`
  * and `community-feeds.ts`): the registry is a THIRD-PARTY origin, NOT the
@@ -48,17 +46,15 @@ import {
   type ResolvedStorageSpec,
 } from "@jeswr/federation-client";
 import { getNativeFetch } from "./native-fetch.js";
+import {
+  FEDERATION_REGISTRY_URL,
+  isFederationRegistryEnabled,
+} from "./federation-registry-config.js";
 
-/**
- * The configured registry URL, or `""` when unset. Spelled as a DIRECT
- * `process.env.NEXT_PUBLIC_FEDERATION_REGISTRY` read so Next inlines it at build
- * (a computed key would defeat the static replacement in the export).
- */
-export const FEDERATION_REGISTRY_URL =
-  process.env.NEXT_PUBLIC_FEDERATION_REGISTRY ?? "";
-
-/** True when a federation registry is configured (the view is available). */
-export const isFederationRegistryEnabled = FEDERATION_REGISTRY_URL !== "";
+// Re-export the flag + URL so existing consumers (the hook) keep their single
+// import site; the canonical (SDK-free) definitions live in
+// `federation-registry-config.ts`.
+export { FEDERATION_REGISTRY_URL, isFederationRegistryEnabled };
 
 /**
  * Build the `@jeswr/federation-client` options that pin the foreign-origin fetch

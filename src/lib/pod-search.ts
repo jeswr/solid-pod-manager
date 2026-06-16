@@ -485,19 +485,29 @@ async function discoverOwnPodRegistrations(
 
   const { publicIndex, privateIndex: legacyCardIndex } = typeIndexLinks(ctx.webId, profile);
 
-  // Resolve the private index the spec-compliant way (preferences file first),
-  // but ONLY read a preferences file that is itself in-pod.
+  // Resolve the private index with the SAME semantics as `resolvePrivateIndex`
+  // (roborev finding, Medium): a LINKED preferences file is authoritative — the
+  // private index is whatever IT links, and a prefs file with no usable
+  // private-index link (incl. one that is unreadable / 404 / 403 / malformed)
+  // means "none". The legacy WebID-card value is used ONLY when NO prefs file is
+  // linked at all (a pre-fix pod). So we never silently fall back to a stale card
+  // value when a prefs file is present.
   const prefsFile = preferencesFileLink(ctx.webId, profile);
-  let privateIndex: string | undefined = legacyCardIndex;
-  if (prefsFile && inOwnPods(prefsFile, ctx.storages)) {
-    const prefs = await readPreferences(prefsFile, fetchImpl).catch(() => undefined);
-    if (prefs) {
-      const fromPrefs = new ProfileTypeIndexAnchor(prefsFile, prefs.dataset, DataFactory)
-        .privateIndex;
-      // The compliant location wins; a prefs file with no private-index link
-      // means "none" (never silently fall back to a stale legacy card value).
-      privateIndex = fromPrefs;
+  let privateIndex: string | undefined;
+  if (prefsFile) {
+    // A prefs file is linked → the card legacy value is OUT. Read it only if it
+    // is in-pod (else "none" — never reach off-pod, and never fall back to card).
+    if (inOwnPods(prefsFile, ctx.storages)) {
+      const prefs = await readPreferences(prefsFile, fetchImpl).catch(() => undefined);
+      privateIndex = prefs
+        ? new ProfileTypeIndexAnchor(prefsFile, prefs.dataset, DataFactory).privateIndex
+        : undefined;
+    } else {
+      privateIndex = undefined;
     }
+  } else {
+    // No prefs file linked — a legacy pod: the private index (if any) is the card.
+    privateIndex = legacyCardIndex;
   }
 
   // Fetch ONLY the index documents that live inside the user's own pods.

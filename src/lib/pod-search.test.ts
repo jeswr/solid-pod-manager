@@ -361,4 +361,40 @@ describe("searchPod: own-pod containment (no foreign-origin fetch)", () => {
     // The off-pod prefs file must not be read.
     expect(readPreferences).not.toHaveBeenCalled();
   });
+
+  it("a LINKED but unreadable prefs file means 'none' — never falls back to the legacy card index (roborev Medium)", async () => {
+    // resolvePrivateIndex semantics: when a prefs file is linked, the legacy
+    // WebID-card private index is OUT; an unreadable prefs file ⇒ private = none.
+    const { typeIndexLinks, readTypeIndex } = await import("@/lib/type-index");
+    const { preferencesFileLink, readPreferences } = await import("@/lib/preferences");
+    // Profile carries BOTH a legacy card private index AND a (linked) prefs file.
+    (typeIndexLinks as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+      publicIndex: undefined,
+      privateIndex: "https://alice.example/storage/settings/legacyPrivate.ttl",
+    });
+    (preferencesFileLink as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      "https://alice.example/storage/settings/prefs.ttl",
+    );
+    (readPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined); // unreadable
+    await searchPod(CTX, "budget");
+    // The stale legacy card private index must NEVER be read — a linked prefs
+    // file overrides it even when the prefs file itself fails to read.
+    for (const [url] of (readTypeIndex as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(url).not.toContain("legacyPrivate.ttl");
+    }
+  });
+
+  it("no prefs file linked → the legacy card private index IS used (legacy-pod fallback)", async () => {
+    const { typeIndexLinks, readTypeIndex } = await import("@/lib/type-index");
+    const { preferencesFileLink } = await import("@/lib/preferences");
+    (typeIndexLinks as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+      publicIndex: undefined,
+      privateIndex: "https://alice.example/storage/settings/legacyPrivate.ttl",
+    });
+    (preferencesFileLink as ReturnType<typeof vi.fn>).mockReturnValueOnce(undefined); // no prefs file
+    await searchPod(CTX, "budget");
+    // With no prefs file, the in-pod legacy card private index IS read.
+    const readUrls = (readTypeIndex as ReturnType<typeof vi.fn>).mock.calls.map(([u]) => u);
+    expect(readUrls).toContain("https://alice.example/storage/settings/legacyPrivate.ttl");
+  });
 });

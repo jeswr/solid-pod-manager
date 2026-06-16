@@ -199,12 +199,15 @@ type-match. (Open-Q in §6.)
 
 | Viewer | priority | rationale |
 |---|---|---|
+| Profile (`foaf:Person` / `http://schema.org/Person`) | 80 | the richest "who you are" shape; ABOVE Contacts so a `foaf:Person` profile gets the snippet card. Matches ONLY the resource's PRIMARY subject (the doc URL or a fragment of it) so an embedded author/artist/assignee never hijacks a document. Disjoint from `vcard:Individual` — a plain contact still falls to Contacts. Matches the `http://schema.org/` Person scheme only (the scheme `ProfileAgent` reads). |
 | Contacts (`vcard:Individual` / `vcard:fn`) | 70 | very specific shape |
 | Music (`schema:MusicRecording`) | 70 | specific class |
 | Photo (`schema:ImageObject`) | 60 | specific class |
 | Event (`schema:Event`) | 60 | specific class |
 | Bookmark (`bookmark:Bookmark`) | 60 | specific class |
-| Profile card (`foaf:Person` + name/photo) | 50 | broad; below Contacts so a typed contact wins |
+| Task (`icaltzd:Vtodo`) | 60 | specific class (first-party Tasks app). Matches the `icaltzd#` scheme only — the scheme `TaskDoc` reads. |
+| Note (`schema:TextDigitalDocument` / `DigitalDocument`) | 60 | specific class (first-party Notes app). Matches the `https://schema.org/` scheme only — the scheme `NoteDoc` reads. |
+| Issue (`wf:Task`) | 60 | specific class (shared `@jeswr/solid-task-model`; the federation linchpin) |
 | *(no match)* → generic `RdfViewer` table | — | the explicit unknown fallback |
 
 A resource holding **multiple** typed subjects (e.g. `media/top-tracks.ttl` = many `MusicRecording`s) is the
@@ -401,6 +404,23 @@ Ships: liked songs / playlists render as cover-art rows with Open-in-Spotify, no
 - **Events** — `event-view.ts` (`schema:Event`) → date/time + title + location; "Open in Google Calendar" action.
 - **Bookmarks** — `bookmark-view.ts` (`bookmark:Bookmark`, `bookmark:recalls`) → favicon + title + **Open link**
   action (targets the generic interop shape, §2.2).
+- **Tasks** — `task-view.ts` (`icaltzd:Vtodo`) → done indicator + title + due/priority badges; `task-card.tsx`.
+  Reuses the Tasks app's `TaskDoc` accessors + `priorityFromIcal` so completion/priority decode identically to the
+  list app (first-party Tasks, `src/lib/tasks.ts`). Matches the `icaltzd#` scheme only — the scheme the extractor
+  reads (a non-tz `ical#Vtodo` would render fieldless, so it is not matched).
+- **Notes** — `note-view.ts` (`schema:TextDigitalDocument` / `schema:DigitalDocument`, `https://schema.org/` scheme)
+  → title + last-edited + clamped plain-text body preview (never rendered as live markdown/HTML — pod text is
+  untrusted); `note-card.tsx`. Reuses the Notes app's `NoteDoc` accessors (first-party Notes, `src/lib/notes.ts`).
+  Matches the `https://schema.org/` scheme only — the scheme the extractor reads.
+- **Issues** — `issue-view.ts` (`wf:Task`) → state badge (open/in-progress/closed) + title + assignee handle +
+  created-time + body preview; `issue-card.tsx`. Reads via the SHARED `@jeswr/solid-task-model` `Task` accessor +
+  PM's `typesToState` for the three-band state, so a `wf:Task` authored in solid-issues renders here (the federation
+  linchpin, `src/lib/issues.ts`). The assignee WebID is shown as a friendly handle, never auto-linked.
+- **Profile** — `profile-view.ts` (`foaf:Person` / `http://schema.org/Person`) → avatar + name + nickname + bio +
+  **Visit homepage** action; `profile-card.tsx`. Priority 80 (above Contacts) for a profile document; reuses
+  `ProfileAgent`'s name/avatar/bio/nickname/homepage fallback chains. Matches ONLY the resource's primary subject
+  (so an embedded author/assignee never hijacks a document) and the `http://schema.org/` Person scheme (the scheme
+  the agent reads). Disjoint from `vcard:Individual`, so plain contacts still use Contacts.
 - Extend `MATCHERS` with YouTube/GitHub/Strava/Reddit/… as their viewers land — each one line.
 
 Every new typed view = one pure `*-view.ts` (+ test) + one `*-card.tsx` + one `registry` line + (optionally) one

@@ -237,4 +237,36 @@ describe("ensureOwnerOnly", () => {
     await ensureOwnerOnly(PREFS_URL, TEST_WEBID, pod.fetch);
     expect(pod.putCount).toBe(putsBefore);
   });
+
+  it("re-locks an owner-only-but-READ-ONLY ACL to full owner (read+write+control)", async () => {
+    // The owner holds only Read on the prefs file — owner-only but insufficient
+    // to write the private-index link. ensureOwnerOnly must RE-LOCK (roborev Medium).
+    const pod = createMemoryPod();
+    await pod.fetch(PREFS_URL, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `<${PREFS_URL}> a <http://www.w3.org/ns/pim/space#ConfigurationFile> .`,
+    });
+    await pod.fetch(`${PREFS_URL}.acl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix acl: <http://www.w3.org/ns/auth/acl#>.
+        <#owner> a acl:Authorization ;
+          acl:agent <${TEST_WEBID}> ;
+          acl:accessTo <${PREFS_URL}> ;
+          acl:mode acl:Read .`,
+    });
+    const putsBefore = pod.putCount;
+
+    await ensureOwnerOnly(PREFS_URL, TEST_WEBID, pod.fetch);
+
+    expect(pod.putCount).toBeGreaterThan(putsBefore); // a re-lock write happened
+    const aclDs = await parseRdf(pod.get(`${PREFS_URL}.acl`) ?? "", "text/turtle", {
+      baseIRI: `${PREFS_URL}.acl`,
+    });
+    const auths = [...new AclResource(aclDs, DataFactory).authorizations];
+    const owner = auths.find((a) => a.agent.has(TEST_WEBID));
+    expect(owner).toBeDefined();
+    expect(owner?.canRead && owner?.canWrite && owner?.canReadWriteAcl).toBe(true);
+  });
 });

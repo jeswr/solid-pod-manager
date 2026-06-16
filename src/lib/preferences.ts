@@ -319,9 +319,14 @@ export async function ensureOwnerOnly(
 
 /**
  * True when `dataset`'s authorizations governing `resourceUrl` grant access to
- * NO ONE but the owner agent (no public/authenticated/group/origin/other-agent),
- * AND the owner actually holds an authorization. Conservative: any
- * non-owner-only or owner-absent shape returns false (→ re-lock).
+ * NO ONE but the owner agent (no public/authenticated/group/origin/other-agent)
+ * AND the owner holds the FULL owner mode set (Read + Write + Control).
+ *
+ * Conservative: any non-owner-only shape, an absent owner, OR an owner whose
+ * rules don't add up to read+write+control returns false (→ re-lock). The
+ * mode check matters: an owner-only-but-read-only ACL must be re-locked, else
+ * `ensureOwnerOnly` would skip the relock and the subsequent prefs write would
+ * fail because the owner can't write (roborev Medium).
  */
 function isAlreadyOwnerOnly(
   dataset: DatasetCore,
@@ -329,19 +334,29 @@ function isAlreadyOwnerOnly(
   ownerWebId: string,
 ): boolean {
   const acl = new AclResource(dataset, DataFactory);
-  let ownerHasRule = false;
+  let ownerCanRead = false;
+  let ownerCanWrite = false;
+  let ownerCanControl = false;
   for (const auth of acl.authorizations) {
     if (!authTargetsResource(auth, resourceUrl)) continue;
     if (auth.accessibleToAny || auth.accessibleToAuthenticated) return false;
     if (auth.agentClass.size > 0 || auth.origin.size > 0 || auth.agentGroup !== undefined) {
       return false;
     }
+    let namesOwner = false;
     for (const agent of auth.agent) {
-      if (agent !== ownerWebId) return false;
-      ownerHasRule = true;
+      if (agent !== ownerWebId) return false; // a non-owner agent → re-lock
+      namesOwner = true;
+    }
+    if (namesOwner) {
+      // Accumulate the owner's effective modes across all owner-targeting rules.
+      if (auth.canRead) ownerCanRead = true;
+      if (auth.canWrite) ownerCanWrite = true;
+      if (auth.canReadWriteAcl) ownerCanControl = true;
     }
   }
-  return ownerHasRule;
+  // Owner-only AND the owner holds the full owner mode set.
+  return ownerCanRead && ownerCanWrite && ownerCanControl;
 }
 
 /**

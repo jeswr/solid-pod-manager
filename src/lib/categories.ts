@@ -146,6 +146,9 @@ export const CATEGORIES: readonly DataCategory[] = [
       // Calendar alongside events.
       "http://www.w3.org/2002/12/cal/icaltzd#Vtodo",
       "http://www.w3.org/2002/12/cal/ical#Vtodo",
+      // Scheduling polls (the first-party Schedule app + SolidOS interop) register
+      // sched:SchedulableEvent — surface them under Calendar, not "Other data".
+      "http://www.w3.org/ns/pim/schedule#SchedulableEvent",
     ],
   },
   {

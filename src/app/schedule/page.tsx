@@ -32,6 +32,9 @@ import {
   readPollAt,
   respondToPoll,
   aggregatePollRsvps,
+  readLinkedResultsResponses,
+  inspectLinkedResults,
+  mergeRsvpsWithinOptions,
   type Poll,
   type Rsvp,
   type RsvpResponse,
@@ -301,9 +304,24 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
       .slice()
       .sort((a, b) => (a.published ?? "").localeCompare(b.published ?? ""))
       .map((n) => ({ actor: n.actor, object: n.object, content: n.content }));
-    aggregatePollRsvps(basePoll, pollUrl, offers)
-      .then((rsvps) => {
-        if (!cancelled) setAggregated(rsvps);
+    // Merge BOTH sources into the tally: (a) inbox-Offer aggregation (PM's
+    // cross-pod RSVP loop) and (b) a SEPARATE sched:results document, if this poll
+    // is SolidOS-authored and keeps its responses in one (PM polls are inline →
+    // a no-op). This poll is the organiser's OWN (the effect is isOrganiser-gated),
+    // so use TRUSTED inspection so a LOCAL/dev poll's same-pod results doc is read
+    // (roborev Low); a cross-origin results URL is still SSRF-guarded. Off-list
+    // options are dropped via mergeRsvpsWithinOptions (roborev Medium); last-wins.
+    Promise.all([
+      aggregatePollRsvps(basePoll, pollUrl, offers),
+      readLinkedResultsResponses(pollUrl, { trusted: true }).catch(() => [] as Rsvp[]),
+    ])
+      .then(([fromOffers, fromResults]) => {
+        if (cancelled) return;
+        if (fromResults.length === 0) {
+          setAggregated(fromOffers);
+          return;
+        }
+        setAggregated(mergeRsvpsWithinOptions(fromOffers, fromResults, basePoll.options));
       })
       .catch(() => {
         if (!cancelled) setAggregated(undefined);
@@ -341,14 +359,33 @@ function PollDetail({ pollUrl }: { pollUrl: string }) {
       if (isOrganiser && store && owned.data) {
         // Organiser RSVPing on their own poll: same-pod update (last-wins upsert).
         // IMPORTANT: base the write on the CANONICAL poll (owned.data.data), NOT
-        // the aggregated view — otherwise foreign (cross-pod) RSVPs would get
-        // persisted into the organiser's own poll resource. Aggregated votes stay
-        // a read-time overlay only.
+        // the inbox-Offer aggregated overlay — those foreign cross-pod RSVPs live
+        // in the invitees' own pods and must NOT be persisted into the organiser's
+        // poll resource (they stay a read-time overlay only).
         const canonical = owned.data.data;
-        const rsvps = [
-          ...canonical.rsvps.filter((r) => !(r.attendee === webId && r.option === option)),
-          { attendee: webId, option, response },
-        ];
+        // A SolidOS-authored poll may keep its OWN responses in a SEPARATE
+        // sched:results document; those genuinely belong to this poll, and
+        // buildPoll rewrites the poll self-referential+inline, which would ORPHAN
+        // that doc and lose those votes (roborev High). So before saving, inspect
+        // the link: merge the linked responses into the canonical set — but if a
+        // separate doc EXISTS yet could not be read (a non-404 transient/permission
+        // failure), ABORT rather than silently orphan it (the votes are still safe
+        // in the external doc; the user can retry).
+        // TRUSTED save-path inspection: the poll is the user's OWN same-pod
+        // resource (possibly a local/dev origin), and inability to inspect a
+        // potential external results doc is a BLOCKING failure (don't orphan it).
+        const linked = await inspectLinkedResults(pollUrl, { trusted: true });
+        if (linked.readFailed) {
+          toast.error("Couldn't reach this poll's responses — not saving, to avoid losing votes. Try again.");
+          return;
+        }
+        // Merge linked responses into the canonical set (off-list options dropped),
+        // then upsert MY vote (always in-list — it's for an existing option).
+        const merged = new Map<string, Rsvp>();
+        for (const r of mergeRsvpsWithinOptions(canonical.rsvps, linked.responses, canonical.options))
+          merged.set(`${r.attendee}|${r.option}`, r);
+        merged.set(`${webId}|${option}`, { attendee: webId, option, response }); // upsert mine
+        const rsvps = [...merged.values()];
         await store.update(pollUrl, { ...canonical, rsvps }, owned.data.etag);
         toast.success("RSVP saved");
         reload();

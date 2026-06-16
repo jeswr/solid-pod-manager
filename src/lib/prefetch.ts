@@ -55,6 +55,7 @@ import { calendarStore } from "./calendar.js";
 import { bookmarksStore } from "./bookmarks.js";
 import { tasksStore } from "./tasks.js";
 import { issuesStore } from "./issues.js";
+import { scheduleStore } from "./schedule.js";
 
 /**
  * The minimal session slice a prefetch needs — the exact inputs the read hooks
@@ -101,6 +102,7 @@ const PRODUCTIVITY_STORE_FACTORIES: ReadonlyArray<{
   { label: "bookmarks", factory: bookmarksStore as never },
   { label: "tasks", factory: tasksStore as never },
   { label: "issues", factory: issuesStore as never },
+  { label: "schedule", factory: scheduleStore as never },
   // Contacts use the same productivity-store list path; the contacts STORE is
   // also the input to usePeople, prefetched separately under `people:<storage>`.
 ];

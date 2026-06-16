@@ -62,6 +62,14 @@ describe("categoryForClass", () => {
     expect(categoryForClass("http://schema.org/Invoice").id).toBe("finance");
   });
 
+  it("maps a sched:SchedulableEvent poll to Calendar (not Other data)", () => {
+    // #94 G3: the Schedule app + SolidOS-interop register this class; it must
+    // surface under Calendar, not the Uncategorised fallback.
+    expect(
+      categoryForClass("http://www.w3.org/ns/pim/schedule#SchedulableEvent").id,
+    ).toBe("calendar");
+  });
+
   it("resolves a bare foaf:Person to Identity, not Contacts (priority order)", () => {
     expect(categoryForClass("http://xmlns.com/foaf/0.1/Person").id).toBe("identity");
   });

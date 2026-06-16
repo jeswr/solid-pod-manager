@@ -23,8 +23,16 @@ describe("searchKey — gating + keying", () => {
     expect(searchKey("  ada lovelace  ", true)).toBe("webid-search:ada lovelace");
   });
 
+  it("includes the limit in the key (different page sizes => different slots)", () => {
+    expect(searchKey("ada", true, 5)).toBe("webid-search:ada:limit:5");
+    expect(searchKey("ada", true, 20)).toBe("webid-search:ada:limit:20");
+    // No limit => no limit segment (back-compat with the unsized key).
+    expect(searchKey("ada", true)).toBe("webid-search:ada");
+  });
+
   it("returns an EMPTY key (no fetch) when the feature is disabled", () => {
     expect(searchKey("ada", false)).toBe("");
+    expect(searchKey("ada", false, 5)).toBe("");
   });
 
   it("returns an EMPTY key (no fetch) for a blank query even when enabled", () => {
@@ -54,12 +62,33 @@ describe("use-webid-search — structural: gates on the feature flag", () => {
   );
 
   it("derives keys via searchKey/indexedKey gated on isWebIdIndexEnabled", () => {
-    expect(src.includes("searchKey(q, isWebIdIndexEnabled)")).toBe(true);
+    expect(src.includes("searchKey(q, isWebIdIndexEnabled")).toBe(true);
     expect(src.includes("indexedKey(id, isWebIdIndexEnabled)")).toBe(true);
   });
 
   it("guards the fetcher against a null client (feature off / inert)", () => {
     // Both fetchers must short-circuit when webIdIndexClient is null.
     expect(/if \(!webIdIndexClient/.test(src)).toBe(true);
+  });
+
+  it("normalises the empty-key (inert) state to loading:false (no premature skeletons)", () => {
+    // Both hooks must short-circuit the empty key to a settled state rather than
+    // returning useSwrRead's empty-key loading:true default (roborev finding).
+    expect((src.match(/if \(key === ""\)/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("webid-index config — security: passes the UNPATCHED native fetch", () => {
+  const cfg = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "lib", "webid-index.ts"),
+    "utf8",
+  );
+
+  it("wires createIndexClient with nativeFetch, never the auth-patched global", () => {
+    // The High roborev finding: the client must NOT capture the auth-patched
+    // globalThis.fetch (its 401-upgrade path would attach the user's DPoP to the
+    // third-party index). It must use the pre-patch native-fetch snapshot.
+    expect(cfg.includes("import { nativeFetch }")).toBe(true);
+    expect(/createIndexClient\(\{[\s\S]*fetch: nativeFetch/.test(cfg)).toBe(true);
   });
 });

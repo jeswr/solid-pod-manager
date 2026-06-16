@@ -32,8 +32,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { contactsStore, type Contact } from "@/lib/contacts";
+import { looksLikeWebId } from "@/lib/people-search";
 import { webIdIndexClient } from "@/lib/webid-index";
-import type { IndexEntry } from "@/lib/webid-index-client";
+import type { IndexEntry, SuggestOutcome } from "@/lib/webid-index-client";
 
 /** Two-letter initials for the avatar fallback (mirrors the contacts list). */
 export function indexInitials(entry: Pick<IndexEntry, "name" | "webid">): string {
@@ -54,6 +55,26 @@ export function indexEntryToContact(entry: IndexEntry): Contact {
     fn: entry.name?.trim() || entry.webid,
     webId: entry.webid,
   };
+}
+
+/** Surface a suggest outcome as a toast. Pure side-effect, kept out of the JSX. */
+function toastSuggestOutcome(outcome: SuggestOutcome): void {
+  switch (outcome) {
+    case "submitted":
+      toast.success("Suggested to the index — it will be crawled shortly.");
+      break;
+    case "already-indexed":
+      toast.info("That WebID is already in the index.");
+      break;
+    case "rate-limited":
+      toast.error("Too many suggestions right now. Please try again later.");
+      break;
+    case "invalid":
+      toast.error("That WebID can't be suggested.");
+      break;
+    default:
+      toast.error("Could not reach the index. Please try again.");
+  }
 }
 
 /**
@@ -80,9 +101,37 @@ export function WebIdIndexSearch({ onAdded }: { onAdded?: () => void }) {
     [submitted, loading, error, entries.length],
   );
 
+  // The CURRENT input as a directly-suggestable WebID: an https: WebID the user
+  // typed that the index did not already return. This is the "suggest an
+  // unindexed WebID" path the empty-state copy promises (roborev finding) — the
+  // per-result suggest button only ever covers WebIDs already IN the index.
+  const typedWebId = input.trim();
+  const suggestableTypedWebId =
+    looksLikeWebId(typedWebId) &&
+    typedWebId.toLowerCase().startsWith("https:") &&
+    !entries.some((e) => e.webid === typedWebId)
+      ? typedWebId
+      : null;
+
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitted(input.trim());
+  }
+
+  /** Suggest a WebID to the index, toasting the outcome and tracking progress. */
+  async function runSuggest(webid: string) {
+    if (!webIdIndexClient) return;
+    setSuggesting((m) => ({ ...m, [webid]: true }));
+    try {
+      // Record the signed-in user's WebID as the AS2 actor (provenance, optional).
+      const outcome = await webIdIndexClient.suggestWebId(
+        webid,
+        webId ? { actor: webId } : undefined,
+      );
+      toastSuggestOutcome(outcome);
+    } finally {
+      setSuggesting((m) => ({ ...m, [webid]: false }));
+    }
   }
 
   async function onAddContact(entry: IndexEntry) {
@@ -101,36 +150,6 @@ export function WebIdIndexSearch({ onAdded }: { onAdded?: () => void }) {
       toast.error("Could not add that contact. Please try again.");
     } finally {
       setAdding((m) => ({ ...m, [entry.webid]: false }));
-    }
-  }
-
-  async function onSuggest(entry: IndexEntry) {
-    if (!webIdIndexClient) return;
-    setSuggesting((m) => ({ ...m, [entry.webid]: true }));
-    try {
-      // Record the signed-in user's WebID as the AS2 actor (provenance, optional).
-      const outcome = await webIdIndexClient.suggestWebId(
-        entry.webid,
-        webId ? { actor: webId } : undefined,
-      );
-      switch (outcome) {
-        case "submitted":
-          toast.success("Suggested to the index — it will be crawled shortly.");
-          break;
-        case "already-indexed":
-          toast.info("That WebID is already in the index.");
-          break;
-        case "rate-limited":
-          toast.error("Too many suggestions right now. Please try again later.");
-          break;
-        case "invalid":
-          toast.error("That WebID can't be suggested.");
-          break;
-        default:
-          toast.error("Could not reach the index. Please try again.");
-      }
-    } finally {
-      setSuggesting((m) => ({ ...m, [entry.webid]: false }));
     }
   }
 
@@ -179,25 +198,93 @@ export function WebIdIndexSearch({ onAdded }: { onAdded?: () => void }) {
         <EmptyState
           icon={Search}
           title="No matching people"
-          description="No one in the index matched that search. If you know their WebID, you can suggest it below or add it directly."
+          description={
+            suggestableTypedWebId
+              ? "No one in the index matched that WebID yet. You can suggest it to the index below."
+              : "No one in the index matched that search. If you know their WebID, paste it in the box above to suggest it to the index."
+          }
+          action={
+            suggestableTypedWebId ? (
+              <Button
+                onClick={() => runSuggest(suggestableTypedWebId)}
+                disabled={Boolean(suggesting[suggestableTypedWebId])}
+              >
+                {suggesting[suggestableTypedWebId] ? (
+                  <Loader2 className="animate-spin" aria-hidden="true" />
+                ) : (
+                  <Send aria-hidden="true" />
+                )}
+                Suggest this WebID
+              </Button>
+            ) : undefined
+          }
         />
       ) : entries.length > 0 ? (
-        <ul className="grid gap-2 sm:grid-cols-2" aria-label="WebID index results">
-          {entries.map((entry) => (
-            <li key={entry.webid}>
-              <ResultCard
-                entry={entry}
-                adding={Boolean(adding[entry.webid])}
-                added={Boolean(added[entry.webid])}
-                suggesting={Boolean(suggesting[entry.webid])}
-                onAdd={() => onAddContact(entry)}
-                onSuggest={() => onSuggest(entry)}
-              />
-            </li>
-          ))}
-        </ul>
+        <>
+          {suggestableTypedWebId ? (
+            <SuggestTypedWebIdBanner
+              webid={suggestableTypedWebId}
+              suggesting={Boolean(suggesting[suggestableTypedWebId])}
+              onSuggest={() => runSuggest(suggestableTypedWebId)}
+            />
+          ) : null}
+          <ul className="grid gap-2 sm:grid-cols-2" aria-label="WebID index results">
+            {entries.map((entry) => (
+              <li key={entry.webid}>
+                <ResultCard
+                  entry={entry}
+                  adding={Boolean(adding[entry.webid])}
+                  added={Boolean(added[entry.webid])}
+                  suggesting={Boolean(suggesting[entry.webid])}
+                  onAdd={() => onAddContact(entry)}
+                  onSuggest={() => runSuggest(entry.webid)}
+                />
+              </li>
+            ))}
+          </ul>
+        </>
       ) : null}
     </section>
+  );
+}
+
+/**
+ * A banner offering to suggest the typed `https:` WebID to the index when the
+ * user has entered one that the index did not already return. This is the
+ * "suggest an unindexed WebID" path — the per-result button only covers WebIDs
+ * already in the index.
+ */
+function SuggestTypedWebIdBanner({
+  webid,
+  suggesting,
+  onSuggest,
+}: {
+  webid: string;
+  suggesting: boolean;
+  onSuggest: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed border-border bg-muted/30 p-3">
+      <p className="min-w-0 text-sm text-muted-foreground">
+        Not the person you meant?{" "}
+        <span className="font-medium text-foreground">Suggest the WebID you typed</span> so it
+        gets indexed.
+      </p>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onSuggest}
+        disabled={suggesting}
+        aria-label={`Suggest the WebID ${webid} to the index`}
+      >
+        {suggesting ? (
+          <Loader2 className="animate-spin" aria-hidden="true" />
+        ) : (
+          <Send aria-hidden="true" />
+        )}
+        Suggest WebID
+      </Button>
+    </div>
   );
 }
 

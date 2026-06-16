@@ -38,10 +38,15 @@ export interface WebIdSearchState extends SwrReadState<IndexPage> {
  * The SWR cache key for a search. Pure + exported so the "empty key = no fetch"
  * gating (feature off OR blank query) is unit-testable without a React render.
  * An empty string means "do nothing" per the `useSwrRead` contract.
+ *
+ * `limit` is part of the key (when set) because the fetcher forwards it as the
+ * page size — two searches for the same query but different limits return
+ * different pages, so they must NOT share a cache slot (roborev finding).
  */
-export function searchKey(query: string, enabled: boolean): string {
+export function searchKey(query: string, enabled: boolean, limit?: number): string {
   const q = query.trim();
-  return enabled && q ? `webid-search:${q}` : "";
+  if (!enabled || !q) return "";
+  return limit !== undefined ? `webid-search:${q}:limit:${limit}` : `webid-search:${q}`;
 }
 
 /** The SWR cache key for an isIndexed check. Pure + exported (see {@link searchKey}). */
@@ -65,8 +70,9 @@ export function indexedKey(webid: string | undefined, enabled: boolean): string 
 export function useWebIdSearch(query: string, limit?: number): WebIdSearchState {
   const q = query.trim();
   // No fetch when the feature is off or the query is empty (empty key = inert,
-  // per the useSwrRead contract).
-  const key = searchKey(q, isWebIdIndexEnabled);
+  // per the useSwrRead contract). `limit` is part of the key so different page
+  // sizes don't share a slot.
+  const key = searchKey(q, isWebIdIndexEnabled, limit);
 
   const fetcher = useCallback(async (): Promise<IndexPage> => {
     if (!webIdIndexClient || !q) return { entries: [], next: null };
@@ -74,6 +80,22 @@ export function useWebIdSearch(query: string, limit?: number): WebIdSearchState 
   }, [q, limit]);
 
   const state = useSwrRead<IndexPage>(key, fetcher);
+  // An empty key (feature off OR blank query) is the INERT state: `useSwrRead`
+  // reports `loading:true` for an empty key (its "session/key not ready yet"
+  // spinner default — see deriveSwrInitialState), but here a blank query is a
+  // resolved "nothing to search" state, not a pending load. Normalising to
+  // `loading:false` stops the panel showing skeletons before the user has typed
+  // anything (roborev finding).
+  if (key === "") {
+    return {
+      data: undefined,
+      error: undefined,
+      loading: false,
+      revalidating: false,
+      reload: state.reload,
+      enabled: isWebIdIndexEnabled,
+    };
+  }
   return { ...state, enabled: isWebIdIndexEnabled };
 }
 
@@ -93,5 +115,17 @@ export function useIsIndexed(webid: string | undefined): SwrReadState<boolean> {
     return webIdIndexClient.isIndexed(id);
   }, [id]);
 
-  return useSwrRead<boolean>(key, fetcher);
+  const state = useSwrRead<boolean>(key, fetcher);
+  // Inert (no WebID / feature off): resolve to a settled `false`, not the
+  // empty-key `loading:true` default (see useWebIdSearch).
+  if (key === "") {
+    return {
+      data: false,
+      error: undefined,
+      loading: false,
+      revalidating: false,
+      reload: state.reload,
+    };
+  }
+  return state;
 }

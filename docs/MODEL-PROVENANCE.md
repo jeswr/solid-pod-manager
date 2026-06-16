@@ -207,8 +207,12 @@ New files:
 - `src/lib/webid-index-client.test.ts` — exhaustive client tests (RDF projection,
   SSRF/same-origin guard, photo guard, fail-closed lookup, suggest mapping +
   validation, credentials-omit, env-gated null factory).
+- `src/lib/native-fetch.ts` — a snapshot of the UNPATCHED native `fetch`, taken
+  at module-load time (before Solid auth patches `globalThis.fetch`); used for
+  third-party index requests so the user's DPoP auth / 401-upgrade is never
+  attached to the foreign index origin.
 - `src/lib/webid-index.ts` — `NEXT_PUBLIC_WEBID_INDEX` config + shared client +
-  `isWebIdIndexEnabled` flag (passes the bare global fetch, never the auth fetch).
+  `isWebIdIndexEnabled` flag (passes `nativeFetch`, never the auth fetch).
 - `src/components/use-webid-search.ts` — `useWebIdSearch` / `useIsIndexed` hooks
   over the client via the shared `useSwrRead` cache (keyed `webid-search:<q>` /
   `webid-indexed:<webid>`); gated on the feature flag; pure `searchKey`/`indexedKey`.
@@ -222,5 +226,8 @@ Touched:
 
 - `src/app/contacts/page.tsx` — mounts the search panel above the contacts list,
   gated on `isWebIdIndexEnabled`.
+- `src/components/session-provider.tsx` — eager `import "@/lib/native-fetch"` so
+  the native-fetch snapshot is taken before `registerGlobally()` patches the
+  global fetch.
 - `src/components/instant-nav.test.ts` — classifies `use-webid-search.ts` as a
   READ hook + exempts its query-driven hooks from the page registry (with reasons).

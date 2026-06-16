@@ -118,4 +118,31 @@ describe("WebIdIndexSearch — render + actions", () => {
       actor: "https://me.pod/card#me",
     });
   });
+
+  it("offers to suggest a TYPED https WebID not already in the results (the unindexed case)", async () => {
+    render(<WebIdIndexSearch />);
+    // Type a DIFFERENT https WebID than the one in the (mocked) results.
+    const typed = "https://carol.pod/profile/card#me";
+    fireEvent.change(screen.getByRole("searchbox", { name: /search the webid index/i }), {
+      target: { value: typed },
+    });
+    // The "suggest the typed WebID" banner appears (it is NOT in the results).
+    const suggestBtn = await screen.findByRole("button", {
+      name: new RegExp(`suggest the webid ${typed} to the index`, "i"),
+    });
+    fireEvent.click(suggestBtn);
+    await waitFor(() => expect(suggestMock).toHaveBeenCalledTimes(1));
+    expect(suggestMock).toHaveBeenCalledWith(typed, { actor: "https://me.pod/card#me" });
+  });
+
+  it("does NOT offer to suggest a typed WebID that IS already in the results", () => {
+    render(<WebIdIndexSearch />);
+    // Type the SAME WebID that is in the results — no typed-suggest banner.
+    fireEvent.change(screen.getByRole("searchbox", { name: /search the webid index/i }), {
+      target: { value: "https://alice.pod/card#me" },
+    });
+    expect(
+      screen.queryByRole("button", { name: /suggest the webid .* to the index/i }),
+    ).not.toBeInTheDocument();
+  });
 });

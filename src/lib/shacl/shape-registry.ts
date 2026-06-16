@@ -12,17 +12,21 @@
  * actually writes — see `shapes/README.md`. A class with no registered shape
  * simply isn't validated (advisory validation is opt-in per write-type).
  */
-import issueShapes from "./shapes/issue.ttl";
+import taskShape from "./shapes/task.ttl";
 
 const WF = "http://www.w3.org/2005/01/wf/flow#";
 
 /**
  * `forClass` IRI → SHACL shapes graph (Turtle). The PM writes `wf:Task` issues
- * via `src/lib/issues.ts`; the vendored solid-issues `issue.ttl` validates them
- * for federation compatibility.
+ * via `src/lib/issues.ts` (delegating to `@jeswr/solid-task-model`); the vendored
+ * SHARED task shape (`task.ttl`, byte-identical to the package's `taskShapeTtl()`)
+ * validates them for federation compatibility with solid-issues and every other
+ * suite app. The shape constrains BOTH `wf:description` and `dct:description`
+ * (the dual-predicate body the shared model co-writes), the `wf:assignee` WebID,
+ * and the binary `wf:Open`/`wf:Closed` state.
  */
 const SHAPES_BY_CLASS: Readonly<Record<string, string>> = {
-  [`${WF}Task`]: issueShapes,
+  [`${WF}Task`]: taskShape,
 };
 
 /**

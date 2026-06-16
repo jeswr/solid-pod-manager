@@ -1,0 +1,150 @@
+# SHACL shape for the SHARED FEDERATED TASK/ISSUE model (@jeswr/solid-task-model).
+#
+# The single contract a `wf:Task` written by ANY suite app (Pod Manager,
+# solid-issues, …) must satisfy so it reads identically through every app's
+# accessor. Authored against reused, dereferenceable IRIs only — the W3C SolidOS
+# workflow ontology (`wf:`), Dublin Core Terms (`dct:`), schema.org (`schema:`),
+# and W3C PROV-O (`prov:`) — per ADR-0013 (federation namespace) and the R9
+# data-federation recommendation (reuse wf/flow, iCal VTODO, schema.org, AS2).
+#
+# The shapes are ANONYMOUS (blank nodes), so this package mints nothing at a
+# non-resolving domain. This is the cross-app common denominator of the shapes
+# already vendored in solid-issues (`shapes/issue.ttl`) and the Pod Manager
+# (`src/lib/shacl/shapes/issue.ttl`); a producer that validates against it is
+# federation-compatible by construction.
+#
+# Validate an issue/task document's typed-accessor output before write, and on
+# read of untrusted data (rdf-validate-shacl; see src/task.test.ts).
+
+@prefix sh:     <http://www.w3.org/ns/shacl#> .
+@prefix wf:     <http://www.w3.org/2005/01/wf/flow#> .
+@prefix dct:    <http://purl.org/dc/terms/> .
+@prefix schema: <http://schema.org/> .
+@prefix prov:   <http://www.w3.org/ns/prov#> .
+@prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+
+# --- A federated task / issue (wf:Task) ---
+[] a sh:NodeShape ;
+  sh:targetClass wf:Task ;
+
+  # Title — required, exactly one string. The one field every producer must set.
+  sh:property [
+    sh:path dct:title ; sh:name "title" ;
+    sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+
+  # Description — the body. The two existing producers DIVERGE on the predicate:
+  # solid-issues writes `wf:description`, the Pod Manager writes `dct:description`.
+  # The shared model reads BOTH and writes BOTH (see Task.description), so the
+  # shape constrains BOTH — at most one string each — or a malformed / multi-valued
+  # PM-written `dct:description` body would pass validation even though the code
+  # now treats it as part of the shared contract.
+  sh:property [
+    sh:path wf:description ; sh:name "description" ;
+    sh:datatype xsd:string ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path dct:description ; sh:name "description (Dublin Core)" ;
+    sh:datatype xsd:string ; sh:maxCount 1 ;
+  ] ;
+
+  # Tracker / project document the task belongs to — an IRI, at most one.
+  sh:property [
+    sh:path wf:tracker ; sh:name "project" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+
+  # Timestamps — xsd:dateTime, at most one each.
+  sh:property [
+    sh:path dct:created ; sh:name "created" ;
+    sh:datatype xsd:dateTime ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path dct:modified ; sh:name "modified" ;
+    sh:datatype xsd:dateTime ; sh:maxCount 1 ;
+  ] ;
+  # Completion time (PROV-O), written on close; cleared on reopen.
+  sh:property [
+    sh:path prov:endedAtTime ; sh:name "completed" ;
+    sh:datatype xsd:dateTime ; sh:maxCount 1 ;
+  ] ;
+
+  # Creator — a WebID (IRI), at most one.
+  sh:property [
+    sh:path dct:creator ; sh:name "creator" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+    sh:pattern "^https?://" ;
+  ] ;
+
+  # Assignee — a WebID: an IRI (nodeKind) AND http(s)-schemed (pattern, which
+  # matches the node's lexical value, so for an IRI it constrains the scheme — a
+  # urn:/mailto: assignee is rejected). At most one — the model assigns a task to
+  # exactly one agent at a time (a group is modelled by assigning the group IRI).
+  sh:property [
+    sh:path wf:assignee ; sh:name "assignee" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+    sh:pattern "^https?://" ;
+  ] ;
+
+  # Due date — xsd:dateTime, at most one.
+  sh:property [
+    sh:path wf:dateDue ; sh:name "due date" ;
+    sh:datatype xsd:dateTime ; sh:maxCount 1 ;
+  ] ;
+
+  # Backlog rank / column order (schema:position) — lower sorts first. A double
+  # (the datatype every suite producer writes via the @rdfjs/wrapper double mapper)
+  # so rows can be reordered by averaging neighbours; at most one.
+  sh:property [
+    sh:path schema:position ; sh:name "rank" ;
+    sh:datatype xsd:double ; sh:maxCount 1 ;
+  ] ;
+
+  # Issue↔issue links are always document IRIs, never literals.
+  sh:property [
+    sh:path dct:isPartOf ; sh:name "parent project / issue" ;
+    sh:nodeKind sh:IRI ;
+  ] ;
+  sh:property [
+    sh:path dct:requires ; sh:name "blocked by" ;
+    sh:nodeKind sh:IRI ;
+  ] ;
+  sh:property [
+    sh:path dct:relation ; sh:name "related" ;
+    sh:nodeKind sh:IRI ;
+  ] ;
+  # Close-as-duplicate: superseded by exactly one canonical successor.
+  sh:property [
+    sh:path dct:isReplacedBy ; sh:name "duplicate of" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  # Clone provenance: the single original this task was derived from.
+  sh:property [
+    sh:path prov:wasDerivedFrom ; sh:name "cloned from" ;
+    sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+
+  # --- State (rdf:type carries wf:Open / wf:Closed; the SolidOS model). A
+  # well-formed task is typed with exactly one of the two state classes — Open and
+  # Closed are mutually exclusive.
+  #
+  # SHACL Core expresses this on the rdf:type path via sh:qualifiedValueShape
+  # [ sh:in ( wf:Open wf:Closed ) ] with qualifiedMin/MaxCount 1 — "exactly one of
+  # {wf:Open, wf:Closed} must appear among the rdf:type values". A node carrying
+  # BOTH (or NEITHER) is non-conforming.
+  #
+  # Severity sh:Warning (not Violation): a producer's typed setter is the hard
+  # guarantor of exclusivity; untrusted read data may be mid-migration or from a
+  # foreign producer, and a Warning lets each consumer decide whether to treat it
+  # as fatal. (Priority and labels are carried as extra rdf:type subclasses local
+  # to a producer's tracker document and are intentionally unconstrained here —
+  # the shared shape governs only the cross-app federation fields.)
+  sh:property [
+    sh:path rdf:type ; sh:name "state" ;
+    sh:qualifiedValueShape [ sh:in ( wf:Open wf:Closed ) ] ;
+    sh:qualifiedMinCount 1 ;
+    sh:qualifiedMaxCount 1 ;
+    sh:severity sh:Warning ;
+  ] .

@@ -13,7 +13,7 @@ silently.
 
 | File | Source | Describes |
 |---|---|---|
-| `issue.ttl` | [`jeswr/solid-issues` `shapes/issue.ttl`](https://github.com/jeswr/solid-issues/blob/main/shapes/issue.ttl) (commit `3787a5b`) | The suite issue data model — `wf:Task` (issue), `wf:Message` (comment), `as:Announce` (assignment notification), `wf:State` (workflow status), `prov:Activity` (provenance log). The PM writes `wf:Task` via `src/lib/issues.ts`; validating against this shape keeps PM-authored issues federation-compatible with solid-issues. |
+| `task.ttl` | [`jeswr/solid-task-model` `shapes/task.ttl`](https://github.com/jeswr/solid-task-model/blob/main/shapes/task.ttl) (commit `eebcaf7`) | The SHARED federated Task/Issue model — the cross-app common denominator of the suite's `wf:Task` contract: `dct:title`, body (BOTH `wf:description` AND `dct:description`), `wf:assignee` (WebID), timestamps, `prov:endedAtTime`, and the binary `wf:Open`/`wf:Closed` state. The PM writes `wf:Task` via `src/lib/issues.ts` (delegating to `@jeswr/solid-task-model`); validating against this shape keeps PM-authored issues federation-compatible with solid-issues and every other suite app. Byte-identical to the package's `shapes/task.ttl` (== `taskShapeTtl()`), asserted in `../shapes-lock.test.ts`. |
 
 ## Updating a vendored shape
 

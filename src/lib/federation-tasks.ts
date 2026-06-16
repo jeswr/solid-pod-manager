@@ -69,6 +69,7 @@
  * never regex on RDF, never hand-built quads (house rule).
  */
 import { RdfFetchError } from "@jeswr/fetch-rdf";
+import { isAssignedTo } from "@jeswr/solid-task-model/task";
 import { AcpUnsupportedError } from "./errors.js";
 import { freshRdf } from "./rdf-read.js";
 import { readProfile, type PodProfile } from "./profile.js";
@@ -162,13 +163,15 @@ function isHttpUrl(value: string): boolean {
 }
 
 /**
- * Does `assignee` name the logged-in user? An exact IRI match (WebIDs are
- * compared as opaque IRIs — no normalisation beyond trimming, since a WebID is a
- * stable identifier the issuer minted). Pure.
+ * Does `assignee` name the logged-in user? Delegates to the SHARED model's
+ * {@link isAssignedTo} so the "assigned to me" comparison is byte-for-byte
+ * identical to every other suite app (an exact IRI match, trimmed only — a WebID
+ * is a stable identifier the issuer minted). This is the federation linchpin:
+ * a task assigned (via `wf:assignee`) in solid-issues surfaces in PM by the SAME
+ * rule solid-issues itself uses. Pure.
  */
 export function isAssignedToMe(assignee: string | undefined, myWebId: string): boolean {
-  if (!assignee) return false;
-  return assignee.trim() === myWebId.trim();
+  return isAssignedTo(assignee, myWebId);
 }
 
 /**

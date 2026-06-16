@@ -57,6 +57,8 @@ const FOAF = "http://xmlns.com/foaf/0.1/";
 const BOOKMARK = "http://www.w3.org/2002/01/bookmark#";
 const SIOC = "http://rdfs.org/sioc/ns#";
 const AS = "https://www.w3.org/ns/activitystreams#";
+/** Music Ontology — Pod Music's domain-native vocabulary. */
+const MO = "http://purl.org/ontology/mo/";
 
 /**
  * The canonical category list. Order within each tier is the display order.
@@ -97,6 +99,14 @@ export const CATEGORIES: readonly DataCategory[] = [
       "http://www.w3.org/2006/time#Instant",
       // Connected sources: workouts (Strava and friends).
       `${SCHEMA}ExerciseAction`,
+      // Pod Health (suite app) registers its primary class health:HealthRecord and writes
+      // Observation / Workout resources — surface them under Health (cross-app interop
+      // verification 2026-06-16). NOTE: the health-sector namespace is an INTERIM placeholder
+      // (https://TBD.example/solid/health#) pending fse "namespace decision #2"; keep these in
+      // sync with pod-health/src/vocab.ts when that base is frozen.
+      "https://TBD.example/solid/health#HealthRecord",
+      "https://TBD.example/solid/health#Observation",
+      "https://w3id.org/jeswr/pod-health#Workout",
     ],
   },
   {
@@ -106,7 +116,19 @@ export const CATEGORIES: readonly DataCategory[] = [
     icon: "wallet",
     assurance: "Only apps you approve can read your financial data.",
     description: "Accounts, transactions, and invoices.",
-    classes: [`${SCHEMA}Invoice`, `${SCHEMA_HTTP}Invoice`, `${SCHEMA}MonetaryAmount`, `${SCHEMA}BankAccount`],
+    classes: [
+      `${SCHEMA}Invoice`,
+      `${SCHEMA_HTTP}Invoice`,
+      `${SCHEMA}MonetaryAmount`,
+      `${SCHEMA}BankAccount`,
+      // Pod Money (suite app) registers its primary class fin:Transaction and writes
+      // FinancialAccount resources — surface them under Finance (cross-app interop
+      // verification 2026-06-16). NOTE: the finance-sector namespace is an INTERIM placeholder
+      // (https://TBD.example/solid/finance#) pending fse "namespace decision #2"; keep these in
+      // sync with pod-money/src/vocab.ts when that base is frozen.
+      "https://TBD.example/solid/finance#Transaction",
+      "https://TBD.example/solid/finance#FinancialAccount",
+    ],
   },
   {
     id: "calendar",
@@ -144,6 +166,19 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${SCHEMA}MusicPlaylist`,
       `${SCHEMA}WatchAction`,
       `${SCHEMA}VideoGame`,
+      // Pod Music (suite app) registers its primary class mo:Track and also stamps tracks/playlists
+      // with the http://schema.org/ forms — surface them under Media (cross-app interop
+      // verification 2026-06-16). See pod-music/src/vocab/iris.ts.
+      `${MO}Track`,
+      `${MO}Playlist`,
+      `${SCHEMA_HTTP}MusicRecording`,
+      `${SCHEMA_HTTP}MusicPlaylist`,
+      // Pod Photos (suite app) registers schema:Photograph (photos) + schema:ImageGallery (albums)
+      // — surface them under Media. See pod-photos/src/photos/vocab.ts.
+      `${SCHEMA}Photograph`,
+      `${SCHEMA_HTTP}Photograph`,
+      `${SCHEMA}ImageGallery`,
+      `${SCHEMA_HTTP}ImageGallery`,
     ],
   },
   // ── Other / tail tier ───────────────────────────────────────────────────
@@ -208,9 +243,20 @@ export const CATEGORIES: readonly DataCategory[] = [
       `${FOAF}OnlineAccount`,
       // File imports: chat history (WhatsApp).
       `${SCHEMA}Message`,
+      `${SCHEMA_HTTP}Message`,
       // First-party Chat (Wave 6) stores messages as sioc:Note / AS2.0 Note.
       `${SIOC}Note`,
       `${AS}Note`,
+      // Pod Chat (suite app) registers its rooms container as pc:ChatRoom (messages within are
+      // as:Note, above) — surface chat under Social & interests, keeping interpersonal messaging
+      // together (cross-app interop verification 2026-06-16). See pod-chat/src/vocab.ts.
+      "https://w3id.org/jeswr/pod-chat#ChatRoom",
+      // Pod Mail (suite app) registers its primary class schema:EmailMessage (http form) — email
+      // is interpersonal correspondence, so it lives alongside chat under Social & interests rather
+      // than the Uncategorised fallback. No dedicated mail/communication category exists; this is
+      // the closest fit (cross-app interop verification 2026-06-16). See pod-mail/src/model/vocab.ts.
+      `${SCHEMA_HTTP}EmailMessage`,
+      `${SCHEMA}EmailMessage`,
     ],
   },
 ] as const;

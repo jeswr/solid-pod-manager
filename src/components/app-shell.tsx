@@ -7,6 +7,7 @@ import { useSession } from "@/components/session-provider";
 import { usePrefetch } from "@/components/use-prefetch";
 import { LoginScreen } from "@/components/login-screen";
 import { SidebarNav, BottomNav } from "@/components/sidebar-nav";
+import { Onboarding } from "@/components/onboarding/onboarding";
 import { FeedbackButton } from "@jeswr/app-shell";
 import { Brand } from "@/components/brand";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -155,6 +156,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
 
       <BottomNav />
+
+      {/* First-run welcome explainer (task #93): shown once per account to a
+          brand-new logged-in user; dismissal persisted to the pod via the
+          pod-backed app-prefs. Renders nothing until it should show. */}
+      <Onboarding />
     </div>
   );
 }

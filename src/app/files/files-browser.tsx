@@ -15,10 +15,10 @@
  * whatever URL it requests, so we ONLY ever browse/fetch inside the user's own
  * pods — a `?url=` outside scope is rejected, never fetched.
  */
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ChevronRight, FolderOpen, FilePlus, Loader2, UploadCloud } from "lucide-react";
+import { ChevronRight, FolderOpen, FilePlus, Loader2, Upload, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 import { RdfFetchError } from "@jeswr/fetch-rdf";
 import { asContainerUrl, breadcrumbs, type Crumb } from "@/lib/files";
@@ -28,6 +28,7 @@ import { FileToolbar, uploadMany } from "@/components/file-actions";
 import { LaunchInApp } from "@/components/launch-in-app";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export function FilesBrowser() {
@@ -167,6 +168,7 @@ function FolderContents({ current, root }: { current: string; root: string }) {
             icon={FilePlus}
             title="This folder is empty"
             description="Upload a file, or create a new folder or file to get started."
+            action={<EmptyUpload onPick={onDrop} />}
           />
         ) : (
           <ul className="flex flex-col gap-2" aria-label="Folder contents">
@@ -179,6 +181,39 @@ function FolderContents({ current, root }: { current: string; root: string }) {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * The empty-folder CTA (task #93): "Upload your first file" — a real,
+ * keyboard-reachable button that opens the native file picker and routes the
+ * chosen files through the SAME `onDrop` upload path the drop target uses (so
+ * progress + toasts + reload behave identically). The actual <input> is visually
+ * hidden but focus-reachable only via the button (it carries `tabIndex={-1}`),
+ * keeping a single Tab stop.
+ */
+function EmptyUpload({ onPick }: { onPick: (files: File[]) => Promise<void> }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <Button onClick={() => inputRef.current?.click()}>
+        <Upload aria-hidden="true" />
+        Upload your first file
+      </Button>
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        className="sr-only"
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length > 0) void onPick(files);
+        }}
+      />
+    </>
   );
 }
 

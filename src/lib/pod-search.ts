@@ -48,12 +48,19 @@ import { calendarStore, type CalendarEvent } from "./calendar.js";
 import { issuesStore, type Issue } from "./issues.js";
 import { scheduleStore, type Poll } from "./schedule.js";
 import type { ProductivityStore } from "./productivity-store.js";
-import { discoverRegistrations, type RegisteredLocation } from "./type-index.js";
-import { categoryForClass, type DataCategory } from "./categories.js";
+import {
+  typeIndexLinks,
+  readTypeIndex,
+  type RegisteredLocation,
+} from "./type-index.js";
+import { preferencesFileLink, readPreferences } from "./preferences.js";
+import { categoryForClass, UNCATEGORISED, type DataCategory } from "./categories.js";
 import { listCategoryItems, summariseCategories, nameFromUrl } from "./pod-data.js";
 import { listFolder } from "./files.js";
 import { isInOwnPods } from "./pod-scope.js";
 import { freshRdf } from "./rdf-read.js";
+import { ProfileTypeIndexAnchor, TypeIndexDataset } from "./type-index.js";
+import { DataFactory } from "n3";
 
 /** Default bounds — sized for a personal pod, overridable per call (tests). */
 export const SEARCH_DEFAULTS = {
@@ -345,7 +352,10 @@ export async function searchPod(
   const now = options.now ?? Date.now;
   const fetchImpl = options.fetchImpl;
 
-  if (!isSearchable(needle, 1) || !ctx.webId || !ctx.activeStorage) {
+  // Gate on the SAME minimum the hook keying + UI imply (a 1-char query is
+  // inert everywhere; a direct caller must not be able to trigger a broad pod
+  // scan the UI would never fire) — roborev finding (Medium).
+  if (!isSearchable(needle) || !ctx.webId || !ctx.activeStorage) {
     return { results: [], capped: false, sourcesScanned: 0 };
   }
 
@@ -386,11 +396,18 @@ export async function searchPod(
     }
 
     // ── Tier 2: Type-Index-registered containers + files (other apps' data) ──
-    const locations = await discoverRegistrations(ctx.webId, await profileDataset(ctx.webId, fetchImpl), fetchImpl)
-      .then((d) => d.locations)
-      .catch((): RegisteredLocation[] => []);
-    // Only own-pod locations are ever fetched (confused-deputy guard); a
-    // type-index entry can point anywhere, so validate containment first.
+    // A bound already hit ⇒ do NOT start the discovery network work at all
+    // (the discovery itself issues fetches) — roborev finding (Medium): the cap
+    // must stop ALL later network work, not just the listing loop.
+    if (boundHit()) throw STOP;
+    // OWN-POD-GUARDED discovery: every profile-linked index / preferences-file
+    // URL is validated against the user's own storages BEFORE it is fetched, so
+    // an off-pod `solid:publicTypeIndex` / `privateTypeIndex` / `preferencesFile`
+    // in the profile can NEVER make the auth-patched fetch reach a foreign origin
+    // (roborev finding, High). `discoverRegistrations` would fetch them first.
+    const locations = await discoverOwnPodRegistrations(ctx, fetchImpl);
+    // The REGISTERED LOCATIONS are likewise attacker-influenceable (a type-index
+    // entry can point anywhere), so validate containment again before listing.
     const summaries = summariseCategories(
       locations.filter((l) => inOwnPods(l.container ?? l.instance, ctx.storages)),
     );
@@ -425,8 +442,11 @@ export async function searchPod(
             type: "file",
             label: firstText(f.name) ?? nameFromUrl(f.url),
             url: f.url,
-            category: categoryForClass("__files__"), // → Uncategorised "Other data"
-            href: `/files?path=${encodeURIComponent(f.url)}`,
+            // Raw files have no registered RDF class → the "Other data" bucket.
+            category: UNCATEGORISED,
+            // Open via the generic item viewer (handles any pod resource); the
+            // /files page has no per-resource deep-link route under static export.
+            href: `/my-data/${UNCATEGORISED.id}/item?url=${encodeURIComponent(f.url)}`,
           });
         }
       }
@@ -438,13 +458,60 @@ export async function searchPod(
   return { results, capped, sourcesScanned };
 }
 
-/** Fetch the WebID profile dataset (carries the type-index links). */
-async function profileDataset(
-  webId: string,
+/**
+ * Own-pod-GUARDED type-index discovery (roborev finding, High). Mirrors
+ * `discoverRegistrations` but validates EVERY profile-linked document URL — the
+ * public/private type-index links AND the preferences file — against the user's
+ * own storages BEFORE fetching it. A WebID profile's `solid:publicTypeIndex` /
+ * `solid:privateTypeIndex` / `space:preferencesFile` are attacker-influenceable;
+ * the unguarded discovery would fetch them with the auth-patched global, leaking
+ * the user's DPoP token/proof to a foreign origin. Here, an off-pod link is
+ * simply SKIPPED — the foreign URL is never fetched at all.
+ *
+ * The WebID profile document itself IS fetched (it is the user's own
+ * authenticated identity — the same read every My-data/prefetch path makes); the
+ * guard applies to the documents the profile LINKS TO.
+ */
+async function discoverOwnPodRegistrations(
+  ctx: SearchContext,
   fetchImpl?: typeof fetch,
-): Promise<import("@rdfjs/types").DatasetCore> {
-  const { dataset } = await freshRdf(webId, fetchImpl);
-  return dataset;
+): Promise<RegisteredLocation[]> {
+  let profile: import("@rdfjs/types").DatasetCore;
+  try {
+    ({ dataset: profile } = await freshRdf(ctx.webId, fetchImpl));
+  } catch {
+    return [];
+  }
+
+  const { publicIndex, privateIndex: legacyCardIndex } = typeIndexLinks(ctx.webId, profile);
+
+  // Resolve the private index the spec-compliant way (preferences file first),
+  // but ONLY read a preferences file that is itself in-pod.
+  const prefsFile = preferencesFileLink(ctx.webId, profile);
+  let privateIndex: string | undefined = legacyCardIndex;
+  if (prefsFile && inOwnPods(prefsFile, ctx.storages)) {
+    const prefs = await readPreferences(prefsFile, fetchImpl).catch(() => undefined);
+    if (prefs) {
+      const fromPrefs = new ProfileTypeIndexAnchor(prefsFile, prefs.dataset, DataFactory)
+        .privateIndex;
+      // The compliant location wins; a prefs file with no private-index link
+      // means "none" (never silently fall back to a stale legacy card value).
+      privateIndex = fromPrefs;
+    }
+  }
+
+  // Fetch ONLY the index documents that live inside the user's own pods.
+  const indexUrls = [publicIndex, privateIndex].filter(
+    (u): u is string => Boolean(u) && inOwnPods(u, ctx.storages),
+  );
+  const docs = await Promise.all(
+    indexUrls.map((u) =>
+      readTypeIndex(u, fetchImpl).catch((): TypeIndexDataset | undefined => undefined),
+    ),
+  );
+  return docs
+    .filter((d): d is TypeIndexDataset => Boolean(d))
+    .flatMap((d) => d.all());
 }
 
 /** Own-pod containment helper that tolerates an undefined target. */

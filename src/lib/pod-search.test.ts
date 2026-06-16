@@ -90,16 +90,31 @@ vi.mock("@/lib/schedule", () => ({
 vi.mock("@/lib/rdf-read", () => ({
   freshRdf: vi.fn(async () => ({ dataset: { __fake: true }, etag: null })),
 }));
-vi.mock("@/lib/type-index", () => ({
-  discoverRegistrations: vi.fn(async () => ({
-    links: {},
-    hadIndex: true,
-    // A Documents container the user wrote with some OTHER app (not a first-party
-    // store) — must be found via the type-index tail.
-    locations: [
-      { forClass: "https://schema.org/DigitalDocument", container: "https://alice.example/storage/docs/" },
-    ],
-  })),
+// type-index: keep the REAL classes (ProfileTypeIndexAnchor / TypeIndexDataset),
+// mock only the network/parse functions the OWN-POD-GUARDED discovery calls.
+vi.mock("@/lib/type-index", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/type-index")>();
+  return {
+    ...actual,
+    // The profile links a single IN-POD public type index.
+    typeIndexLinks: vi.fn(() => ({
+      publicIndex: "https://alice.example/storage/settings/publicTypeIndex.ttl",
+      privateIndex: undefined,
+    })),
+    // The index document yields one Documents container (written by some OTHER
+    // app, not a first-party store) — found via the type-index tail.
+    readTypeIndex: vi.fn(async () => ({
+      all: () => [
+        { forClass: "https://schema.org/DigitalDocument", container: "https://alice.example/storage/docs/" },
+      ],
+    })),
+  };
+});
+// preferences: no preferences file linked (so the legacy-card private index, if
+// any, is used) — mock the link reader to return undefined.
+vi.mock("@/lib/preferences", () => ({
+  preferencesFileLink: vi.fn(() => undefined),
+  readPreferences: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/files", () => ({
   listFolder: vi.fn(async () => [
@@ -238,6 +253,19 @@ describe("searchPod: the bound/budget engages on a large synthetic set", () => {
     expect(contactsStore).not.toHaveBeenCalled();
   });
 
+  it("a hit bound stops ALL later network work — no type-index discovery fetch fires (roborev Medium)", async () => {
+    // maxSources:1 → the bound is hit right after the first typed source, so the
+    // Type-Index discovery (which itself issues fetches) must NOT start.
+    const { freshRdf } = await import("@/lib/rdf-read");
+    const { readTypeIndex } = await import("@/lib/type-index");
+    const { listFolder } = await import("@/lib/files");
+    await searchPod(CTX, "budget", { maxSources: 1 });
+    // Discovery's profile fetch + index read + files-root list are all skipped.
+    expect(freshRdf, "no profile fetch after the bound is hit").not.toHaveBeenCalled();
+    expect(readTypeIndex, "no type-index read after the bound is hit").not.toHaveBeenCalled();
+    expect(listFolder, "no files-root list after the bound is hit").not.toHaveBeenCalled();
+  });
+
   it("the TIME budget stops the scan once the wall-clock deadline passes", async () => {
     // A controllable clock that jumps past the deadline after the first source,
     // so the second source's boundHit() trips on the time budget (not the count).
@@ -276,20 +304,30 @@ describe("searchPod: the bound/budget engages on a large synthetic set", () => {
     expect(SEARCH_DEFAULTS.maxSources).toBeGreaterThan(0);
     expect(SEARCH_DEFAULTS.timeBudgetMs).toBeGreaterThan(0);
   });
+
+  it("a 1-character query is INERT even for a DIRECT searchPod caller (roborev Medium)", async () => {
+    // The min-length gate must hold at the library boundary, not only in the
+    // hook keying — a direct caller must not trigger a broad pod scan.
+    const { notesStore } = await import("@/lib/notes");
+    const { results, sourcesScanned } = await searchPod(CTX, "a");
+    expect(results).toEqual([]);
+    expect(sourcesScanned).toBe(0);
+    expect(notesStore, "no store is even constructed for a sub-min query").not.toHaveBeenCalled();
+  });
 });
 
 describe("searchPod: own-pod containment (no foreign-origin fetch)", () => {
-  it("ignores a type-index location that points outside the user's pods", async () => {
-    const { discoverRegistrations } = await import("@/lib/type-index");
-    (discoverRegistrations as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      links: {},
-      hadIndex: true,
-      // An attacker-influenceable type-index entry pointing at a FOREIGN origin.
-      locations: [{ forClass: "https://schema.org/DigitalDocument", container: "https://evil.example/docs/" }],
+  it("ignores a type-index LOCATION that points outside the user's pods", async () => {
+    const { readTypeIndex } = await import("@/lib/type-index");
+    (readTypeIndex as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      all: () => [
+        // An attacker-influenceable type-index entry pointing at a FOREIGN origin.
+        { forClass: "https://schema.org/DigitalDocument", container: "https://evil.example/docs/" },
+      ],
     });
     const { listCategoryItems } = await import("@/lib/pod-data");
     await searchPod(CTX, "budget");
-    // The foreign container must NEVER be listed — its summary was filtered out
+    // The foreign container must NEVER be listed — its location was filtered out
     // before any fetch (confused-deputy / token-leak guard).
     const calls = (listCategoryItems as ReturnType<typeof vi.fn>).mock.calls;
     for (const [summary] of calls) {
@@ -297,5 +335,30 @@ describe("searchPod: own-pod containment (no foreign-origin fetch)", () => {
         expect(loc.container ?? loc.instance ?? "").not.toContain("evil.example");
       }
     }
+  });
+
+  it("a FOREIGN profile-linked type-index URL is NEVER fetched (roborev High)", async () => {
+    // The High finding: an off-pod `solid:publicTypeIndex` in the profile must
+    // not be fetched at all — the guard skips it before readTypeIndex runs.
+    const { typeIndexLinks, readTypeIndex } = await import("@/lib/type-index");
+    (typeIndexLinks as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+      publicIndex: "https://evil.example/exfil/publicTypeIndex.ttl",
+      privateIndex: undefined,
+    });
+    await searchPod(CTX, "budget");
+    // readTypeIndex must NEVER be called with the foreign URL.
+    for (const [url] of (readTypeIndex as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(url).not.toContain("evil.example");
+    }
+  });
+
+  it("a FOREIGN preferences-file URL is NEVER fetched (roborev High)", async () => {
+    const { preferencesFileLink, readPreferences } = await import("@/lib/preferences");
+    (preferencesFileLink as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      "https://evil.example/exfil/prefs.ttl",
+    );
+    await searchPod(CTX, "budget");
+    // The off-pod prefs file must not be read.
+    expect(readPreferences).not.toHaveBeenCalled();
   });
 });

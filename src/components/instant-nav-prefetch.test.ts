@@ -149,6 +149,7 @@ vi.mock("@/lib/calendar", () => ({ calendarStore: mockStore("calendar/") }));
 vi.mock("@/lib/bookmarks", () => ({ bookmarksStore: mockStore("bookmarks/") }));
 vi.mock("@/lib/tasks", () => ({ tasksStore: mockStore("tasks/") }));
 vi.mock("@/lib/issues", () => ({ issuesStore: mockStore("issues/") }));
+vi.mock("@/lib/schedule", () => ({ scheduleStore: mockStore("schedule/") }));
 
 // durable-cache: keep the real `assignedTasksKey` (storage-scoped key formula).
 // (No mock — its key formula is part of the single-source-of-truth contract.)
@@ -198,6 +199,7 @@ const EXPECTED_WARM_KEYS: ExpectedKey[] = [
   { label: "useItems(bookmarks)", key: `productivity:${STORAGE}bookmarks/` },
   { label: "useItems(tasks)", key: `productivity:${STORAGE}tasks/` },
   { label: "useItems(issues)", key: `productivity:${STORAGE}issues/` },
+  { label: "useItems(schedule)", key: `productivity:${STORAGE}schedule/` },
   { label: "useInbox", key: `inbox:${INBOX_URL}` },
 ];
 

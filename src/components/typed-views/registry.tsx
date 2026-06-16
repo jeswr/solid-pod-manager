@@ -13,16 +13,24 @@ import type { TypedViewer } from "@/lib/typed-views/types";
 import { selectTypedViewer, buildViewerContext } from "@/lib/typed-views/select";
 import { sourceActionFor, type SourceMatch } from "@/lib/typed-views/sources";
 import { dominantTabulatableClass } from "@/lib/typed-views/table-of-class";
+import { profileViewer, type ProfileModel } from "@/lib/typed-views/profile-view";
 import { contactsViewer, type ContactsModel } from "@/lib/typed-views/contacts-view";
 import { musicViewer, type MusicModel } from "@/lib/typed-views/music-view";
 import { photoViewer, type PhotoModel } from "@/lib/typed-views/photo-view";
 import { eventViewer, type EventModel } from "@/lib/typed-views/event-view";
 import { bookmarkViewer, type BookmarkModel } from "@/lib/typed-views/bookmark-view";
+import { taskViewer, type TaskModel } from "@/lib/typed-views/task-view";
+import { noteViewer, type NoteModel } from "@/lib/typed-views/note-view";
+import { issueViewer, type IssueModel } from "@/lib/typed-views/issue-view";
+import { ProfileCardList } from "@/components/typed-views/profile-card";
 import { ContactsCardList } from "@/components/typed-views/contacts-card";
 import { MusicCardList } from "@/components/typed-views/music-card";
 import { PhotoGrid } from "@/components/typed-views/photo-grid";
 import { EventCardList } from "@/components/typed-views/event-card";
 import { BookmarkCardList } from "@/components/typed-views/bookmark-card";
+import { TaskCardList } from "@/components/typed-views/task-card";
+import { NoteCardList } from "@/components/typed-views/note-card";
+import { IssueCardList } from "@/components/typed-views/issue-card";
 
 /** A React card for a viewer's model. */
 type CardComponent<M> = (props: { model: M; url: string }) => ReactNode;
@@ -52,11 +60,15 @@ function entry<M>(e: TypedViewEntry<M>): RenderableEntry {
  * card. Adding a viewer = one pure viewer + one entry here.
  */
 const ENTRIES: Record<string, RenderableEntry> = {
+  [profileViewer.id]: entry<ProfileModel>({ viewer: profileViewer, card: ProfileCardList }),
   [contactsViewer.id]: entry<ContactsModel>({ viewer: contactsViewer, card: ContactsCardList }),
   [musicViewer.id]: entry<MusicModel>({ viewer: musicViewer, card: MusicCardList }),
   [photoViewer.id]: entry<PhotoModel>({ viewer: photoViewer, card: PhotoGrid }),
   [eventViewer.id]: entry<EventModel>({ viewer: eventViewer, card: EventCardList }),
   [bookmarkViewer.id]: entry<BookmarkModel>({ viewer: bookmarkViewer, card: BookmarkCardList }),
+  [taskViewer.id]: entry<TaskModel>({ viewer: taskViewer, card: TaskCardList }),
+  [noteViewer.id]: entry<NoteModel>({ viewer: noteViewer, card: NoteCardList }),
+  [issueViewer.id]: entry<IssueModel>({ viewer: issueViewer, card: IssueCardList }),
 };
 
 /**

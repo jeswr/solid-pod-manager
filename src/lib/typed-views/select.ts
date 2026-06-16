@@ -14,27 +14,39 @@
  */
 import type { DatasetCore, Quad } from "@rdfjs/types";
 import type { TypedViewer, ViewerContext } from "./types.js";
+import { profileViewer } from "./profile-view.js";
 import { contactsViewer } from "./contacts-view.js";
 import { musicViewer } from "./music-view.js";
 import { photoViewer } from "./photo-view.js";
 import { eventViewer } from "./event-view.js";
 import { bookmarkViewer } from "./bookmark-view.js";
+import { taskViewer } from "./task-view.js";
+import { noteViewer } from "./note-view.js";
+import { issueViewer } from "./issue-view.js";
 
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
 /**
  * The registered viewers, highest specificity first (registration order is the
  * tie-break for equal priorities). New viewers are added here — one line each.
- * Contacts and Music share priority 70 but target disjoint shapes (vcard vs
- * schema music); Photo/Event/Bookmark sit at 60. All target disjoint shapes, so
- * the tie-break never decides between them in practice.
+ *
+ * Priorities (§4.4): Profile (80) sits ABOVE Contacts (70) so a `foaf:Person`
+ * profile document gets the richer snippet card while a plain `vcard:Individual`
+ * address-book entry (which Profile does NOT match) still gets Contacts. Contacts
+ * and Music share 70 but target disjoint shapes (vcard vs schema music).
+ * Photo/Event/Bookmark/Task/Note/Issue sit at 60 — all disjoint classes, so the
+ * tie-break never decides between them in practice.
  */
 export const TYPED_VIEWERS: readonly TypedViewer[] = [
+  profileViewer,
   contactsViewer,
   musicViewer,
   photoViewer,
   eventViewer,
   bookmarkViewer,
+  taskViewer,
+  noteViewer,
+  issueViewer,
 ];
 
 /** Collect every `rdf:type` IRI on any subject in the dataset (precompute). */

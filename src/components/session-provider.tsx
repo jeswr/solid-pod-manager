@@ -60,11 +60,17 @@ import {
 } from "@/lib/community-credentials";
 
 // Capture the pristine native `fetch` at THIS module's evaluation — which is at
-// app boot (this provider is mounted by the root layout), before the reactive
-// auth `fetch` patch is installed in the effect below. Community-feed requests
-// to third-party public hosts (matrix.org / forum.solidproject.org) then use it
-// to bypass the Solid auth layer entirely (no risk of attaching a pod
-// credential to a non-pod host). Idempotent — the first capture wins.
+// app boot (this provider is mounted by the root layout, in the eager root
+// chunk), BEFORE the runtime effect below calls
+// `ReactiveFetchManager.registerGlobally()` to patch `globalThis.fetch`.
+// BOTH foreign-origin consumers rely on this single pre-patch snapshot:
+//   • the WebID-index people-search client (`webid-index.ts`, reads `nativeFetch`)
+//   • the Solid Community feeds (`community-feeds.ts`, reads `getNativeFetch()`)
+// so a third-party host (the WebID index / matrix.org / forum.solidproject.org)
+// is fetched WITHOUT the auth wrapper — its 401-upgrade path can never attach
+// the user's pod credential to a foreign origin. The call is idempotent (the
+// first capture wins); merely importing `native-fetch` would also snapshot, so
+// this explicit call is the deterministic belt-and-braces boot hook.
 captureNativeFetch();
 
 type Status = "loading" | "logged-out" | "authenticating" | "logged-in";

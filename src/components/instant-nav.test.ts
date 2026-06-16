@@ -318,6 +318,7 @@ const READ_HOOKS: readonly string[] = [
   "use-activity.ts", // useRecentActivity (already converted)
   "use-permissions.ts", // useConnectedApps (already converted; getFreshModel for mutations)
   "use-federation-tasks.ts", // useAssignedTasks (already converted)
+  "use-webid-search.ts", // useWebIdSearch/useIsIndexed (query-driven panel reads, see NON_REGISTRY note)
   "use-community.ts", // useCommunityFeed (useCommunityPrefs is localStorage state, exempt below)
 ];
 
@@ -356,6 +357,10 @@ const NON_REGISTRY_READ_HELPERS: ReadonlySet<string> = new Set([
   "usePurchaseFeature", // a fail-closed feature PROBE (no navigable read model / cache slot)
   "useConnectedApp", // derives ONE app from the cached useConnectedApps list (no own slot)
   "useCategorySummary", // derives ONE summary from the cached useCategorySummaries list (no own slot)
+  "useWebIdSearch", // QUERY-driven WebID-index search panel (key webid-search:<q>) — not a
+  // navigable read PAGE with a fixed cache slot; it lives in /contacts (which has its own
+  // registry entry) and goes through useSwrRead, so it is still cached for re-typed queries.
+  "useIsIndexed", // QUERY-driven index existence probe (key webid-indexed:<webid>); same — no own page slot.
   "useCommunityPrefs", // channel subscriptions + read-markers from localStorage (per-WebID state),
   // NOT a navigable read with its own SWR cache slot — the cached read is useCommunityFeed
 ]);

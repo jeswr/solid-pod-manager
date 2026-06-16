@@ -185,3 +185,49 @@ Touched:
 - `src/components/use-activity.ts` — "Recent activity" routed through `useSwrRead`
   (was raw fetch-on-mount; now survives navigation + cold open, shared feed).
 - `src/app/page.tsx` — non-blocking "Refreshing…" affordance on Recent activity.
+
+## WebID-index people search — Claude Opus 4.8 (Fable unavailable)
+
+Wires the Pod Manager's contacts page to the `solid-webid-index` consumer
+client so users can search the public WebID index by name/WebID, add a result as
+a contact (PM's existing contacts store), or suggest a WebID to the index's LDN
+inbox. Gated entirely on the `NEXT_PUBLIC_WEBID_INDEX` build-time env var (feature
+hidden when unset). The client is a vendored thin copy of
+`jeswr/solid-webid-index` `src/lib/client/` (that repo is `private:true` with no
+`exports` map, so not yet GitHub-installable as `solid-webid-index/client`).
+Fable unavailable at authoring time; upgrade candidates.
+
+New files:
+
+- `src/lib/webid-index-client.ts` — vendored framework-agnostic index client
+  (search / fetchPage / isIndexed / checkHealth / suggestWebId); same-origin
+  `fetchPage` guard, `https:`-only photo guard, fail-closed `isIndexed`,
+  credentials-omit on every request; `createIndexClient` returns `null` when no
+  origin is configured. Cited mirror of the upstream source.
+- `src/lib/webid-index-client.test.ts` — exhaustive client tests (RDF projection,
+  SSRF/same-origin guard, photo guard, fail-closed lookup, suggest mapping +
+  validation, credentials-omit, env-gated null factory).
+- `src/lib/native-fetch.ts` — a snapshot of the UNPATCHED native `fetch`, taken
+  at module-load time (before Solid auth patches `globalThis.fetch`); used for
+  third-party index requests so the user's DPoP auth / 401-upgrade is never
+  attached to the foreign index origin.
+- `src/lib/webid-index.ts` — `NEXT_PUBLIC_WEBID_INDEX` config + shared client +
+  `isWebIdIndexEnabled` flag (passes `nativeFetch`, never the auth fetch).
+- `src/components/use-webid-search.ts` — `useWebIdSearch` / `useIsIndexed` hooks
+  over the client via the shared `useSwrRead` cache (keyed `webid-search:<q>` /
+  `webid-indexed:<webid>`); gated on the feature flag; pure `searchKey`/`indexedKey`.
+- `src/components/use-webid-search.test.ts` — gating/keying tests + structural guard.
+- `src/components/webid-index-search.tsx` — the search panel (box → name/avatar/
+  WebID result cards with "Add as contact" + "Suggest to index"); pure
+  `indexEntryToContact` mapping.
+- `src/components/webid-index-search.test.tsx` — render + add-as-contact + suggest tests.
+
+Touched:
+
+- `src/app/contacts/page.tsx` — mounts the search panel above the contacts list,
+  gated on `isWebIdIndexEnabled`.
+- `src/components/session-provider.tsx` — eager `import "@/lib/native-fetch"` so
+  the native-fetch snapshot is taken before `registerGlobally()` patches the
+  global fetch.
+- `src/components/instant-nav.test.ts` — classifies `use-webid-search.ts` as a
+  READ hook + exempts its query-driven hooks from the page registry (with reasons).

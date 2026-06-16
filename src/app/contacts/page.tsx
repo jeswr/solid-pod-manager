@@ -14,6 +14,9 @@ import { useStore, useItems } from "@/components/use-productivity";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import { WebIdIndexSearch } from "@/components/webid-index-search";
+import { isWebIdIndexEnabled } from "@/lib/webid-index";
 import { exportVCard, importVCard } from "@/lib/vcard-io";
 import { downloadText, readFileText } from "@/lib/download";
 import type { StoredItem } from "@/lib/productivity-store";
@@ -122,6 +125,14 @@ export default function ContactsPage() {
           </Button>
         </div>
       </header>
+
+      {isWebIdIndexEnabled ? (
+        <>
+          <WebIdIndexSearch onAdded={reload} />
+          <Separator />
+          <h2 className="text-lg font-semibold tracking-tight">Your contacts</h2>
+        </>
+      ) : null}
 
       {error ? (
         <ErrorState error={error} onRetry={reload} />

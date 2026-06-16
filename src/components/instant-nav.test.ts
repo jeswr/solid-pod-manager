@@ -320,6 +320,7 @@ const READ_HOOKS: readonly string[] = [
   "use-federation-tasks.ts", // useAssignedTasks (already converted)
   "use-webid-search.ts", // useWebIdSearch/useIsIndexed (query-driven panel reads, see NON_REGISTRY note)
   "use-community.ts", // useCommunityFeed (useCommunityPrefs is localStorage state, exempt below)
+  "use-federation-registry.ts", // useFederationMembers (registry-asserted memberships, /federations)
 ];
 
 /**

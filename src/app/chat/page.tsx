@@ -44,7 +44,7 @@ function ChatInner() {
 
 function ChatView({ containerUrl }: { containerUrl: string }) {
   const { webId } = useSession();
-  const { data, loading, error, reload, send, outOfScope } = useChat(containerUrl);
+  const { data, loading, error, reload, send, outOfScope, readOnly } = useChat(containerUrl);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
 
@@ -123,21 +123,36 @@ function ChatView({ containerUrl }: { containerUrl: string }) {
         </ul>
       )}
 
-      {!outOfScope && (
-        <form onSubmit={onSend} className="flex items-center gap-2">
-          <Input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Write a message…"
-            aria-label="Message"
-            disabled={sending}
-          />
-          <Button type="submit" disabled={sending || !draft.trim()}>
-            {sending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Send aria-hidden="true" />}
-            Send
-          </Button>
-        </form>
-      )}
+      {/* The compose box is shown ONLY for a successfully-loaded, in-scope,
+          writable chat. Hiding it on ANY error (not just readOnly) covers the
+          unsupported-channel / partial-history error paths too — a channel we
+          could not classify as writable native must never offer a send box that
+          would then reject (roborev finding, Low). */}
+      {!outOfScope &&
+        !error &&
+        (readOnly ? (
+          <p
+            className="rounded-xl border border-dashed border-border bg-muted/40 p-3 text-sm text-muted-foreground"
+            role="note"
+          >
+            This is a read-only external chat. You can read its messages here, but messages can only
+            be sent from the app that created it.
+          </p>
+        ) : (
+          <form onSubmit={onSend} className="flex items-center gap-2">
+            <Input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="Write a message…"
+              aria-label="Message"
+              disabled={sending}
+            />
+            <Button type="submit" disabled={sending || !draft.trim()}>
+              {sending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Send aria-hidden="true" />}
+              Send
+            </Button>
+          </form>
+        ))}
     </div>
   );
 }

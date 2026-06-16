@@ -359,3 +359,26 @@ Touched (additive):
 - `package.json` — `@jeswr/federation-client` (github:#main); `next.config.ts` —
   formerly carried a `NormalModuleReplacementPlugin` for the SDK's `node:`
   builtins (removed in feat/drop-net-shim / pss #96 — see above).
+
+## Claude Opus 4.8 — SolidOS `meeting:LongChat` reader (task #95 / G4)
+
+Read-first interop: PM's `/chat` renders a SolidOS-authored `meeting:LongChat`
+channel read-only. Terms primary-source-confirmed against
+`solidos/chat-pane/shapes/longchat-shapes.ttl` + the two example fixtures.
+
+Net-new:
+
+- `src/lib/longchat.ts` — typed `@rdfjs/wrapper` accessors + `parseLongChatMessages`
+  (edit chains collapse to latest, `schema:dateDeleted` → tombstone, plain-text
+  bodies only).
+- `src/lib/longchat.test.ts` — fixtures from the SolidOS example shapes.
+
+Touched:
+
+- `src/lib/chat.ts` — detect-and-read (`Chat.messages` probes `index.ttl`;
+  `meeting:LongChat` → read-only long-chat reader incl. dated `YYYY/MM/DD` files,
+  else native `sioc:Note`); foreign-origin read-only path via `getNativeFetch` +
+  `agent-target` SSRF guard, gated on `NEXT_PUBLIC_FOREIGN_CHAT_READ`;
+  `chatContainerFromUrl` normaliser; read-only `send` guard.
+- `src/components/use-chat.ts` — `readOnly` flag; `allowForeign` wiring.
+- `src/app/chat/page.tsx` — read-only "external chat" note replaces the compose box.

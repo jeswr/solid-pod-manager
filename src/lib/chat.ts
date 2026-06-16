@@ -32,6 +32,9 @@ import { isInOwnPods } from "./pod-scope.js";
 import { toSlug } from "./productivity-store.js";
 import { listContainer, readResource, writeResource } from "./pod-data.js";
 import { ChatScopeError, ChatMessageError } from "./errors.js";
+import { isValidTargetUrl, noFollowFetch } from "./agent-target.js";
+import { getNativeFetch } from "./native-fetch.js";
+import { isLongChatDocument, parseLongChatMessages } from "./longchat.js";
 
 const SIOC = "http://rdfs.org/sioc/ns#";
 const DCT = "http://purl.org/dc/terms/";
@@ -43,6 +46,18 @@ const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 export const MESSAGE_CLASS = `${SIOC}Note`;
 /** Root slug under the pod for chats. */
 export const CHAT_SLUG = "chat/";
+
+/**
+ * FEATURE GATE — foreign-origin READ-ONLY chat interop (a SolidOS
+ * `meeting:LongChat` channel hosted on a THIRD-PARTY pod). UNSET (the default)
+ * means a non-own-pod `?url=` is blocked exactly as before; set
+ * `NEXT_PUBLIC_FOREIGN_CHAT_READ=1` at build to allow it (read-only, native
+ * fetch, SSRF-guarded). On-pod `meeting:LongChat` reading is ALWAYS on (no gate)
+ * — it is same-pod and uses the normal auth path. Spelled as a direct
+ * `process.env.NEXT_PUBLIC_*` read so Next inlines it in the static export.
+ */
+export const FOREIGN_CHAT_READ_ENABLED =
+  (process.env.NEXT_PUBLIC_FOREIGN_CHAT_READ ?? "") !== "";
 
 const PREFIXES = { sioc: SIOC, dct: DCT, foaf: FOAF, as: AS } as const;
 
@@ -150,17 +165,44 @@ export function chatContainerUrl(podRoot: string, channel: string): string {
   return new URL(`${CHAT_SLUG}${slug}/`, podRoot).toString();
 }
 
+/** How a chat container is read/written. */
+export type ChatKind =
+  /** PM's native `sioc:Note` per-resource append-only log — read AND write. */
+  | "native"
+  /** A SolidOS `meeting:LongChat` channel — READ-ONLY interop (never written). */
+  | "longchat";
+
 /**
  * A chat bound to a specific container URL + the active session's storages.
- * Construct via {@link openChat}, which enforces the same-pod scope guard on the
+ * Construct via {@link openChat}, which enforces the scope guard on the
  * (possibly caller-supplied) container URL BEFORE any I/O.
+ *
+ * READ-ONLY interop: a chat may be flagged `readOnly` — either because it is a
+ * FOREIGN-origin channel (read with the pristine native fetch, never the
+ * auth-patched global) or because its on-pod shape is a SolidOS
+ * `meeting:LongChat` channel (which PM reads but never writes — PM's native
+ * `sioc:Note` model stays the sole write model). `send` on a read-only chat
+ * throws; the UI hides the compose box.
  */
 export class Chat {
+  /**
+   * Set once {@link messages} has detected the on-the-wire shape: `"longchat"`
+   * for a SolidOS `meeting:LongChat` channel, `"native"` for PM's own model.
+   * `undefined` until the first read. Drives the read-only compose guard for an
+   * on-pod LongChat channel (a foreign chat is read-only from construction).
+   */
+  detectedKind?: ChatKind;
+
   constructor(
     readonly containerUrl: string,
     private readonly storages: readonly string[],
     private readonly webId: string,
     private readonly fetchImpl?: typeof fetch,
+    /**
+     * A FOREIGN-origin channel: read-only, and read with the pristine native
+     * fetch (the auth-patched global must never reach a third-party pod).
+     */
+    private readonly foreign: boolean = false,
   ) {}
 
   /** Fail closed unless `url` is a direct child resource of this chat container. */
@@ -189,11 +231,273 @@ export class Chat {
     if (!isDirectChild) throw new ChatScopeError(url, this.containerUrl);
   }
 
-  /** List + parse all messages, oldest→newest. Missing container → empty. */
+  /**
+   * The fetch to use for READS. A FOREIGN-origin chat MUST use the pristine
+   * native fetch (captured before the auth patch) so the auth layer never
+   * re-issues with the user's DPoP/bearer credentials against a third-party pod;
+   * wrapped to refuse redirects so a foreign host can't 3xx the read onto a
+   * private origin. A same-pod chat uses the normal (auth-patched) path. A
+   * test-supplied `fetchImpl` always wins.
+   *
+   * FAIL CLOSED: for a foreign chat with NO captured native fetch (would only
+   * happen in a non-browser/SSR context, where `getNativeFetch()` is undefined),
+   * we throw rather than silently fall back to the (possibly auth-patched) global
+   * — a foreign read must never risk attaching the user's pod credentials.
+   */
+  private get readFetch(): typeof fetch | undefined {
+    if (this.fetchImpl) return this.fetchImpl;
+    if (this.foreign) {
+      const native = getNativeFetch();
+      if (!native) {
+        throw new ChatScopeError(this.containerUrl, "no pristine fetch for a foreign read");
+      }
+      return noFollowFetch(native);
+    }
+    return undefined; // same-pod: the auth-patched global fetch
+  }
+
+  /**
+   * True when this chat must be read-only: a foreign-origin channel (always) or
+   * an on-pod channel detected as a SolidOS `meeting:LongChat` (PM never writes
+   * that shape). Native same-pod chats are writable.
+   */
+  get readOnly(): boolean {
+    return this.foreign || this.detectedKind === "longchat";
+  }
+
+  /**
+   * Probe the channel's `index.ttl` and classify it. ALWAYS a FRESH read (no
+   * cached snapshot) so it is safe to call before a write (the read-fresh rule),
+   * not just for display.
+   *
+   * The classification is STRICT + FAIL-CLOSED (roborev findings, High):
+   *   - index `404` (genuinely absent doc) → PM's NATIVE model. This is the ONLY
+   *     path to "native" — PM never writes an `index.ttl` (it writes one
+   *     `sioc:Note` resource per message), so an ABSENT index is the positive
+   *     signal of a PM-native (or empty) container.
+   *   - index `200` typed `mee:LongChat` → the SolidOS long-chat model (read
+   *     only). Returns the parsed index dataset for the reader to reuse.
+   *   - index `200` NOT typed `mee:LongChat` → an UNKNOWN/foreign-app channel
+   *     shape we don't understand. We DO NOT classify it native (that would let
+   *     `send()` write a PM `sioc:Note` into another app's channel). Throw an
+   *     unsupported-channel error — read-only, no write.
+   *   - index `403` / `5xx` / parse / network error → AMBIGUOUS (the index could
+   *     EXIST but be unreadable — e.g. an acl:Append LongChat that 403s GET yet
+   *     accepts PUT). Re-throw; never assume native.
+   */
+  private async detectChannel(): Promise<
+    { kind: "native" } | { kind: "longchat"; indexDataset: import("@rdfjs/types").DatasetCore }
+  > {
+    let indexDataset: import("@rdfjs/types").DatasetCore | undefined;
+    try {
+      ({ dataset: indexDataset } = await readResource(this.indexUrl, this.readFetch));
+    } catch (e) {
+      if (e instanceof RdfFetchError && e.status === 404) {
+        return { kind: "native" }; // index genuinely absent → PM-native/empty
+      }
+      throw e; // 403 / 5xx / parse / network → fail closed, NOT native
+    }
+    if (isLongChatDocument(indexDataset)) {
+      return { kind: "longchat", indexDataset };
+    }
+    // A readable index that is NOT a meeting:LongChat is an unknown channel shape
+    // — read-only, never writable as PM-native.
+    throw new ChatMessageError(
+      "This chat uses a format this app doesn't recognise, so it can only be read here.",
+    );
+  }
+
+  /**
+   * List + parse all messages, oldest→newest. Missing container → empty.
+   *
+   * DETECT-AND-READ: probe the channel's index document (FRESH). If it is typed
+   * `mee:LongChat`, parse via the SolidOS long-chat shape (read-only) — reading
+   * the channel index AND any dated chat files (`YYYY/MM/DD/chat.ttl`) under the
+   * container. If the index is absent (404), use PM's native per-resource reader
+   * (`sioc:Note`). A readable-but-unknown index fails closed (read-only).
+   */
   async messages(): Promise<ChatMessage[]> {
+    const detected = await this.detectChannel();
+    if (detected.kind === "longchat") {
+      this.detectedKind = "longchat";
+      return this.readLongChat(detected.indexDataset);
+    }
+    this.detectedKind = "native";
+    return this.readNative();
+  }
+
+  /** The channel's index document URL (the LongChat channel metadata lives here). */
+  private get indexUrl(): string {
+    return `${this.containerUrl}index.ttl`;
+  }
+
+  /**
+   * Read a SolidOS `meeting:LongChat` channel READ-ONLY. Reads the channel index
+   * (already fetched) plus any dated chat files (`.ttl`) found by listing the
+   * container tree (bounded depth — `YYYY/MM/DD/`), then parses all message
+   * nodes via the typed long-chat accessors. Edits collapse to latest, deletions
+   * render as tombstones. Foreign reads go through the native fetch.
+   */
+  private async readLongChat(
+    indexDataset: import("@rdfjs/types").DatasetCore,
+  ): Promise<ChatMessage[]> {
+    const datasets: import("@rdfjs/types").DatasetCore[] = [indexDataset];
+    // Collect dated chat files under the container (bounded: container →
+    // YYYY → MM → DD → chat.ttl). A foreign listing uses the native fetch.
+    const { files: fileUrls, truncated } = await this.collectLongChatFiles();
+    // NEVER PRESENT INCOMPLETE HISTORY AS COMPLETE (roborev finding, Medium): if
+    // the bounded walk actually HIT one of its caps (more dated files / dirs exist
+    // than we read), silently returning the partial set would render a truncated
+    // conversation as if it were the whole history. Mirroring the partial-read
+    // guards above, we fail closed with a visible error instead. (The caps still
+    // protect against a hostile/wide tree — an honest channel this large simply
+    // surfaces an explicit "too large to show fully" error rather than a
+    // deceptively short log.)
+    if (truncated) {
+      throw new ChatMessageError(
+        "This chat has more history than can be shown here. It may have been created by another app — open it there to see the full conversation.",
+      );
+    }
+    const more = await Promise.all(
+      fileUrls.map(async (url) => {
+        try {
+          const { dataset } = await readResource(url, this.readFetch);
+          return dataset;
+        } catch (e) {
+          // PARTIAL-READ guard (roborev finding, Medium): a `404` is benign — the
+          // file was LISTED but vanished between listing and read (a delete race),
+          // so an absent message file is correctly empty. But a 403 / 5xx / parse
+          // / network error means we FAILED to read a file that DOES exist —
+          // silently dropping it would render an INCOMPLETE conversation as if it
+          // were complete. For a read-only history view that is a correctness bug,
+          // so we propagate: the SWR hook surfaces the error (and keeps the last
+          // good cached render), rather than showing a deceptively short history.
+          if (e instanceof RdfFetchError && e.status === 404) return undefined;
+          throw e;
+        }
+      }),
+    );
+    for (const ds of more) if (ds) datasets.push(ds);
+    return parseLongChatMessages(datasets);
+  }
+
+  /**
+   * List the dated chat-file URLs under the channel container, STRICTLY matching
+   * the documented SolidOS path convention `YYYY/MM/DD/chat.ttl` (roborev
+   * finding, Medium). We descend ONLY into directories whose name is the
+   * expected zero-padded date component for the current depth
+   * (`\d{4}` → `\d{2}` → `\d{2}`) and collect ONLY a leaf file named exactly
+   * `chat.ttl`. This prevents an UNRELATED Turtle document anywhere under the
+   * channel subtree (which `parseLongChatMessages` would otherwise happily read
+   * if it carried message-shaped triples) from being rendered as chat history.
+   *
+   * FETCH-AMPLIFICATION GUARD (roborev finding, Medium — DoS on FOREIGN chats):
+   * a hostile/malformed channel can advertise a very WIDE date tree — thousands
+   * of `\d{4}` years, each with many `\d{2}` months/days — so the `chat.ttl` file
+   * cap alone is not enough: it caps the FINAL list but only AFTER the container
+   * traversal has already issued one `listContainer` per matching directory. The
+   * frontier would otherwise grow MULTIPLICATIVELY (years × months × days) and
+   * the user's session would fire an unbounded number of same-origin fetches at
+   * the foreign host. So the walk is bounded on THREE axes, all enforced DURING
+   * traversal (not just on the result):
+   *   1. DEPTH — fixed 3 (`YYYY/MM/DD`).
+   *   2. FRONTIER WIDTH — each depth's frontier is DEDUPED (a malformed listing
+   *      can repeat a child) and CAPPED to {@link MAX_FRONTIER}; once a depth's
+   *      frontier is full we stop adding (we do not, and cannot, fetch more than
+   *      that many directories at the next depth).
+   *   3. TOTAL LISTING BUDGET — a hard ceiling ({@link MAX_LISTINGS}) on the total
+   *      number of `listContainer` calls across the whole walk; the moment it is
+   *      exhausted we STOP descending (return what we have). This bounds total
+   *      same-origin requests regardless of tree shape.
+   * Only same-origin descendants of the container are followed; foreign listings
+   * go through the native fetch.
+   */
+  private async collectLongChatFiles(): Promise<{ files: string[]; truncated: boolean }> {
+    const MAX_FILES = 366; // a year of daily files — generous, but bounded
+    const MAX_FRONTIER = 512; // max directories carried into the NEXT depth
+    const MAX_LISTINGS = 1024; // hard ceiling on total listContainer calls
+    // The relative directory-name pattern expected at each descent step.
+    const DIR_PATTERN = [/^\d{4}$/, /^\d{2}$/, /^\d{2}$/]; // YYYY / MM / DD
+    const CHAT_FILE = "chat.ttl";
+    const out: string[] = [];
+    let frontier: string[] = [this.containerUrl];
+    let listings = 0; // total listContainer calls issued (the request budget)
+    // TRUNCATION FLAG: set when ANY bound actually clips real history (a frontier
+    // we could not fully widen, a budget we exhausted mid-walk, or a file list we
+    // capped). The caller fails closed on it so a clipped history is NEVER rendered
+    // as if complete (roborev finding, Medium).
+    let truncated = false;
+    for (let depth = 0; depth < DIR_PATTERN.length && frontier.length > 0; depth++) {
+      // Dedup + cap the NEXT depth's frontier so a wide/repeating tree cannot
+      // amplify the fetch count. Once `MAX_FRONTIER` distinct dirs are queued we
+      // stop collecting more at this depth (and `next.size` bounds next depth's
+      // listings).
+      const next = new Set<string>();
+      let budgetExhausted = false;
+      for (const dir of frontier) {
+        if (listings >= MAX_LISTINGS) {
+          budgetExhausted = true; // total request budget spent — stop the walk
+          truncated = true; // dirs remained unlisted → history may be incomplete
+          break;
+        }
+        let entries: { url: string; isContainer: boolean }[];
+        try {
+          listings++;
+          entries = await listContainer(dir, this.readFetch);
+        } catch (e) {
+          // PARTIAL-READ guard (roborev finding, Medium): a `404` listing means
+          // the date directory was removed between discovery and listing (a
+          // benign race) — skip it. But a 403 / 5xx / parse / network error means
+          // a directory that EXISTS could not be listed, so we may be MISSING its
+          // dated files — silently continuing would render an incomplete history
+          // as complete. Propagate so the read fails closed, mirroring the
+          // dated-file read guard.
+          if (e instanceof RdfFetchError && e.status === 404) continue;
+          throw e;
+        }
+        for (const entry of entries) {
+          if (!entry.isContainer || !this.isUnderContainer(entry.url)) continue;
+          const name = this.lastSegment(entry.url);
+          if (!DIR_PATTERN[depth].test(name)) continue;
+          if (next.size >= MAX_FRONTIER) {
+            truncated = true; // a matching date dir we could not carry forward
+            break; // width cap — stop widening this depth
+          }
+          next.add(entry.url);
+        }
+      }
+      frontier = [...next];
+      if (budgetExhausted) break; // stop descending once the budget is spent
+    }
+    // `frontier` now holds the `YYYY/MM/DD/` leaf containers — collect each one's
+    // `chat.ttl` (and only that file), capped to MAX_FILES.
+    for (const dir of frontier) {
+      if (out.length >= MAX_FILES) {
+        truncated = true; // more leaf days than the file cap → history clipped
+        break;
+      }
+      const fileUrl = `${dir}${CHAT_FILE}`;
+      if (this.isUnderContainer(fileUrl)) out.push(fileUrl);
+    }
+    return { files: out, truncated };
+  }
+
+  /** The final path segment of a (container or file) URL, decoded; `""` on parse error. */
+  private lastSegment(url: string): string {
+    try {
+      const path = new URL(url).pathname.replace(/\/$/, "");
+      const seg = path.slice(path.lastIndexOf("/") + 1);
+      return decodeURIComponent(seg);
+    } catch {
+      return "";
+    }
+  }
+
+  /** PM's native reader: one `sioc:Note` resource per message, direct children only. */
+  private async readNative(): Promise<ChatMessage[]> {
     let entries: { url: string }[];
     try {
-      entries = await listContainer(this.containerUrl, this.fetchImpl);
+      entries = await listContainer(this.containerUrl, this.readFetch);
     } catch (e) {
       if (e instanceof RdfFetchError && (e.status === 404 || e.status === 403)) return [];
       throw e;
@@ -204,7 +508,7 @@ export class Chat {
     const parsed = await Promise.all(
       candidates.map(async (entry) => {
         try {
-          const { dataset } = await readResource(entry.url, this.fetchImpl);
+          const { dataset } = await readResource(entry.url, this.readFetch);
           return parseMessage(entry.url, dataset);
         } catch {
           return undefined;
@@ -214,7 +518,7 @@ export class Chat {
     return sortMessages(parsed.filter((m): m is ChatMessage => m !== undefined));
   }
 
-  /** Boolean form of the scope guard (read path: skip, don't throw). */
+  /** Boolean form of the direct-child scope guard (read path: skip, don't throw). */
   private isInContainer(url: string): boolean {
     try {
       this.assertInContainer(url);
@@ -225,12 +529,69 @@ export class Chat {
   }
 
   /**
+   * True iff `url` is a same-origin DESCENDANT of the chat container (any depth)
+   * — used to bound the dated-file walk to the channel's own subtree. Looser than
+   * {@link assertInContainer} (which requires a DIRECT child) because long-chat
+   * files are nested under `YYYY/MM/DD/`.
+   */
+  private isUnderContainer(url: string): boolean {
+    let parsed: URL;
+    let container: URL;
+    try {
+      parsed = new URL(url);
+      container = new URL(this.containerUrl);
+    } catch {
+      return false;
+    }
+    const containerPath = container.pathname.endsWith("/")
+      ? container.pathname
+      : `${container.pathname}/`;
+    return (
+      parsed.origin === container.origin &&
+      parsed.pathname.startsWith(containerPath) &&
+      parsed.pathname !== containerPath
+    );
+  }
+
+  /**
    * Append a message: create-only PUT of a new resource in the chat container
    * (never overwrites). Returns the new message URL.
+   *
+   * WRITE GUARD — FAIL CLOSED (roborev finding, High): PM's native `sioc:Note`
+   * model is the SOLE write model; we never author the long-chat shape or
+   * cross-pod write. A write is permitted ONLY when the channel is EXPLICITLY
+   * classified `"native"` (and not foreign). Crucially, `detectedKind` is unset
+   * until the first read, so we must NOT treat "not yet detected" as writable —
+   * before any read (or after an ambiguous probe), a channel could be a SolidOS
+   * `meeting:LongChat`, and writing a native message into it would corrupt it.
+   * So if the kind is unknown we DETECT first (run the same index probe
+   * `messages()` uses) and proceed only if it resolves to native — a fresh read
+   * before the mutation (the read-fresh-before-write rule), never the cached
+   * snapshot. A foreign chat is rejected outright (never even probed for write).
    */
   async send(content: string): Promise<{ url: string }> {
+    // Pure input validation first — an empty message never needs a network probe.
     const trimmed = content.trim();
     if (!trimmed) throw new ChatMessageError("A chat message cannot be empty.");
+    if (this.foreign) {
+      throw new ChatMessageError(
+        "This chat is read-only (external chat). Messages can be viewed but not sent from here.",
+      );
+    }
+    // RE-DETECT FRESH before EVERY write (roborev finding, Medium — TOCTOU): the
+    // cached `detectedKind` from an earlier read is NOT trusted, because an
+    // `index.ttl` could have been ADDED (or changed to `mee:LongChat`) since that
+    // read — writing a native `sioc:Note` into a now-LongChat channel would
+    // corrupt it. `detectChannel()` re-probes the index and fails closed on
+    // anything but a confirmed-absent index (404). We only write when THIS fresh
+    // probe says native. (This is the read-fresh-before-write rule.)
+    const detected = await this.detectChannel();
+    this.detectedKind = detected.kind;
+    if (detected.kind !== "native") {
+      throw new ChatMessageError(
+        "This chat is read-only (external chat). Messages can be viewed but not sent from here.",
+      );
+    }
     const rand = Math.random().toString(36).slice(2, 10);
     const url = `${this.containerUrl}${Date.now()}-${rand}.ttl`;
     this.assertInContainer(url);
@@ -250,21 +611,99 @@ export class Chat {
 }
 
 /**
- * Open a chat at a container URL, enforcing the same-pod scope guard FIRST.
+ * The exact SolidOS `meeting:LongChat` channel-document leaf names we know how to
+ * normalise to their container. SolidOS points at a channel via its index
+ * document (`…/index.ttl`), so a trailing `index.ttl` IS the channel doc and is
+ * dropped to reach the container. We DELIBERATELY do not generalise to "any
+ * dotted segment" (roborev finding, Low) — see {@link chatContainerFromUrl}.
+ */
+const CHANNEL_DOC_LEAVES = new Set(["index.ttl"]);
+
+/**
+ * Normalise a possibly-document `?url=` into its CONTAINER URL. A SolidOS
+ * `meeting:LongChat` is often pointed at via its channel document
+ * (`…/index.ttl` or `…/index.ttl#this`) rather than the bare container, so strip
+ * any fragment/query, drop the trailing channel DOCUMENT when it is the exact
+ * supported SolidOS form, else append a trailing slash. Returns `undefined` for
+ * a non-http(s) or unparseable URL.
  *
- * @throws ChatScopeError when `containerUrl` is not within any of the user's own
- *   pods (a confused-deputy guard on a `?url=` param — never read/write an
- *   arbitrary container with the user's credentials).
+ * OVER-STRIPPING GUARD (roborev finding, Low): we ONLY drop the actually-supported
+ * channel-doc leaf (`index.ttl`). The previous "strip any final segment with a
+ * dot" heuristic mis-classified a legitimately-named container whose final
+ * segment merely CONTAINS a dot — e.g. `…/chat/team.v1` (no trailing slash) is
+ * the CONTAINER `…/chat/team.v1/`, NOT a document `…/team.v1` to be dropped to
+ * `…/chat/`. Over-stripping it would silently open the WRONG channel / WRONG
+ * scope. So any non-channel-doc final segment (dotted or not) is treated as the
+ * container the user named, and we simply ensure the trailing slash.
+ */
+export function chatContainerFromUrl(raw: string): string | undefined {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
+  u.hash = "";
+  u.search = "";
+  let path = u.pathname;
+  if (!path.endsWith("/")) {
+    const slash = path.lastIndexOf("/");
+    const lastSegment = slash >= 0 ? path.slice(slash + 1) : path;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(lastSegment);
+    } catch {
+      decoded = lastSegment;
+    }
+    // ONLY an EXACT supported SolidOS channel-doc leaf (`index.ttl`) is the
+    // channel DOCUMENT — drop it to reach the container. Every other final
+    // segment (a bare `team` OR a dotted-but-container `team.v1`) is the
+    // container the user means — just ensure the trailing slash.
+    if (CHANNEL_DOC_LEAVES.has(decoded)) {
+      path = slash >= 0 ? path.slice(0, slash + 1) : "/";
+    } else {
+      path = `${path}/`;
+    }
+  }
+  u.pathname = path;
+  return u.toString();
+}
+
+/**
+ * Open a chat at a container URL.
+ *
+ * SCOPE: a chat within one of the user's OWN pods is opened on the normal
+ * (auth-patched) path and is read/write for the native model, read-only for a
+ * detected `meeting:LongChat`. A FOREIGN-origin channel (`allowForeign:true`) is
+ * opened READ-ONLY on the pristine native fetch (the auth-patched global must
+ * never reach a third-party pod), and only if it passes the strict SSRF/outbound
+ * host validator (https, no credentials, no private/loopback/metadata host).
+ *
+ * @throws ChatScopeError when `containerUrl` is neither within the user's own
+ *   pods nor an allowed, validated foreign origin (a confused-deputy guard on a
+ *   `?url=` param — never read an arbitrary container with the user's
+ *   credentials, never read an unsafe foreign host at all).
  */
 export function openChat(opts: {
   containerUrl: string;
   storages: readonly string[];
   webId: string;
   fetchImpl?: typeof fetch;
+  /** Allow a foreign-origin channel (read-only, native-fetch, SSRF-guarded). */
+  allowForeign?: boolean;
 }): Chat {
-  const normalised = opts.containerUrl.endsWith("/") ? opts.containerUrl : `${opts.containerUrl}/`;
-  if (!isInOwnPods(normalised, opts.storages)) {
-    throw new ChatScopeError(normalised, opts.storages.join(", "));
+  const normalised = chatContainerFromUrl(opts.containerUrl);
+  if (!normalised) {
+    throw new ChatScopeError(opts.containerUrl, opts.storages.join(", "));
   }
-  return new Chat(normalised, opts.storages, opts.webId, opts.fetchImpl);
+  if (isInOwnPods(normalised, opts.storages)) {
+    return new Chat(normalised, opts.storages, opts.webId, opts.fetchImpl);
+  }
+  // Not in the user's pods. Only proceed for an explicitly-allowed foreign
+  // channel that passes the strict outbound validator; otherwise fail closed.
+  if (opts.allowForeign && isValidTargetUrl(normalised)) {
+    return new Chat(normalised, opts.storages, opts.webId, opts.fetchImpl, true);
+  }
+  throw new ChatScopeError(normalised, opts.storages.join(", "));
 }

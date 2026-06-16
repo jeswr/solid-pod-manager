@@ -231,3 +231,41 @@ Touched:
   global fetch.
 - `src/components/instant-nav.test.ts` — classifies `use-webid-search.ts` as a
   READ hook + exempts its query-driven hooks from the page registry (with reasons).
+
+## Private type index → preferences file (task #87, G1/P0 privacy) — Claude Opus 4.8 (Fable unavailable)
+
+Relocates the `solid:privateTypeIndex` link OFF the world-readable WebID card and
+INTO the owner-private Preferences Document (`space:preferencesFile`), per the
+type-index spec (https://solid.github.io/type-indexes/). The card-hosted link
+leaked the existence + URL of the user's private data index to the whole web;
+the fix discovers (or creates + WAC-locks owner-only) the prefs file, links the
+private index from there, migrates a legacy card link (move to prefs + strip
+from the card, idempotent), and falls back to the card for legacy pods. The
+public type index stays on the card (it is meant to be public). Fable unavailable
+at authoring time; upgrade candidates.
+
+New files:
+
+- `src/lib/preferences.ts` — typed `ProfilePreferencesAnchor` (card →
+  `space:preferencesFile`) + `PreferencesDoc` (`space:ConfigurationFile`) wrappers;
+  `ensurePreferencesFile` (discover/create-and-link, owner-only WAC via
+  `lockOwnerOnly` built on `@solid/object` `Authorization`/`AclResource`);
+  `resolvePrivateIndex` legacy-fallback helper lives in `type-index.ts`.
+- `src/lib/preferences.test.ts` — `parseRdf`/`n3.Writer`-driven tests (fetch
+  stubbed): owner-only ACL creation, create-and-link, reuse, fail-closed ACL PUT.
+
+Touched:
+
+- `src/lib/type-index.ts` — `resolvePrivateIndex` (prefs-first, legacy-card
+  fallback) + `discoverRegistrations` now resolves the private index that way.
+- `src/lib/type-index-write.ts` — `ensurePrivateIndexLink` + `migratePrivateIndexLink`
+  (move legacy card link to prefs, strip from card); bootstraps the private index
+  in the prefs file; tolerates a dangling legacy index pointer (mint-on-404).
+- `src/lib/type-index-manage.ts` — `listAllRegistrations` resolves the private
+  index via the prefs file (the `/settings/type-index` manager view).
+- `src/app/settings/type-index/page.tsx` — one-line privacy assurance on the
+  private-index card.
+- `src/lib/integrations/core/testing.ts` — memory pod now serves a
+  `Link: rel="acl"` header so ACL discovery works in write-path tests.
+- `src/lib/type-index-write.test.ts`, `src/lib/assign-task.test.ts` — updated to
+  the prefs-file-hosted private index + migration coverage.

@@ -74,6 +74,10 @@ export function createMemoryPod(): MemoryPod {
             headers: {
               "content-type": "text/turtle",
               etag: `"v${existing.version}"`,
+              // Advertise the per-resource ACL slot so ACL-discovery (the
+              // `Link: rel="acl"` GET) works against the memory pod — e.g. the
+              // owner-only WAC lock on a freshly-created preferences file.
+              link: `<${url}.acl>; rel="acl"`,
             },
           });
         }

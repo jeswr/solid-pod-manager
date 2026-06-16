@@ -150,7 +150,7 @@ function IndexGroup({
   const title = isPublic ? "Public type index" : "Private type index";
   const blurb = isPublic
     ? "Anyone can read these pointers — they help other apps discover your shared data."
-    : "Only you (and apps you allow) can read these pointers.";
+    : "Only you (and apps you allow) can read these pointers. Your private data index is referenced only from your private preferences file, not your public profile.";
 
   return (
     <Card>

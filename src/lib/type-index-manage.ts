@@ -17,9 +17,10 @@ import { DataFactory } from "n3";
 import { freshRdf } from "./rdf-read.js";
 import { writeResource } from "./pod-data.js";
 import {
+  ProfileTypeIndexAnchor,
   TypeIndexDataset,
   TypeRegistration,
-  typeIndexLinks,
+  resolvePrivateIndex,
   type RegisteredLocation,
 } from "./type-index.js";
 
@@ -63,7 +64,12 @@ export async function listAllRegistrations(
   profile: import("@rdfjs/types").DatasetCore,
   fetchImpl?: typeof fetch,
 ): Promise<ManagedTypeIndex> {
-  const links = typeIndexLinks(webId, profile);
+  // The public index is on the card; the private index is resolved the
+  // spec-compliant way (preferences file first, legacy card fallback) so the
+  // manager shows the index wherever it actually lives (task #87).
+  const publicIndex = new ProfileTypeIndexAnchor(webId, profile, DataFactory).publicIndex;
+  const { privateIndex } = await resolvePrivateIndex(webId, profile, fetchImpl);
+  const links = { publicIndex, privateIndex };
   const out: ManagedRegistration[] = [];
 
   for (const [kind, url] of [

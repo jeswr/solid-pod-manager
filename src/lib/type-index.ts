@@ -21,6 +21,7 @@ import {
 import { RdfFetchError } from "@jeswr/fetch-rdf";
 import { WebIdDataset } from "@solid/object";
 import { freshRdf } from "./rdf-read.js";
+import { preferencesFileLink, readPreferences } from "./preferences.js";
 import { DataFactory } from "n3";
 
 const SOLID = "http://www.w3.org/ns/solid/terms#";
@@ -114,13 +115,71 @@ export interface TypeIndexLinks {
   privateIndex?: string;
 }
 
-/** Read both `solid:*TypeIndex` links off the WebID subject of a profile dataset. */
+/**
+ * Read the `solid:*TypeIndex` links off the WebID subject of a profile dataset.
+ *
+ * NOTE on `privateIndex`: this is the **legacy** location. Per the type-index
+ * spec the private index is linked from the owner-private Preferences Document
+ * (`space:preferencesFile`), NOT the world-readable card — putting it on the
+ * card leaks the existence + URL of the private data index (task #87). The card
+ * value is still read here as a LEGACY FALLBACK for pods that pre-date the fix;
+ * the authoritative, spec-compliant resolution is {@link resolvePrivateIndex}.
+ */
 export function typeIndexLinks(
   webId: string,
   profile: import("@rdfjs/types").DatasetCore,
 ): TypeIndexLinks {
   const subject = new ProfileTypeIndexAnchor(webId, profile, DataFactory);
   return { publicIndex: subject.publicIndex, privateIndex: subject.privateIndex };
+}
+
+/** Where the private type index was found — drives the migration decision. */
+export type PrivateIndexSource = "preferences" | "card-legacy" | "none";
+
+/** The resolved private type index plus the document it was linked from. */
+export interface ResolvedPrivateIndex {
+  /** The private index URL, if one is linked anywhere. */
+  privateIndex?: string;
+  /** Where the link was found (preferences file = compliant; card = legacy). */
+  source: PrivateIndexSource;
+}
+
+/**
+ * Resolve the private type index the SPEC-COMPLIANT way, with a legacy fallback.
+ *
+ *   1. If the card links a `space:preferencesFile`, read it and return its
+ *      `solid:privateTypeIndex` (the compliant, owner-private location).
+ *   2. Otherwise fall back to the LEGACY `solid:privateTypeIndex` on the card
+ *      itself — so existing pods that pre-date the privacy fix keep working.
+ *
+ * An unreadable prefs file (404/403) does NOT silently fall through to the card
+ * value when the card itself links a prefs file: if the prefs file is linked but
+ * holds no private-index link, we report `none` (the migration will write it
+ * there), never the card (which may carry a stale legacy value). The card
+ * fallback only applies when NO prefs file is linked at all.
+ *
+ * @param fetchImpl - test-only override; **omit in production** so the
+ *   auth-patched global fetch runs (AGENTS.md §Reading data).
+ */
+export async function resolvePrivateIndex(
+  webId: string,
+  profile: import("@rdfjs/types").DatasetCore,
+  fetchImpl?: typeof fetch,
+): Promise<ResolvedPrivateIndex> {
+  const prefsFile = preferencesFileLink(webId, profile);
+  if (prefsFile) {
+    const prefs = await readPreferences(prefsFile, fetchImpl);
+    const fromPrefs = prefs
+      ? new ProfileTypeIndexAnchor(prefsFile, prefs.dataset, DataFactory).privateIndex
+      : undefined;
+    if (fromPrefs) return { privateIndex: fromPrefs, source: "preferences" };
+    return { source: "none" };
+  }
+  // No prefs file linked — legacy pod: the private index (if any) is on the card.
+  const legacy = new ProfileTypeIndexAnchor(webId, profile, DataFactory).privateIndex;
+  return legacy
+    ? { privateIndex: legacy, source: "card-legacy" }
+    : { source: "none" };
 }
 
 /**
@@ -214,9 +273,13 @@ export async function discoverRegistrations(
   profile: import("@rdfjs/types").DatasetCore,
   fetchImpl?: typeof fetch,
 ): Promise<DiscoveredRegistrations> {
-  const links = typeIndexLinks(webId, profile);
+  // The public index is on the card; the private index is resolved the
+  // spec-compliant way (preferences file first, legacy card fallback).
+  const publicIndex = new ProfileTypeIndexAnchor(webId, profile, DataFactory).publicIndex;
+  const { privateIndex } = await resolvePrivateIndex(webId, profile, fetchImpl);
+  const links: TypeIndexLinks = { publicIndex, privateIndex };
   const docs = await Promise.all(
-    [links.publicIndex, links.privateIndex]
+    [publicIndex, privateIndex]
       .filter((u): u is string => Boolean(u))
       .map((u) => readTypeIndex(u, fetchImpl)),
   );

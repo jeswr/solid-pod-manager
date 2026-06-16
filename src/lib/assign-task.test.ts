@@ -19,6 +19,7 @@ const ASSIGNEE = "https://bob.example/profile/card#me";
 const ASSIGNEE_DOC = "https://bob.example/profile/card";
 const ASSIGNEE_INBOX = "https://bob.example/inbox/";
 const INDEX = "https://alice.example/settings/privateTypeIndex.ttl";
+const PREFS = "https://alice.example/settings/preferences.ttl";
 
 /** A captured outbound request (method + url + parsed body, when Turtle). */
 interface Captured {
@@ -50,14 +51,23 @@ function parse(body: string | undefined): DatasetCore {
 }
 
 /**
- * The assigner's profile: advertises a private type index (so no bootstrap) and
- * a pod storage. The type index already has the issues/ registration so create()
- * makes no index write (keeps the routed mock simple).
+ * The assigner's profile: a pod storage + a (spec-compliant, owner-private)
+ * preferences file. The private type index is linked from the PREFS file, not
+ * the public card (task #87), so no migration/bootstrap fires. The type index
+ * already has the issues/ registration so create() makes no index write (keeps
+ * the routed mock simple).
  */
 const PROFILE_TTL = `
-  @prefix solid: <${SOLID}> .
+  @prefix space: <http://www.w3.org/ns/pim/space#> .
   @prefix pim: <http://www.w3.org/ns/pim/space#> .
   <${ASSIGNER}> pim:storage <${POD}> ;
+    space:preferencesFile <${PREFS}> .`;
+
+/** The owner-private preferences file holding the private-index link. */
+const PREFS_TTL = `
+  @prefix solid: <${SOLID}> .
+  @prefix space: <http://www.w3.org/ns/pim/space#> .
+  <${PREFS}> a space:ConfigurationFile ;
     solid:privateTypeIndex <${INDEX}> .`;
 
 const INDEX_TTL = `
@@ -105,6 +115,7 @@ function mockFetch(
     if (url === ASSIGNER || url === ASSIGNER_DOC) {
       if (method === "GET") return ttl(PROFILE_TTL);
     }
+    if (url === PREFS && method === "GET") return ttl(PREFS_TTL);
     if (url === INDEX && method === "GET") return ttl(INDEX_TTL);
 
     // ── Assignee profile (inbox discovery for the Announce) ──
@@ -420,6 +431,7 @@ describe("assignTask — rolls back the task on grant failure (no orphan, no dup
       const method = (init?.method ?? "GET").toUpperCase();
       captured.push({ url, method, headers: headerObj(init?.headers) });
       if (url === ASSIGNER || url === ASSIGNER_DOC) return ttl(PROFILE_TTL);
+      if (url === PREFS) return ttl(PREFS_TTL);
       if (url === INDEX) return ttl(INDEX_TTL);
       if (url === `${POD}issues/` || url === POD) {
         return new Response("", {

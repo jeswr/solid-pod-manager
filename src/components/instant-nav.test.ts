@@ -214,6 +214,23 @@ const STORAGE_SCOPED_HOOKS: StorageScopedHook[] = [
     keyFor: (s) => `connected-apps:${s}`,
     value: (s) => ({ apps: [{ agentId: `a-${s}`, name: "App" }], ctx: {} }),
   },
+  // Pod-backed app preferences (task #89). The prefs FILE is per-WebID, but the
+  // key is storage-scoped (ensuring it on a write needs the active storage and
+  // the prefs belong to that pod) — so a same-WebID storage switch must change
+  // the key and never paint the other storage's prefs.
+  {
+    hook: "useAppPrefs",
+    keyFor: (s) => `app-prefs:${s}`,
+    value: (s) => ({
+      community: {
+        matrixRooms: [`#room-${s}:matrix.org`],
+        discourseTopicIds: [],
+        includeDiscourseLatest: true,
+        readMarker: {},
+      },
+      extra: {},
+    }),
+  },
 ];
 
 describe("instant-nav: a SAME-WebID active-storage switch never paints the previous storage's data", () => {
@@ -274,6 +291,7 @@ describe("instant-nav: a SAME-WebID active-storage switch never paints the previ
       "usePeople",
       "useAssignedTasks",
       "useConnectedApps",
+      "useAppPrefs",
     ]) {
       expect(covered, `storage-switch guard missing ${h}`).toContain(h);
     }
@@ -319,7 +337,8 @@ const READ_HOOKS: readonly string[] = [
   "use-permissions.ts", // useConnectedApps (already converted; getFreshModel for mutations)
   "use-federation-tasks.ts", // useAssignedTasks (already converted)
   "use-webid-search.ts", // useWebIdSearch/useIsIndexed (query-driven panel reads, see NON_REGISTRY note)
-  "use-community.ts", // useCommunityFeed (useCommunityPrefs is localStorage state, exempt below)
+  "use-community.ts", // useCommunityFeed (useCommunityPrefs facades useAppPrefs, exempt below)
+  "use-app-prefs.ts", // useAppPrefs (pod-backed app preferences, task #89)
 ];
 
 /**
@@ -361,8 +380,10 @@ const NON_REGISTRY_READ_HELPERS: ReadonlySet<string> = new Set([
   // navigable read PAGE with a fixed cache slot; it lives in /contacts (which has its own
   // registry entry) and goes through useSwrRead, so it is still cached for re-typed queries.
   "useIsIndexed", // QUERY-driven index existence probe (key webid-indexed:<webid>); same — no own page slot.
-  "useCommunityPrefs", // channel subscriptions + read-markers from localStorage (per-WebID state),
-  // NOT a navigable read with its own SWR cache slot — the cached read is useCommunityFeed
+  "useCommunityPrefs", // a Community-view-shaped FACADE over useAppPrefs (task #89): channel
+  // subscriptions + read-markers, now pod-backed. NOT a navigable read with its OWN SWR cache
+  // slot — the cached read it delegates to (useAppPrefs, `app-prefs:<storage>`) has the registry
+  // entry; this just reshapes that model for the Community page.
 ]);
 
 /** Every `use-*.ts` (excluding tests) under src/components. */

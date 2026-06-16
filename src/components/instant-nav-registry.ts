@@ -200,6 +200,27 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
     seed: (c) => c.set(WEBID, `assigned-tasks:${STORAGE}`, [{ task: { title: "t" } }]),
   },
   {
+    hook: "useAppPrefs",
+    source: "use-app-prefs.ts",
+    page: "/community + /settings (pod-backed app preferences, task #89)",
+    // Storage-scoped (`app-prefs:<activeStorage>`): the prefs FILE is per-WebID,
+    // but ENSURING/creating it on a write needs the active storage and the prefs
+    // belong to that pod, so a SAME-WebID storage switch must change the key and
+    // revalidate rather than paint the other storage's prefs (the active-storage
+    // SWR rule). Built by `appPrefsKey`.
+    key: `app-prefs:${STORAGE}`,
+    seed: (c) =>
+      c.set(WEBID, `app-prefs:${STORAGE}`, {
+        community: {
+          matrixRooms: ["#solid_project:matrix.org"],
+          discourseTopicIds: [],
+          includeDiscourseLatest: true,
+          readMarker: {},
+        },
+        extra: {},
+      }),
+  },
+  {
     hook: "useCommunityFeed",
     source: "use-community.ts",
     page: "/community (Solid Community — forum + Matrix rooms)",

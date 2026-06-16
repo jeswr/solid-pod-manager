@@ -309,6 +309,13 @@ const CODECS: readonly CodecRule[] = [
   // (both defined above) — the codec and the key are two ends of one snapshot.
   { match: { prefix: ASSIGNED_TASKS_KEY_PREFIX }, codec: assignedTasksCodec() },
   { match: { prefix: "category-items:" }, codec: jsonCodec() },
+  // Pod-backed APP PREFERENCES (task #89). The key is storage-scoped
+  // (`app-prefs:<activeStorage>`), so a DELIMITED prefix. The AppPrefs model is
+  // JSON-PLAIN (strings/numbers/booleans + Record<string,string> read markers +
+  // extra), with NO Date/Set/Map/URL field, so the identity jsonCodec round-trips
+  // it faithfully — this is the localStorage MIRROR that paints the Community/
+  // settings prefs instantly before the authoritative pod read revalidates.
+  { match: { prefix: "app-prefs:" }, codec: jsonCodec() },
 ];
 
 /**

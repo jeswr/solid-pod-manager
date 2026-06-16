@@ -45,6 +45,7 @@ import { contactsStore } from "./contacts.js";
 import { buildPeopleOptions } from "./people-search.js";
 import { listDomains, domainsApiBase } from "./domains.js";
 import { assignedTasksKey, connectedAppsKey } from "./durable-cache.js";
+import { appPrefsKey, fetchAppPrefs } from "./app-prefs.js";
 import { discoverAssignedTasks } from "./federation-tasks.js";
 import { inboxFor } from "./inbox.js";
 import { listFolder, asContainerUrl } from "./files.js";
@@ -228,6 +229,16 @@ export function buildPrefetchTargets(ctx: PrefetchContext): PrefetchTarget[] {
       label: "useFolder(root)",
       key: `files:${root}`,
       fetch: () => listFolder(root),
+    });
+
+    // useAppPrefs — `app-prefs:<activeStorage>` (the pod-backed app preferences,
+    // task #89). Storage-scoped (the SAME `appPrefsKey` builder the hook uses) so
+    // /community + /settings paint instantly on first visit. A cheap pod read of
+    // the per-WebID preferences file; reading never creates a resource.
+    targets.push({
+      label: "useAppPrefs",
+      key: appPrefsKey(activeStorage),
+      fetch: (id) => fetchAppPrefs(id),
     });
 
     // useItems for each productivity store — `productivity:<container>`.

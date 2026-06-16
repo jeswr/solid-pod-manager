@@ -93,6 +93,24 @@ vi.mock("@/lib/federation-tasks", () => ({
   discoverAssignedTasks: vi.fn(async () => [{ task: { title: "t" } }]),
 }));
 
+// app-prefs — keep the REAL appPrefsKey (storage-scoped key formula, part of the
+// single-source-of-truth contract); mock only the network-touching fetchAppPrefs.
+vi.mock("@/lib/app-prefs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/app-prefs")>();
+  return {
+    ...actual,
+    fetchAppPrefs: vi.fn(async () => ({
+      community: {
+        matrixRooms: ["#solid_project:matrix.org"],
+        discourseTopicIds: [],
+        includeDiscourseLatest: true,
+        readMarker: {},
+      },
+      extra: {},
+    })),
+  };
+});
+
 // contactsStore — used by usePeople + useAssignedTasks. A store whose `.list()`
 // returns one contact carrying a WebID.
 vi.mock("@/lib/contacts", () => ({
@@ -173,6 +191,7 @@ const EXPECTED_WARM_KEYS: ExpectedKey[] = [
   { label: "usePeople", key: `people:${STORAGE}` },
   { label: "useDomains", key: `domains:${new URL(STORAGE).origin}` },
   { label: "useAssignedTasks", key: assignedTasksKey(STORAGE) },
+  { label: "useAppPrefs", key: `app-prefs:${STORAGE}` },
   { label: "useFolder(root)", key: `files:${STORAGE}` },
   { label: "useItems(notes)", key: `productivity:${STORAGE}notes/` },
   { label: "useItems(calendar)", key: `productivity:${STORAGE}calendar/` },

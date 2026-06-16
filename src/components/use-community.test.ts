@@ -77,9 +77,11 @@ describe("useCommunityFeed structural wiring", () => {
   });
 
   it("persists prefs only for non-secret data (no token in prefs persistence)", () => {
-    // markRead / setPrefs touch community-prefs (localStorage); credentials live
-    // in the separate in-memory community-credentials module.
-    expect(SOURCE).toContain("saveCommunityPrefs");
+    // markRead / setPrefs persist via the POD-BACKED useAppPrefs facade (task
+    // #89); credentials live in the separate in-memory community-credentials
+    // module and must never be written through the prefs path.
+    expect(SOURCE).toContain("useAppPrefs");
+    expect(SOURCE).toContain("setCommunity");
     expect(SOURCE).not.toContain("matrixAccessToken");
   });
 
@@ -111,10 +113,11 @@ describe("useCommunityFeed structural wiring", () => {
 
   it("does NOT fetch the feed off default prefs before saved prefs load (loaded gate)", () => {
     // The feed key is "" until prefs are loaded for the WebID, so no external
-    // request fires off the unsaved defaults (roborev finding, Medium). Prefs are
-    // also lazily initialised synchronously from storage when the WebID is known.
+    // request fires off the unsaved defaults (roborev finding, Medium). With the
+    // pod-backed facade (task #89), `loaded` is driven by useAppPrefs's SWR load
+    // (true once a cached/fresh value is in hand), then gates the feed key.
     expect(SOURCE).toMatch(/loaded \? prefsKey\(prefs, matrixConnected\) : ""/);
-    expect(SOURCE).toContain("loadedFor");
+    expect(SOURCE).toContain("loaded = !app.loading");
     expect(SOURCE).toContain("loaded: boolean");
   });
 });

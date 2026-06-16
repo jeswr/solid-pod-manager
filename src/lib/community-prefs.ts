@@ -3,15 +3,17 @@
  * Community-view preferences — which channels the user subscribes to, plus the
  * per-thread read-markers used to compute unread counts.
  *
- * INTERIM STORAGE NOTE: these non-secret preferences are persisted in
- * `localStorage`, scoped per WebID. The pod is the eventual home (per the
- * credentials-in-pod / pod-data conventions) — but the unified-feed package is
- * experimental and read-first, and inventing/committing an RDF vocab for an
- * experimental surface is premature. `localStorage` matches how the SWR durable
- * cache and login-UX already persist client-side state, and keeps the feature
- * shippable today. The store is split into a pure (storage-injected) core so it
- * is fully unit-testable in the no-DOM `node` test env and can be re-pointed at
- * a pod resource later without touching the hook/page.
+ * STORAGE (task #89, G2/P0): these preferences are now POD-BACKED. The
+ * AUTHORITATIVE store is the user's owner-private pod preferences file (see
+ * {@link file://./app-prefs.ts}, which models the {@link CommunityPrefs} shape as
+ * RDF on a `pm:AppPreferences` subject and composes with the G1 preferences
+ * file); `localStorage` survives only as the SWR-durable instant-paint MIRROR
+ * (the `app-prefs:` durable codec) plus the SOURCE the one-time migration reads.
+ * This module remains the pure (storage-injected) {@link CommunityPrefs} shape +
+ * its load/save/coerce/markThreadRead helpers — used by the migration
+ * (`loadCommunityPrefs` reads the legacy localStorage to migrate it up) and as
+ * the model the Community view renders. The pure split keeps it unit-testable in
+ * the no-DOM `node` env.
  *
  * SECURITY: this holds NO credentials (those live in `community-credentials.ts`,
  * in memory only). Only channel selections + read positions live here.

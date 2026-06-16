@@ -1,9 +1,11 @@
 // AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate; see docs/MODEL-PROVENANCE.md
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
+import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { useSwrRead } from "@/components/use-swr-read";
+import { useAppPrefs } from "@/components/use-app-prefs";
 import { memoryReadCache } from "@/lib/swr-cache";
 import type { RevalidatableState } from "@/components/use-pod-data";
 import { fetchCommunityFeed, type FeedResult } from "@/lib/community-feeds";
@@ -12,88 +14,73 @@ import {
   hasMatrixCredential,
 } from "@/lib/community-credentials";
 import {
-  browserPrefsStorage,
   type CommunityPrefs,
-  defaultCommunityPrefs,
-  loadCommunityPrefs,
   markThreadRead,
-  saveCommunityPrefs,
 } from "@/lib/community-prefs";
 
 /**
- * `useCommunityPrefs` — the user's persisted channel subscriptions + read
- * markers. Loaded from (per-WebID) localStorage on mount, persisted on every
- * change. INTERIM storage (see `community-prefs.ts`); the pod is the eventual
- * home. Mutations are immutable updates so React state stays sound.
+ * `useCommunityPrefs` — the user's channel subscriptions + read markers, now
+ * POD-BACKED (task #89, G2/P0). This is a thin Community-view-shaped facade over
+ * {@link useAppPrefs}: the pod is AUTHORITATIVE; localStorage is only the
+ * SWR-durable instant-paint MIRROR. The Community page's contract is unchanged
+ * (`prefs` / `loaded` / `setPrefs` / `markRead`), so it consumes this with no
+ * edits. Mutations are OPTIMISTIC + non-blocking (paint now, persist async,
+ * revert + toast on failure) with a "Saving…" indicator surfaced via `sonner`.
  */
 export function useCommunityPrefs(): {
   prefs: CommunityPrefs;
   /**
-   * True once prefs have been loaded from storage for the active WebID. Until
-   * then the feed must NOT fetch — the initial `prefs` is the unsaved DEFAULT,
-   * and firing the feed off it would make external requests for the default
-   * channels even though the user may have removed/disabled them (roborev
-   * finding, Medium).
+   * True once prefs have been loaded for the active WebID (cached or fresh).
+   * Until then the feed must NOT fetch — the initial `prefs` is the unsaved
+   * DEFAULT, and firing the feed off it would make external requests for the
+   * default channels even though the user may have removed/disabled them
+   * (roborev finding, Medium). With the SWR mirror, a warm cache makes this true
+   * on the FIRST paint; a cold first-ever load resolves it once the pod read
+   * settles (returning the stored prefs, or the defaults when none are stored).
    */
   loaded: boolean;
-  /** Persist a new prefs object. */
+  /** Persist a new prefs object (optimistic + non-blocking). */
   setPrefs: (next: CommunityPrefs) => void;
   /** Mark a thread read at `position` (numeric string), persisting it. */
   markRead: (threadId: string, position: string) => void;
 } {
   const { webId } = useSession();
-  // Lazy SYNCHRONOUS init: when the WebID is already known on first render
-  // (the common case — the shell renders /community only inside a session),
-  // seed prefs from storage immediately so the feed never fetches off defaults.
-  const [state, setState] = useState<{ prefs: CommunityPrefs; loadedFor: string | null }>(() =>
-    webId
-      ? { prefs: loadCommunityPrefs(webId, browserPrefsStorage()), loadedFor: webId }
-      : { prefs: defaultCommunityPrefs(), loadedFor: null },
-  );
-  const prefs = state.prefs;
-  const loaded = state.loadedFor === (webId ?? null) && webId != null;
 
-  // (Re)load this WebID's prefs when the WebID becomes known or changes (account
-  // switch). Credential carry-over is guarded by the MODULE-level owner check
-  // (NOT a component ref, which re-inits to undefined on every mount and would
-  // falsely disconnect Matrix on each remount): a same-WebID remount is a no-op;
-  // a real account switch (or logout) drops the previous account's token.
+  // A successful write toasts "Saved"; a failure reverts + toasts the error.
+  const app = useAppPrefs({
+    onError: (e) => toast.error(`Couldn't save your community settings: ${e.message}`),
+  });
+
+  const prefs = app.prefs.community;
+  // Loaded once a value (cached or fresh) is in hand for this account.
+  const loaded = !app.loading && webId != null;
+
+  // Drop the previous account's in-memory Matrix token on a real account switch
+  // (module-level owner check; a same-WebID remount is a no-op). Preserved from
+  // the pre-pod implementation so a logout/switch still disconnects Matrix.
   useEffect(() => {
     clearCommunityCredentialsIfOwnerChanged(webId);
-    if (!webId) {
-      setState({ prefs: defaultCommunityPrefs(), loadedFor: null });
-      return;
-    }
-    setState({ prefs: loadCommunityPrefs(webId, browserPrefsStorage()), loadedFor: webId });
   }, [webId]);
 
-  const setPrefsState = useCallback(
-    (updater: CommunityPrefs | ((prev: CommunityPrefs) => CommunityPrefs)) => {
-      setState((s) => ({
-        ...s,
-        prefs: typeof updater === "function" ? updater(s.prefs) : updater,
-      }));
-    },
-    [],
-  );
+  const setCommunity = app.setCommunity;
 
   const setPrefs = useCallback(
     (next: CommunityPrefs) => {
-      setPrefsState(next);
-      if (webId) saveCommunityPrefs(webId, next, browserPrefsStorage());
+      setCommunity(next);
     },
-    [webId, setPrefsState],
+    [setCommunity],
   );
 
   const markRead = useCallback(
     (threadId: string, position: string) => {
-      setPrefsState((prev) => {
-        const next = markThreadRead(prev, threadId, position);
-        if (next !== prev && webId) saveCommunityPrefs(webId, next, browserPrefsStorage());
-        return next;
-      });
+      // FUNCTIONAL updater computed from the LIVE prefs (the cache value inside
+      // setCommunity), NOT stale React state — so two read-marks fired before a
+      // re-render compose instead of overwriting each other (roborev Medium).
+      // `markThreadRead` returns the SAME object for a non-advancing mark, so a
+      // stale re-mark is a no-op and never churns the pod.
+      setCommunity((prev) => markThreadRead(prev, threadId, position));
     },
-    [webId, setPrefsState],
+    [setCommunity],
   );
 
   return { prefs, loaded, setPrefs, markRead };

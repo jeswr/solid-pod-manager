@@ -269,3 +269,57 @@ Touched:
   `Link: rel="acl"` header so ACL discovery works in write-path tests.
 - `src/lib/type-index-write.test.ts`, `src/lib/assign-task.test.ts` — updated to
   the prefs-file-hosted private index + migration coverage.
+
+## App preferences in the pod (task #89, G2/P0) — Claude Opus 4.8 (Fable unavailable)
+
+Moves Pod Manager's own UI/UX preferences (Community channel subscriptions +
+per-thread read markers, theme, a generic small key→value escape hatch) OUT of
+`localStorage` (which no longer follows the user across devices/browsers and is
+lost on cache-clear) and INTO the owner-private pod preferences file, composing
+with G1 (#87): app-prefs are a dedicated `pm:AppPreferences` subject
+(`<prefsFile>#podmanager`) inside G1's `space:preferencesFile`, inheriting its
+owner-only WAC. The pod is AUTHORITATIVE; `localStorage` survives only as the
+SWR-durable instant-paint MIRROR (the `app-prefs:` durable codec) and the source
+of the one-time migration. Reads go through `useSwrRead("app-prefs:<storage>",
+…)` (cache-first paint + background pod revalidate + durable cold-open); writes
+are optimistic + non-blocking (paint+cache now, persist async, revert + toast on
+failure, "Saving…" indicator). A one-time, idempotent migration writes legacy
+localStorage Community prefs up to the pod on first load when the pod has none.
+Typed `@rdfjs/wrapper` accessors only; the write is conditional (`If-Match`) and
+preserves every foreign triple (G1's `solid:privateTypeIndex` link survives).
+Fable unavailable at authoring time; upgrade candidates.
+
+New files:
+
+- `src/lib/app-prefs.ts` — the pod-backed model: typed `AppPreferences` /
+  `PrefEntry` `@rdfjs/wrapper` subjects (`pm:` vocab, `https://w3id.org/jeswr/pod-manager#`);
+  `readAppPrefs`/`buildAppPrefsDataset` (RDF round-trip, foreign-triple-preserving
+  read-modify-write); `fetchAppPrefs`/`writeAppPrefs` (ensure-via-G1 → conditional
+  PUT); `migrateLegacyPrefs` (one-time, idempotent) + its gates
+  (`isUnstoredDefault`/`legacyHasCustomisation`); `persistOptimistic`
+  (optimistic write + revert); `appPrefsKey` (storage-scoped SWR key).
+- `src/components/use-app-prefs.ts` — `useAppPrefs` read hook (SWR over the
+  durable mirror + background pod revalidate), optimistic `setPrefs`/`setCommunity`,
+  one-time migration effect, "Saving…" flag.
+- `src/lib/app-prefs.test.ts` — `parseRdf`/`n3.Writer`-driven tests (fetch
+  stubbed; in-memory storage/cache doubles): RDF round-trip, foreign-triple
+  preservation, orphan removal, read-from-pod (defaults on miss), one-time +
+  idempotent migration, optimistic write + revert, cross-storage key isolation,
+  localStorage-mirror cold-open.
+
+Touched:
+
+- `src/components/use-community.ts` — `useCommunityPrefs` is now a thin
+  Community-view-shaped facade over `useAppPrefs` (pod-backed); the Community
+  page is unchanged. `useCommunityFeed` wiring untouched.
+- `src/lib/community-prefs.ts` — doc note updated: pod is authoritative,
+  localStorage is the mirror + migration source; the pure `CommunityPrefs`
+  shape + helpers remain.
+- `src/lib/durable-cache.ts` — registers the `app-prefs:` JSON durable codec
+  (the localStorage mirror).
+- `src/lib/prefetch.ts` — proactive prefetch target for `useAppPrefs`
+  (instant first visit to /community + /settings).
+- `src/components/instant-nav-registry.ts`, `src/components/instant-nav.test.ts`,
+  `src/components/instant-nav-prefetch.test.ts`, `src/components/use-community.test.ts`
+  — registry entry + structural/storage-switch/prefetch-completeness coverage
+  for `useAppPrefs`; updated `useCommunityPrefs` exemption + facade assertions.

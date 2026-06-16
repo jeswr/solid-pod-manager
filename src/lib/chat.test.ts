@@ -551,13 +551,47 @@ describe("Chat — meeting:LongChat detect-and-read (read-first interop)", () =>
     }) as unknown as typeof fetch;
 
     const chat = new Chat(CONTAINER, [STORAGE], WEBID, fetchImpl);
-    await chat.messages();
+    // The bounded walk CLIPS this oversized tree, so messages() FAILS CLOSED with
+    // a visible error rather than rendering a deceptively-complete partial history
+    // (never present incomplete history as complete). The point of the test is
+    // that it does so AFTER only a bounded number of fetches.
+    await expect(chat.messages()).rejects.toBeInstanceOf(ChatMessageError);
     // The total number of directory LISTINGS is hard-bounded by the budget (1024)
     // — orders of magnitude below the multiplicative worst case (~2,020,200). The
     // walk MUST hit its budget here (the tree is far wider than the cap), proving
     // the guard actually engaged rather than the tree being trivially small.
     expect(listingCalls).toBeLessThanOrEqual(1024);
     expect(listingCalls).toBeGreaterThan(200); // descended past the year frontier
+  });
+
+  it("a NORMAL-sized long-chat (within caps) renders WITHOUT a truncation error", async () => {
+    // Regression: the truncation fail-closed must NOT fire for an honest channel
+    // that fits inside the caps — only one year/month/day with a single chat.ttl.
+    const YEAR = `${CONTAINER}2026/`;
+    const MONTH = `${YEAR}04/`;
+    const DAY = `${MONTH}07/`;
+    const DATED = `${DAY}chat.ttl`;
+    const DATED_BODY = `
+      @prefix dct:  <http://purl.org/dc/terms/> .
+      @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+      @prefix sioc: <http://rdfs.org/sioc/ns#> .
+      @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+      <#m> sioc:content "within caps" ; dct:created "2026-04-07T11:00:00Z"^^xsd:dateTime ;
+        foaf:maker <https://carol.example/profile/card#me> .`;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === INDEX) return ttlResponse(LONGCHAT_INDEX);
+      if (url === CONTAINER)
+        return ttlResponse(containerListing([{ url: INDEX }, { url: YEAR, container: true }]));
+      if (url === YEAR) return ttlResponse(containerListing([{ url: MONTH, container: true }]));
+      if (url === MONTH) return ttlResponse(containerListing([{ url: DAY, container: true }]));
+      if (url === DAY) return ttlResponse(containerListing([{ url: DATED }]));
+      if (url === DATED) return ttlResponse(DATED_BODY);
+      return notFound();
+    }) as unknown as typeof fetch;
+    const chat = new Chat(CONTAINER, [STORAGE], WEBID, fetchImpl);
+    const msgs = await chat.messages(); // resolves — no truncation
+    expect(msgs.map((m) => m.content)).toEqual(["Hello from SolidOS", "within caps"]);
   });
 });
 

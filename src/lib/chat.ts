@@ -344,7 +344,20 @@ export class Chat {
     const datasets: import("@rdfjs/types").DatasetCore[] = [indexDataset];
     // Collect dated chat files under the container (bounded: container →
     // YYYY → MM → DD → chat.ttl). A foreign listing uses the native fetch.
-    const fileUrls = await this.collectLongChatFiles();
+    const { files: fileUrls, truncated } = await this.collectLongChatFiles();
+    // NEVER PRESENT INCOMPLETE HISTORY AS COMPLETE (roborev finding, Medium): if
+    // the bounded walk actually HIT one of its caps (more dated files / dirs exist
+    // than we read), silently returning the partial set would render a truncated
+    // conversation as if it were the whole history. Mirroring the partial-read
+    // guards above, we fail closed with a visible error instead. (The caps still
+    // protect against a hostile/wide tree — an honest channel this large simply
+    // surfaces an explicit "too large to show fully" error rather than a
+    // deceptively short log.)
+    if (truncated) {
+      throw new ChatMessageError(
+        "This chat has more history than can be shown here. It may have been created by another app — open it there to see the full conversation.",
+      );
+    }
     const more = await Promise.all(
       fileUrls.map(async (url) => {
         try {
@@ -399,7 +412,7 @@ export class Chat {
    * Only same-origin descendants of the container are followed; foreign listings
    * go through the native fetch.
    */
-  private async collectLongChatFiles(): Promise<string[]> {
+  private async collectLongChatFiles(): Promise<{ files: string[]; truncated: boolean }> {
     const MAX_FILES = 366; // a year of daily files — generous, but bounded
     const MAX_FRONTIER = 512; // max directories carried into the NEXT depth
     const MAX_LISTINGS = 1024; // hard ceiling on total listContainer calls
@@ -409,6 +422,11 @@ export class Chat {
     const out: string[] = [];
     let frontier: string[] = [this.containerUrl];
     let listings = 0; // total listContainer calls issued (the request budget)
+    // TRUNCATION FLAG: set when ANY bound actually clips real history (a frontier
+    // we could not fully widen, a budget we exhausted mid-walk, or a file list we
+    // capped). The caller fails closed on it so a clipped history is NEVER rendered
+    // as if complete (roborev finding, Medium).
+    let truncated = false;
     for (let depth = 0; depth < DIR_PATTERN.length && frontier.length > 0; depth++) {
       // Dedup + cap the NEXT depth's frontier so a wide/repeating tree cannot
       // amplify the fetch count. Once `MAX_FRONTIER` distinct dirs are queued we
@@ -419,6 +437,7 @@ export class Chat {
       for (const dir of frontier) {
         if (listings >= MAX_LISTINGS) {
           budgetExhausted = true; // total request budget spent — stop the walk
+          truncated = true; // dirs remained unlisted → history may be incomplete
           break;
         }
         let entries: { url: string; isContainer: boolean }[];
@@ -437,10 +456,14 @@ export class Chat {
           throw e;
         }
         for (const entry of entries) {
-          if (next.size >= MAX_FRONTIER) break; // width cap — stop widening
           if (!entry.isContainer || !this.isUnderContainer(entry.url)) continue;
           const name = this.lastSegment(entry.url);
-          if (DIR_PATTERN[depth].test(name)) next.add(entry.url);
+          if (!DIR_PATTERN[depth].test(name)) continue;
+          if (next.size >= MAX_FRONTIER) {
+            truncated = true; // a matching date dir we could not carry forward
+            break; // width cap — stop widening this depth
+          }
+          next.add(entry.url);
         }
       }
       frontier = [...next];
@@ -449,11 +472,14 @@ export class Chat {
     // `frontier` now holds the `YYYY/MM/DD/` leaf containers — collect each one's
     // `chat.ttl` (and only that file), capped to MAX_FILES.
     for (const dir of frontier) {
-      if (out.length >= MAX_FILES) break;
+      if (out.length >= MAX_FILES) {
+        truncated = true; // more leaf days than the file cap → history clipped
+        break;
+      }
       const fileUrl = `${dir}${CHAT_FILE}`;
       if (this.isUnderContainer(fileUrl)) out.push(fileUrl);
     }
-    return out;
+    return { files: out, truncated };
   }
 
   /** The final path segment of a (container or file) URL, decoded; `""` on parse error. */

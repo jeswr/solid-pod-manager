@@ -123,7 +123,13 @@ function ChatView({ containerUrl }: { containerUrl: string }) {
         </ul>
       )}
 
+      {/* The compose box is shown ONLY for a successfully-loaded, in-scope,
+          writable chat. Hiding it on ANY error (not just readOnly) covers the
+          unsupported-channel / partial-history error paths too — a channel we
+          could not classify as writable native must never offer a send box that
+          would then reject (roborev finding, Low). */}
       {!outOfScope &&
+        !error &&
         (readOnly ? (
           <p
             className="rounded-xl border border-dashed border-border bg-muted/40 p-3 text-sm text-muted-foreground"

@@ -6,12 +6,18 @@ import { readFileSync, writeFileSync, mkdtempSync, cpSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+// The Node-only main entry of the shared model re-exports `taskShapeTtl`, which
+// reads the canonical shape via `node:fs`. This is a Node-side test (the `node`
+// vitest env), so importing it here is fine — it is the runtime source of truth
+// for the vendored copy, asserted byte-identical below. (The browser bundle
+// imports the `./task` subpath instead, which never touches `node:fs`.)
+import { taskShapeTtl } from "@jeswr/solid-task-model";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..", "..", ".."); // src/lib/shacl → repo root
 const CHECK_SCRIPT = join(REPO_ROOT, "scripts", "check-shapes.mjs");
 const LOCK_PATH = join(HERE, "shapes-lock.json");
-const SHAPE_PATH = join(HERE, "shapes", "issue.ttl");
+const SHAPE_PATH = join(HERE, "shapes", "task.ttl");
 
 function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -25,7 +31,13 @@ describe("shapes-lock.json hash-pin", () => {
 
   it("the pinned sha256 equals the actual file hash", () => {
     const lock = JSON.parse(readFileSync(LOCK_PATH, "utf8"));
-    expect(lock.shapes["shapes/issue.ttl"].sha256).toBe(sha256(SHAPE_PATH));
+    expect(lock.shapes["shapes/task.ttl"].sha256).toBe(sha256(SHAPE_PATH));
+  });
+
+  it("the vendored task.ttl is byte-identical to the package's taskShapeTtl()", () => {
+    // The vendored copy must not drift from the SHARED model's canonical shape —
+    // PM validates against the exact same contract every other suite app uses.
+    expect(readFileSync(SHAPE_PATH, "utf8")).toBe(taskShapeTtl());
   });
 
   it("a drifted shape FAILS the guard (a vendored shape cannot change silently)", () => {
@@ -40,7 +52,7 @@ describe("shapes-lock.json hash-pin", () => {
       cpSync(HERE, shaclDir, { recursive: true });
 
       // Drift: append a byte to the vendored shape so its hash no longer matches.
-      const driftedShape = join(shaclDir, "shapes", "issue.ttl");
+      const driftedShape = join(shaclDir, "shapes", "task.ttl");
       writeFileSync(driftedShape, readFileSync(driftedShape, "utf8") + "\n# tampered\n");
 
       let threw = false;

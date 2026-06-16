@@ -2,51 +2,68 @@
 /**
  * Issues (lightweight tracker) — one `wf:Task` per resource under `issues/`.
  *
- * **Class choice.** We use the SolidOS workflow ontology term
- * `http://www.w3.org/2005/01/wf/flow#Task` (`wf:Task`) — the same family
- * SolidOS's own issue-tracker pane reads/writes, so issues created here are
- * re-readable there. Fields map to `dct:title`, `dct:description`,
- * `dct:created` (`xsd:dateTime`), state via `rdf:type wf:Open`/`wf:Closed`
- * (the canonical solid-issues model), and an optional `wf:assignee` WebID.
+ * **Shared federated model (federation linchpin).** The RDF read/write of an
+ * issue now goes through the SHARED `@jeswr/solid-task-model` package
+ * (`Task` / `parseTask` / `buildTask`), the single data contract every suite app
+ * agrees on. solid-issues writes/reads the SAME predicates through the same
+ * package, so a task created in solid-issues shows up in PM (and vice-versa).
+ * Critically, the shared builder co-writes BOTH `wf:description` AND
+ * `dct:description`, so solid-issues' `wf:description`-first reader no longer
+ * misses a PM-authored body, and PM no longer misses a solid-issues body.
+ *
+ * **Class choice.** The class is `http://www.w3.org/2005/01/wf/flow#Task`
+ * (`wf:Task`) — the same family SolidOS's own issue-tracker pane reads/writes.
+ * Fields map to `dct:title`, `wf:description` + `dct:description`, `dct:created`
+ * (`xsd:dateTime`), state via `rdf:type wf:Open`/`wf:Closed`, and an optional
+ * `wf:assignee` WebID — all via the shared model's typed accessors.
+ *
+ * **App-local refinement — the three-band state (PM-specific, layered on top).**
+ * The shared wire state is a BINARY open/closed so it federates cleanly. PM
+ * carries an extra "in-progress" band as a PM-scoped `rdf:type` subclass
+ * ({@link WF_IN_PROGRESS_CLASS}) ALONGSIDE `wf:Open`. A foreign consumer (e.g.
+ * solid-issues) sees only `wf:Open` → "open" and is correct; PM reads the extra
+ * subclass to recover the three-band distinction locally. This refinement is
+ * applied on top of the shared `buildTask`/`parseTask` output — the shared model
+ * never knows about it (pss-qec D4 — per-tracker fragment scheme).
  *
  * **State model (federation-compatible, pss-qec).**
- * State is expressed as `rdf:type wf:Open` or `rdf:type wf:Closed` — the
- * dereferenceable, solid-issues-compatible vocabulary. The old `wf:state`
- * literal (`"open"` / `"in-progress"` / `"closed"`) is banned from new
- * writes. A **one-time read-shim** maps any surviving legacy literal:
- *   - `"closed"`            → `wf:Closed`
- *   - `"open"`/`"in-progress"` → `wf:Open` (with `"in-progress"` preserved
- *     as a separate `#status-in-progress` per-tracker subclass marker)
- * On the next conditional write the canonical types are materialised and the
- * legacy `wf:state` triple is removed (rewrite-on-write, not a perpetual shim).
- * `prov:endedAtTime` is written when an issue is closed.
+ * State is `rdf:type wf:Open` / `rdf:type wf:Closed` (the shared model owns this).
+ * The old `wf:state` literal (`"open"` / `"in-progress"` / `"closed"`) is banned
+ * from new writes. A **one-time read-shim** maps any surviving legacy literal:
+ *   - `"closed"`            → closed
+ *   - `"open"`/`"in-progress"` → open (with `"in-progress"` preserved as the
+ *     `#status-in-progress` subclass marker)
+ * On the next conditional write the canonical types are materialised (the shared
+ * builder always writes fresh) and the legacy `wf:state` triple is dropped.
+ * `prov:endedAtTime` is written when an issue is closed (shared model).
  *
  * **Type-Index (pss-77n).**
  * `ISSUES_CONFIG.forClass = wf:Task` so `ProductivityStore.ensureRegistered()`
- * — called on every `create()` — registers `solid:forClass wf:Task` with an
- * `instanceContainer` of `<podRoot>issues/` in the private type index. Other
- * apps (e.g. solid-issues) that enumerate `wf:Task` registrations will discover
- * PM's issues container, and PM will discover theirs.
+ * registers `solid:forClass wf:Task` with an `instanceContainer` of
+ * `<podRoot>issues/` in the private type index. Other apps (e.g. solid-issues)
+ * that enumerate `wf:Task` registrations discover PM's issues container, and PM
+ * discovers theirs.
  *
- * SAME-POD ONLY: like Tasks/Bookmarks this is plain typed-CRUD on the owner's
- * own pod — no cross-pod posting, no inbox sends, no SSRF surface.
+ * SAME-POD ONLY: like Tasks/Bookmarks this is plain typed-CRUD on the owner's own
+ * pod — no cross-pod posting, no inbox sends, no SSRF surface.
  *
- * Mirrors `tasks.ts`/`bookmarks.ts`: a typed `@rdfjs/wrapper` doc, a pure
- * parse/build pair, a `StoreConfig`, and a store factory. Pure sort/group
- * helpers are separated from I/O so the list UI logic is unit-testable without
- * a pod (house rule: never hand-build quads).
+ * RDF read/write is the shared model's typed `@rdfjs/wrapper` accessors —
+ * never hand-built quads (house rule).
  */
-import {
-  LiteralAs,
-  LiteralFrom,
-  NamedNodeAs,
-  NamedNodeFrom,
-  OptionalAs,
-  OptionalFrom,
-  SetFrom,
-  TermWrapper,
-} from "@rdfjs/wrapper";
 import { DataFactory, Store } from "n3";
+// The shared federated task model — imported from the `./task` SUBPATH (the
+// browser-safe entry that never touches `node:fs`; the main entry re-exports
+// `taskShapeTtl`, which reads the shape file with `node:fs` and cannot be bundled
+// into PM's static client export). SHACL validation uses the vendored shape text
+// (see src/lib/shacl/shape-registry.ts), not the node:fs-using `taskShapeTtl`.
+import {
+  buildTask,
+  isAssignedTo,
+  parseTask,
+  Task,
+  taskSubject,
+  type TaskData,
+} from "@jeswr/solid-task-model/task";
 import {
   createStore,
   type ProductivityStore,
@@ -57,26 +74,27 @@ import {
 const WF = "http://www.w3.org/2005/01/wf/flow#";
 const DCT = "http://purl.org/dc/terms/";
 const PROV = "http://www.w3.org/ns/prov#";
-const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
-/** The RDF class an issue is stamped + registered with. */
+/** The RDF class an issue is stamped + registered with (the shared `wf:Task`). */
 export const ISSUE_CLASS = `${WF}Task`;
 
 /**
  * Canonical state type IRIs (federation D2 — dereferenceable, solid-issues
- * compatible). These are `rdf:type` values on the issue subject, NOT literals.
+ * compatible). The shared model owns writing these via `rdf:type`; re-exported
+ * here as PM's public state-IRI surface for the tests and the in-progress logic.
  */
 export const WF_OPEN = `${WF}Open`;
 export const WF_CLOSED = `${WF}Closed`;
 
 /**
  * Per-tracker fragment class for "in-progress" (intended rdfs:subClassOf wf:Open).
- * Written as a second `rdf:type` alongside `wf:Open` to distinguish the
- * in-progress band without ambiguity (D4 — per-tracker fragment scheme).
+ * Written as a second `rdf:type` ALONGSIDE the shared `wf:Open` to distinguish
+ * the in-progress band — an APP-LOCAL refinement layered on the shared model
+ * (D4 — per-tracker fragment scheme).
  *
- * The IRI is in the PM's own solid-test namespace. solid-issues sees only
- * `wf:Open` and treats it as open (correct federation behaviour); PM reads both
- * types to recover the three-band distinction locally.
+ * The IRI is in the PM's own solid-test namespace. solid-issues / any foreign
+ * consumer sees only `wf:Open` and treats it as open (correct federation
+ * behaviour); PM reads both types to recover the three-band distinction locally.
  */
 export const WF_IN_PROGRESS_CLASS =
   "https://pod-manager.solid-test.jeswr.org/ns/issues#status-in-progress";
@@ -101,9 +119,9 @@ export function normalizeState(value: string | undefined): IssueState {
 export interface Issue {
   /** Title — `dct:title`. */
   title: string;
-  /** Body — `dct:description`. */
+  /** Body — co-written as `wf:description` + `dct:description` (shared model). */
   description?: string;
-  /** Lifecycle state — expressed via `rdf:type wf:Open`/`wf:Closed`. */
+  /** Lifecycle state — expressed via `rdf:type wf:Open`/`wf:Closed` (+ subclass). */
   state: IssueState;
   /** Created timestamp — `dct:created`. */
   created?: Date;
@@ -116,88 +134,28 @@ export interface Issue {
   assignee?: string;
   /**
    * Set by the read-shim when a legacy `wf:state` literal was found and mapped.
-   * On the next conditional write, the caller should pass `rewriteLegacy: true`
-   * to `buildIssue` to materialise canonical types and drop the literal.
-   * NOT part of the UI data model — consumers should check this field only to
+   * On the next conditional write, rebuilding via {@link buildIssue} materialises
+   * canonical types and drops the literal (the shared builder always builds
+   * fresh). NOT part of the UI data model — consumers check this field only to
    * decide whether a rewrite is needed.
    */
   _legacyStateLiteral?: string;
 }
 
-/** Typed `@rdfjs/wrapper` view of a single issue's subject. */
-export class IssueDoc extends TermWrapper {
-  get types(): Set<string> {
-    return SetFrom.subjectPredicate(this, RDF_TYPE, NamedNodeAs.string, NamedNodeFrom.string);
-  }
-
-  mark(): this {
-    this.types.add(ISSUE_CLASS);
-    return this;
-  }
-
-  get title(): string | undefined {
-    return OptionalFrom.subjectPredicate(this, `${DCT}title`, LiteralAs.string);
-  }
-  set title(v: string | undefined) {
-    OptionalAs.object(this, `${DCT}title`, v, LiteralFrom.string);
-  }
-
-  get description(): string | undefined {
-    return OptionalFrom.subjectPredicate(this, `${DCT}description`, LiteralAs.string);
-  }
-  set description(v: string | undefined) {
-    OptionalAs.object(this, `${DCT}description`, v, LiteralFrom.string);
-  }
-
-  get created(): Date | undefined {
-    return OptionalFrom.subjectPredicate(this, `${DCT}created`, LiteralAs.date);
-  }
-  set created(v: Date | undefined) {
-    OptionalAs.object(this, `${DCT}created`, v, LiteralFrom.dateTime);
-  }
-
-  /**
-   * `prov:endedAtTime` — written when an issue transitions to closed.
-   * Enables federation consumers to sort/filter by completion time.
-   */
-  get endedAt(): Date | undefined {
-    return OptionalFrom.subjectPredicate(this, `${PROV}endedAtTime`, LiteralAs.date);
-  }
-  set endedAt(v: Date | undefined) {
-    OptionalAs.object(this, `${PROV}endedAtTime`, v, LiteralFrom.dateTime);
-  }
-
-  /** `wf:assignee` — an agent WebID (object property). */
-  get assignee(): string | undefined {
-    return OptionalFrom.subjectPredicate(this, `${WF}assignee`, NamedNodeAs.string);
-  }
-  set assignee(v: string | undefined) {
-    OptionalAs.object(this, `${WF}assignee`, v, NamedNodeFrom.string);
-  }
-
-  /**
-   * Legacy `wf:state` literal accessor — used by the read-shim only.
-   * New writes MUST NOT use this; it is kept here so the shim can read it via
-   * the same typed-accessor path (house rule: never hand-inspect quads).
-   */
-  get legacyStateLiteral(): string | undefined {
-    return OptionalFrom.subjectPredicate(this, `${WF}state`, LiteralAs.string);
-  }
-  /**
-   * Clear the legacy `wf:state` literal — called during rewrite-on-write to
-   * remove the banned literal while leaving all other triples intact.
-   */
-  clearLegacyStateLiteral(): void {
-    OptionalAs.object(this, `${WF}state`, undefined, LiteralFrom.string);
-  }
+/**
+ * Map a PM {@link IssueState} to the shared model's binary {@link TaskData}
+ * state. open/in-progress → "open" (the in-progress band is layered separately
+ * as the {@link WF_IN_PROGRESS_CLASS} subclass); closed → "closed".
+ */
+export function stateToTaskState(state: IssueState): TaskData["state"] {
+  return state === "closed" ? "closed" : "open";
 }
 
 /**
- * Map a state value to the canonical `rdf:type` IRIs.
- *
- * Returns an array of IRI strings to add as `rdf:type` on the issue subject:
+ * Map a state value to the canonical `rdf:type` IRIs PM stamps on an issue.
+ * (Kept for tests + callers that reason about the raw types.)
  *   - open         → [`wf:Open`]
- *   - in-progress  → [`wf:Open`, `wf:flow#Task#status-in-progress`]
+ *   - in-progress  → [`wf:Open`, `#status-in-progress`]
  *   - closed       → [`wf:Closed`]
  */
 export function stateToTypes(state: IssueState): string[] {
@@ -208,6 +166,10 @@ export function stateToTypes(state: IssueState): string[] {
 
 /**
  * Infer the PM {@link IssueState} from the `rdf:type` set on an issue subject.
+ * The shared binary state is refined by the PM-local in-progress subclass:
+ *   - `wf:Closed`                       → "closed"
+ *   - `wf:Open` + `#status-in-progress` → "in-progress"
+ *   - `wf:Open`                         → "open"
  * Returns `undefined` when no canonical state type is present (caller falls
  * through to the legacy-shim path).
  */
@@ -216,101 +178,6 @@ export function typesToState(types: ReadonlySet<string>): IssueState | undefined
   if (types.has(WF_IN_PROGRESS_CLASS)) return "in-progress";
   if (types.has(WF_OPEN)) return "open";
   return undefined;
-}
-
-/**
- * Parse an issue document into an {@link Issue}, or `undefined` if not one.
- *
- * **Read-shim (pss-qec):** if the issue carries a legacy `wf:state` literal
- * but no canonical `wf:Open`/`wf:Closed` type, the shim maps:
- *   - `"closed"` → state `"closed"`
- *   - anything else (including `"in-progress"`) → state `"open"` / `"in-progress"`
- * The mapped state is returned normally. The raw literal is surfaced as
- * `_legacyStateLiteral` so the next conditional write can trigger a
- * rewrite-on-write (one-time migration, not perpetual).
- */
-export function parseIssue(
-  itemUrl: string,
-  dataset: import("@rdfjs/types").DatasetCore,
-): Issue | undefined {
-  const doc = new IssueDoc(`${itemUrl}#it`, dataset, DataFactory);
-  if (!doc.types.has(ISSUE_CLASS)) return undefined;
-
-  // Primary: canonical typed state.
-  let state = typesToState(doc.types);
-  let legacyStateLiteral: string | undefined;
-
-  if (state === undefined) {
-    // Shim: fall back to legacy wf:state literal.
-    const lit = doc.legacyStateLiteral;
-    if (lit !== undefined) {
-      state = normalizeState(lit);
-      legacyStateLiteral = lit;
-    } else {
-      // No state at all — default to open.
-      state = "open";
-    }
-  }
-
-  const issue: Issue = {
-    title: doc.title ?? "",
-    description: doc.description,
-    state,
-    created: doc.created,
-    endedAt: doc.endedAt,
-    assignee: doc.assignee,
-  };
-  if (legacyStateLiteral !== undefined) {
-    issue._legacyStateLiteral = legacyStateLiteral;
-  }
-  return issue;
-}
-
-/**
- * Serialise an {@link Issue} into a fresh dataset rooted at `${itemUrl}#it`.
- *
- * **Rewrite-on-write (pss-qec):** when `opts.rewriteLegacy` is `true`, the
- * function reads the existing dataset, removes any legacy `wf:state` literal,
- * and writes the canonical typed state. Pass this flag when updating an issue
- * whose `_legacyStateLiteral` is set (one-time migration on the first edit).
- *
- * Normal (new) issues: state is always written as `rdf:type wf:Open` or
- * `rdf:type wf:Closed`; no `wf:state` literal is emitted.
- */
-export function buildIssue(
-  itemUrl: string,
-  issue: Issue,
-  opts: { rewriteLegacy?: boolean } = {},
-): Store {
-  const store = new Store();
-  const doc = new IssueDoc(`${itemUrl}#it`, store, DataFactory).mark();
-
-  doc.title = issue.title || undefined;
-  doc.description = issue.description || undefined;
-  doc.created = issue.created ?? new Date();
-
-  // Write canonical state types (pss-qec D2).
-  for (const typeIri of stateToTypes(issue.state)) {
-    doc.types.add(typeIri);
-  }
-
-  // prov:endedAtTime on close (cheap + federation-useful).
-  if (issue.state === "closed") {
-    doc.endedAt = issue.endedAt ?? new Date();
-  }
-
-  // Rewrite-on-write: if migrating from legacy, the old dataset is NOT passed
-  // here (we always build from a fresh Store), so no legacy triple survives.
-  // The `rewriteLegacy` flag is for future callers that might pass in an
-  // existing store — documented but unused in this implementation since we
-  // always build fresh (the `build` function returns a new Store every time).
-  // The flag is accepted to keep the API consistent with the design spec.
-  void opts.rewriteLegacy;
-
-  // Only persist an assignee that looks like an absolute http(s) WebID — never
-  // coerce arbitrary text into a NamedNode (keeps the graph well-formed).
-  doc.assignee = isWebId(issue.assignee) ? issue.assignee : undefined;
-  return store;
 }
 
 /** True for an absolute http(s) URL usable as a WebID object. */
@@ -322,6 +189,124 @@ export function isWebId(value: string | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Read the legacy `wf:state` literal from a dataset via the shared `Task`
+ * wrapper's `rdf:type`-agnostic store, WITHOUT hand-inspecting quads. The shared
+ * model has no `wf:state` accessor (the literal is banned), so the shim reads it
+ * through a tiny scoped match against the dataset for the single subject — still
+ * via the n3 `Store.getObjects` typed API (not a regex on serialised RDF).
+ */
+function legacyStateLiteral(
+  subject: string,
+  dataset: import("@rdfjs/types").DatasetCore,
+): string | undefined {
+  // Build a Store view if needed; getObjects works on any DatasetCore-backed n3
+  // Store. The caller passes the same dataset the shared parser read.
+  const store = dataset instanceof Store ? dataset : new Store([...dataset]);
+  const objects = store.getObjects(
+    DataFactory.namedNode(subject),
+    DataFactory.namedNode(`${WF}state`),
+    null,
+  );
+  const lit = objects.find((o) => o.termType === "Literal");
+  return lit?.value;
+}
+
+/**
+ * Parse an issue document into an {@link Issue}, or `undefined` if not one.
+ *
+ * Delegates the RDF read to the shared {@link parseTask} (which reads BOTH
+ * `wf:description` and `dct:description`, the assignee, timestamps and the binary
+ * state), then layers PM's app-local in-progress band on top: if the subject also
+ * carries the {@link WF_IN_PROGRESS_CLASS} subclass alongside `wf:Open`, the band
+ * is "in-progress" rather than "open".
+ *
+ * **Read-shim (pss-qec):** if the document carries a legacy `wf:state` literal
+ * but no canonical `wf:Open`/`wf:Closed` type, the shim maps it to a band and
+ * surfaces the raw literal as `_legacyStateLiteral` so the next conditional write
+ * triggers a rewrite-on-write (one-time migration, not perpetual).
+ */
+export function parseIssue(
+  itemUrl: string,
+  dataset: import("@rdfjs/types").DatasetCore,
+): Issue | undefined {
+  // Shared model read — returns undefined for a non-`wf:Task` document.
+  const task = parseTask(itemUrl, dataset);
+  if (!task) return undefined;
+
+  // Recover PM's three-band state from the `rdf:type` set: shared model already
+  // resolved wf:Open/wf:Closed (→ task.state), but the in-progress subclass is
+  // PM-local, so we read the type set ourselves via the shared Task wrapper.
+  const doc = new Task(taskSubject(itemUrl), dataset, DataFactory);
+  let state: IssueState | undefined = typesToState(doc.types);
+  let legacyLit: string | undefined;
+
+  if (state === undefined) {
+    // Shim: no canonical state type → fall back to the legacy wf:state literal.
+    const lit = legacyStateLiteral(taskSubject(itemUrl), dataset);
+    if (lit !== undefined) {
+      state = normalizeState(lit);
+      legacyLit = lit;
+    } else {
+      state = "open"; // No state at all — default to open.
+    }
+  }
+
+  const issue: Issue = {
+    title: task.title,
+    description: task.description,
+    state,
+    created: task.created,
+    endedAt: task.endedAt,
+    assignee: task.assignee,
+  };
+  if (legacyLit !== undefined) issue._legacyStateLiteral = legacyLit;
+  return issue;
+}
+
+/**
+ * Serialise an {@link Issue} into a fresh dataset rooted at `${itemUrl}#it`.
+ *
+ * Delegates the RDF write to the shared {@link buildTask} (which co-writes
+ * `wf:description` + `dct:description`, the binary `wf:Open`/`wf:Closed` state,
+ * `prov:endedAtTime` on close, and a validated `wf:assignee`), then layers PM's
+ * app-local in-progress subclass on top for the in-progress band.
+ *
+ * **Rewrite-on-write (pss-qec):** the shared builder always builds from a FRESH
+ * store, so no legacy `wf:state` literal ever survives a rebuild — the
+ * `rewriteLegacy` flag is accepted for API/spec consistency but is a no-op (a
+ * rebuilt document is canonical by construction).
+ */
+export function buildIssue(
+  itemUrl: string,
+  issue: Issue,
+  opts: { rewriteLegacy?: boolean } = {},
+): Store {
+  const data: TaskData = {
+    title: issue.title,
+    description: issue.description || undefined,
+    state: stateToTaskState(issue.state),
+    created: issue.created ?? new Date(),
+    // Only persist a WebID assignee (the shared builder also drops a non-WebID,
+    // but be explicit so the data model stays well-formed at the seam).
+    assignee: isWebId(issue.assignee) ? issue.assignee : undefined,
+  };
+  if (issue.state === "closed") data.endedAt = issue.endedAt;
+
+  const store = buildTask(itemUrl, data) as Store;
+
+  // App-local refinement: stamp the in-progress subclass ALONGSIDE wf:Open so PM
+  // recovers the band on read; a foreign consumer still sees wf:Open → open.
+  if (issue.state === "in-progress") {
+    new Task(taskSubject(itemUrl), store, DataFactory).types.add(WF_IN_PROGRESS_CLASS);
+  }
+
+  // Rebuilt documents are canonical by construction (fresh store), so no legacy
+  // wf:state literal can survive — the flag is accepted for API consistency.
+  void opts.rewriteLegacy;
+  return store;
 }
 
 /** Open issues first (open, then in-progress, then closed); newest first within. */
@@ -341,6 +326,15 @@ export function openCount(items: readonly StoredItem<Issue>[]): number {
   return items.filter((i) => i.data.state !== "closed").length;
 }
 
+/**
+ * Does `assignee` name `webId`? Delegates to the shared {@link isAssignedTo} so
+ * the "assigned to me" comparison is identical across every suite app — a task
+ * assigned (via `wf:assignee`) in solid-issues surfaces in PM by the SAME rule.
+ */
+export function isAssignedToWebId(assignee: string | undefined, webId: string): boolean {
+  return isAssignedTo(assignee, webId);
+}
+
 /** The store config — wires the typed parse/build into the shared CRUD. */
 export const ISSUES_CONFIG: StoreConfig<Issue> = {
   containerSlug: ISSUES_SLUG,
@@ -354,12 +348,11 @@ export const ISSUES_CONFIG: StoreConfig<Issue> = {
   parse: parseIssue,
   build: buildIssue,
   /**
-   * ADVISORY SHACL validation is ON for issues (ADR-0014 Phase 1): the PM
-   * writes `wf:Task` and the vendored solid-issues `issue.ttl` shape checks
-   * federation compatibility. A violation surfaces a non-blocking warning — it
-   * NEVER blocks or rejects the write (the form-level title/assignee checks
-   * remain the hard guards). Issues are the first opted-in write-type; other
-   * stores leave `validate` unset (off) until a matching shape is vendored.
+   * ADVISORY SHACL validation is ON for issues (ADR-0014 Phase 1): the PM writes
+   * `wf:Task` and the SHARED `@jeswr/solid-task-model` task shape checks
+   * federation compatibility (it constrains BOTH `wf:description` and
+   * `dct:description`, the assignee, and the binary state). A violation surfaces
+   * a non-blocking warning — it NEVER blocks or rejects the write.
    */
   validate: true,
 };

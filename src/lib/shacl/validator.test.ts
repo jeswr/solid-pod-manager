@@ -1,7 +1,7 @@
 // AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate; see docs/MODEL-PROVENANCE.md
 import { describe, it, expect } from "vitest";
 import { RdfValidateShaclValidator, getDefaultValidator } from "./validator.js";
-import issueShapes from "./shapes/issue.ttl";
+import taskShape from "./shapes/task.ttl";
 
 const WF = "http://www.w3.org/2005/01/wf/flow#";
 const DCT = "http://purl.org/dc/terms/";
@@ -39,25 +39,25 @@ describe("RdfValidateShaclValidator (ADR-0014 seam)", () => {
   const validator = new RdfValidateShaclValidator();
 
   it("a conforming issue reports conforms:true with no results", async () => {
-    const report = await validator.validate(CONFORMING_ISSUE, issueShapes);
+    const report = await validator.validate(CONFORMING_ISSUE, taskShape);
     expect(report.conforms).toBe(true);
     expect(report.results).toEqual([]);
   });
 
   it("a missing-title issue reports conforms:false flagging dct:title", async () => {
-    const report = await validator.validate(NO_TITLE_ISSUE, issueShapes);
+    const report = await validator.validate(NO_TITLE_ISSUE, taskShape);
     expect(report.conforms).toBe(false);
     expect(report.results.some((r) => r.path === `${DCT}title`)).toBe(true);
   });
 
   it("a non-http(s) assignee IRI is flagged on wf:assignee", async () => {
-    const report = await validator.validate(NON_WEB_ASSIGNEE, issueShapes);
+    const report = await validator.validate(NON_WEB_ASSIGNEE, taskShape);
     expect(report.conforms).toBe(false);
     expect(report.results.some((r) => r.path === `${WF}assignee`)).toBe(true);
   });
 
   it("a wf:Task with no state class is flagged at Warning severity (advisory)", async () => {
-    const report = await validator.validate(STATELESS_TASK, issueShapes);
+    const report = await validator.validate(STATELESS_TASK, taskShape);
     expect(report.conforms).toBe(false);
     const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
     const stateResult = report.results.find((r) => r.path === RDF_TYPE);
@@ -66,7 +66,7 @@ describe("RdfValidateShaclValidator (ADR-0014 seam)", () => {
   });
 
   it("getDefaultValidator() returns a working ShaclValidator (the swap point)", async () => {
-    const report = await getDefaultValidator().validate(CONFORMING_ISSUE, issueShapes);
+    const report = await getDefaultValidator().validate(CONFORMING_ISSUE, taskShape);
     expect(report.conforms).toBe(true);
   });
 
@@ -74,6 +74,6 @@ describe("RdfValidateShaclValidator (ADR-0014 seam)", () => {
     // The interface contract: validate() may reject only on genuinely
     // unparseable input. The advisory wrapper (advisory.test.ts) swallows that;
     // here we just assert the seam surfaces it as a rejected promise, not a hang.
-    await expect(validator.validate("@@ not turtle @@", issueShapes)).rejects.toBeDefined();
+    await expect(validator.validate("@@ not turtle @@", taskShape)).rejects.toBeDefined();
   });
 });

@@ -4,6 +4,7 @@ import { DataFactory, Store } from "n3";
 import {
   parseIssue,
   buildIssue,
+  isAssignedToWebId,
   normalizeState,
   isWebId,
   sortIssues,
@@ -18,6 +19,10 @@ import {
   WF_IN_PROGRESS_CLASS,
   type Issue,
 } from "./issues.js";
+// The SHARED federated model — used here to PRODUCE bytes the way solid-issues
+// (and any other suite app) does, then assert PM reads them back identically.
+import { buildTask, serializeTask } from "@jeswr/solid-task-model/task";
+import { Parser } from "n3";
 import type { StoredItem } from "./productivity-store.js";
 
 const url = "https://pod.example/alice/issues/i.ttl";
@@ -333,5 +338,132 @@ describe("sortIssues / openCount", () => {
       item("c", "closed", "2026-06-01T00:00:00Z"),
     ];
     expect(openCount(items)).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CROSS-APP ROUND-TRIP — the federation linchpin (shared @jeswr/solid-task-model)
+//
+// solid-issues and PM now read/write the SAME predicates through the SAME
+// package. The two interop guarantees this asserts:
+//   (1) A task solid-issues writes — its wire format uses `wf:description` for
+//       the body and `wf:assignee` for the assignee — reads in PM as
+//       assigned-to-me WITH THE BODY PRESENT (solid-issues' wf:-only body is no
+//       longer missed, because the shared parser reads BOTH wf: and dct:).
+//   (2) A task PM writes co-writes BOTH `wf:description` and `dct:description`,
+//       so solid-issues' `wf:description`-first reader finds PM's body too.
+// ---------------------------------------------------------------------------
+describe("cross-app round-trip (shared task model federation)", () => {
+  const me = "https://me.solidcommunity.net/profile/card#me";
+  const issueUrl = "https://friend.pod/issues/bug-42.ttl";
+  const subject = `${issueUrl}#it`;
+  const DCT_PFX = "http://purl.org/dc/terms/";
+
+  const WF_DESCRIPTION = `${WF}description`;
+  const DCT_DESCRIPTION = `${DCT_PFX}description`;
+  const FOREIGN_BODY = "Off by 4px in the 320px breakpoint";
+
+  /**
+   * Produce the bytes of a LEGACY / FOREIGN solid-issues document whose body
+   * lives ONLY under `wf:description` (NOT `dct:description`) — the exact
+   * compatibility case that matters: a producer that predates the dual-predicate
+   * convergence. We build via the shared `serializeTask` (the real producer) and
+   * then strip the `dct:description` triple from the parsed graph, so the
+   * fixture genuinely carries `wf:description` alone. Returns the parsed dataset
+   * PM will read.
+   */
+  async function foreignWfOnlyDataset(): Promise<Store> {
+    const ttl = await serializeTask(issueUrl, {
+      title: "Login button overflows on mobile",
+      description: FOREIGN_BODY,
+      state: "open",
+      assignee: me,
+    });
+    const store = new Store(new Parser({ baseIRI: issueUrl }).parse(ttl));
+    // Strip dct:description so the body exists ONLY under wf:description — the
+    // genuine wf:-only foreign wire format this test must guard.
+    store.removeQuads(
+      store.getQuads(subject, DataFactory.namedNode(DCT_DESCRIPTION), null, null),
+    );
+    return store;
+  }
+
+  it("a solid-issues-written task (wf:description-only body + wf:assignee=me) reads in PM as assigned-to-me with the body present", async () => {
+    const dataset = await foreignWfOnlyDataset();
+
+    // The fixture carries the body ONLY under wf:description (the legacy/foreign
+    // predicate) and NOT under dct:description — so this genuinely exercises the
+    // path where PM must read a wf:-only foreign body, not the dual-predicate one.
+    const wfBodies = dataset
+      .getObjects(subject, DataFactory.namedNode(WF_DESCRIPTION), null)
+      .map((o) => o.value);
+    const dctBodies = dataset
+      .getObjects(subject, DataFactory.namedNode(DCT_DESCRIPTION), null)
+      .map((o) => o.value);
+    expect(wfBodies).toEqual([FOREIGN_BODY]);
+    expect(dctBodies).toEqual([]); // no dct:description — the body is wf:-only
+
+    // PM reads those bytes via its (now shared-model-backed) parser.
+    const issue = parseIssue(issueUrl, dataset);
+
+    expect(issue).toBeDefined();
+    // Body present — the wf:description-only body is NOT dropped on PM's read.
+    expect(issue?.description).toBe(FOREIGN_BODY);
+    expect(issue?.title).toBe("Login button overflows on mobile");
+    expect(issue?.state).toBe("open");
+    // Assigned to me — surfaced via the SHARED isAssignedTo comparison.
+    expect(issue?.assignee).toBe(me);
+    expect(isAssignedToWebId(issue?.assignee, me)).toBe(true);
+  });
+
+  it("a task PM writes co-writes BOTH wf:description and dct:description (solid-issues' wf:-first reader finds the body)", () => {
+    const ds = buildIssue(issueUrl, {
+      title: "Add OAuth login",
+      description: "Behind a feature flag",
+      state: "in-progress",
+      assignee: me,
+    });
+
+    // Both description predicates carry the body — solid-issues reads
+    // wf:description first; a dct:-only PM write would be missed without this.
+    const bodies = [...ds]
+      .filter((q) => q.subject.value === subject && q.object.value === "Behind a feature flag")
+      .map((q) => q.predicate.value)
+      .sort();
+    expect(bodies).toEqual([`${DCT_PFX}description`, `${WF}description`]);
+
+    // The shared binary state is wf:Open (a foreign reader sees "open"), with
+    // PM's in-progress subclass layered ON TOP — the app-local refinement.
+    const types = [...ds]
+      .filter((q) => q.subject.value === subject && q.predicate.value === RDF_TYPE)
+      .map((q) => q.object.value);
+    expect(types).toContain(WF_OPEN); // foreign consumer → "open" (correct)
+    expect(types).toContain(WF_IN_PROGRESS_CLASS); // PM recovers "in-progress"
+    expect(types).not.toContain(WF_CLOSED);
+
+    // PM reads its own write back as in-progress with the body + assignee.
+    const round = parseIssue(issueUrl, ds);
+    expect(round?.state).toBe("in-progress");
+    expect(round?.description).toBe("Behind a feature flag");
+    expect(round?.assignee).toBe(me);
+  });
+
+  it("a closed task PM writes is readable by a foreign (wf:Closed) reader and carries prov:endedAtTime", () => {
+    const ds = buildIssue(issueUrl, { title: "Done", state: "closed", assignee: me });
+    const built = buildTask(issueUrl, { title: "Done", state: "closed", assignee: me });
+    // PM's closed write produces the SAME canonical wf:Closed state the shared
+    // builder does (no in-progress subclass), so a foreign reader agrees.
+    const pmTypes = [...ds]
+      .filter((q) => q.predicate.value === RDF_TYPE)
+      .map((q) => q.object.value)
+      .sort();
+    const sharedTypes = [...built]
+      .filter((q) => q.predicate.value === RDF_TYPE)
+      .map((q) => q.object.value)
+      .sort();
+    expect(pmTypes).toEqual(sharedTypes);
+    expect(pmTypes).toContain(WF_CLOSED);
+    // prov:endedAtTime stamped on close.
+    expect(parseIssue(issueUrl, ds)?.endedAt).toBeInstanceOf(Date);
   });
 });

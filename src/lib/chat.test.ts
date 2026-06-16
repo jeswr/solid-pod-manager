@@ -130,7 +130,11 @@ describe("Chat.messages + send", () => {
   it("send create-only PUTs a new message resource in the container", async () => {
     const calls: { url: string; method: string; headers?: HeadersInit }[] = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      calls.push({ url: String(input), method: init?.method ?? "GET", headers: init?.headers });
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? "GET", headers: init?.headers });
+      // send() RE-DETECTS FRESH before writing: a PM-native container has NO
+      // index.ttl channel doc (404 on the probe) → classified native → writable.
+      if (url === INDEX) return new Response("nf", { status: 404 });
       return new Response(null, { status: 201 });
     }) as unknown as typeof fetch;
     const chat = new Chat(CONTAINER, [STORAGE], WEBID, fetchImpl);
@@ -504,6 +508,57 @@ describe("Chat — meeting:LongChat detect-and-read (read-first interop)", () =>
     expect(requested).not.toContain(DECOY_DIR);
     expect(requested).not.toContain(DECOY);
   });
+
+  it("BOUNDS the dated-file walk against a hostile WIDE date tree (fetch-amplification guard)", async () => {
+    // A malformed/hostile foreign channel advertises a HUGE date tree: many
+    // \d{4} year dirs at the container, each year listing many \d{2} month dirs,
+    // each month many \d{2} day dirs. Without per-depth dedup/width caps + a
+    // total listing budget, the frontier explodes multiplicatively (years ×
+    // months × days) and the session fires an unbounded number of fetches at the
+    // foreign host. The walk MUST stay bounded.
+    const pad = (n: number, w: number) => String(n).padStart(w, "0");
+    // 200 years × 100 months × 100 days would be 200 + 200*100 + 200*100*100 =
+    // ~2,020,200 listings if unbounded. We assert it stays far below that.
+    const YEARS = Array.from({ length: 200 }, (_, i) => `${CONTAINER}${pad(2000 + i, 4)}/`);
+    const monthsOf = (year: string) =>
+      Array.from({ length: 100 }, (_, i) => `${year}${pad(i, 2)}/`);
+    const daysOf = (month: string) =>
+      Array.from({ length: 100 }, (_, i) => `${month}${pad(i, 2)}/`);
+
+    let listingCalls = 0; // count ONLY directory listings (URLs ending in `/`)
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === INDEX) return ttlResponse(LONGCHAT_INDEX);
+      // Any container listing under the channel returns a wide child set.
+      if (url.startsWith(CONTAINER) && url.endsWith("/")) {
+        listingCalls++;
+        if (url === CONTAINER)
+          return ttlResponse(
+            containerListing([{ url: INDEX }, ...YEARS.map((url) => ({ url, container: true }))]),
+          );
+        // A year dir → many month dirs; a month dir → many day dirs; a day dir →
+        // its chat.ttl. Depth is keyed off how many path segments below CONTAINER.
+        const rel = url.slice(CONTAINER.length).replace(/\/$/, "");
+        const segs = rel.split("/").filter(Boolean);
+        if (segs.length === 1)
+          return ttlResponse(containerListing(monthsOf(url).map((url) => ({ url, container: true }))));
+        if (segs.length === 2)
+          return ttlResponse(containerListing(daysOf(url).map((url) => ({ url, container: true }))));
+        if (segs.length === 3)
+          return ttlResponse(containerListing([{ url: `${url}chat.ttl` }]));
+      }
+      return notFound();
+    }) as unknown as typeof fetch;
+
+    const chat = new Chat(CONTAINER, [STORAGE], WEBID, fetchImpl);
+    await chat.messages();
+    // The total number of directory LISTINGS is hard-bounded by the budget (1024)
+    // — orders of magnitude below the multiplicative worst case (~2,020,200). The
+    // walk MUST hit its budget here (the tree is far wider than the cap), proving
+    // the guard actually engaged rather than the tree being trivially small.
+    expect(listingCalls).toBeLessThanOrEqual(1024);
+    expect(listingCalls).toBeGreaterThan(200); // descended past the year frontier
+  });
 });
 
 describe("openChat — foreign-origin read-only path (SSRF-guarded, native fetch)", () => {
@@ -575,5 +630,37 @@ describe("chatContainerFromUrl — normalise a document/fragment ?url= to its co
   it("rejects a non-http(s) URL", () => {
     expect(chatContainerFromUrl("ftp://alice.example/chat/")).toBeUndefined();
     expect(chatContainerFromUrl("not a url")).toBeUndefined();
+  });
+
+  // Over-stripping guard (roborev finding, Low): only the exact supported
+  // channel-doc leaf (`index.ttl`) is dropped; a dotted CONTAINER name is kept.
+  it("does NOT over-strip a dotted container name (e.g. team.v1)", () => {
+    // `…/chat/team.v1` (no trailing slash) is the CONTAINER `…/chat/team.v1/`,
+    // NOT a document to be dropped to `…/chat/`.
+    expect(chatContainerFromUrl("https://alice.example/chat/team.v1")).toBe(
+      "https://alice.example/chat/team.v1/",
+    );
+  });
+  it("does NOT over-strip a dotted container name carrying a fragment/query", () => {
+    expect(chatContainerFromUrl("https://alice.example/chat/team.v1#this")).toBe(
+      "https://alice.example/chat/team.v1/",
+    );
+    expect(chatContainerFromUrl("https://alice.example/chat/team.v1?x=1")).toBe(
+      "https://alice.example/chat/team.v1/",
+    );
+  });
+  it("does NOT strip a non-index channel document name (only index.ttl is supported)", () => {
+    // A trailing `chat.ttl` is NOT the SolidOS channel-index form; treat the URL
+    // as a container the user named rather than guessing it is a document.
+    expect(chatContainerFromUrl("https://alice.example/chat/team/chat.ttl")).toBe(
+      "https://alice.example/chat/team/chat.ttl/",
+    );
+  });
+  it("still drops the exact index.ttl channel doc (with or without a fragment)", () => {
+    expect(chatContainerFromUrl("https://alice.example/chat/team/index.ttl")).toBe(CONTAINER);
+    expect(chatContainerFromUrl("https://alice.example/chat/team/index.ttl#this")).toBe(CONTAINER);
+  });
+  it("adds a trailing slash to a bare (dotless) final segment", () => {
+    expect(chatContainerFromUrl("https://alice.example/chat/team")).toBe(CONTAINER);
   });
 });

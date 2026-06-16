@@ -68,7 +68,12 @@ export function useChat(containerUrl: string | undefined): UseChat {
   const { data, error, loading, revalidating, reload } = useSwrRead<ChatMessage[]>(
     key,
     fetcher,
-    { topicUrl: containerUrl },
+    // Only watch the container when the chat is in scope and opened. An
+    // out-of-scope / not-yet-opened chat uses an empty read key, so subscribing
+    // its `containerUrl` would point the notification hook at a container that
+    // may be blocked (out of the user's own pods) for no benefit (roborev
+    // finding). Gate the topic on `chat` so it matches the read key's gate.
+    { topicUrl: chat ? containerUrl : undefined },
   );
 
   const send = useCallback(

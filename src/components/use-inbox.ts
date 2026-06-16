@@ -7,9 +7,15 @@
  * `fetch` (the auth-patched global runs).
  *
  * Stale-while-revalidate: the LISTING goes through the shared {@link useSwrRead}
- * cache (keyed `inbox`), so navigating back to the inbox paints the last-known
- * notifications INSTANTLY and revalidates in the background; the discovered
- * inbox container is watched so a new notification invalidates + refreshes it.
+ * cache, keyed PER DISCOVERED INBOX URL (`inbox:<inboxUrl>`), so navigating back
+ * to the inbox paints the last-known notifications INSTANTLY and revalidates in
+ * the background; the discovered inbox container is watched so a new
+ * notification invalidates + refreshes it. The inbox container is
+ * active-storage-dependent (a different storage discovers a different inbox), so
+ * the key MUST carry the discovered URL — keying it the static `inbox` would
+ * keep the same `(webId, key)` across a SAME-WebID storage switch and paint the
+ * previous storage's inbox (roborev finding). The key stays EMPTY until
+ * discovery settles, so it never hydrates the wrong storage's slot.
  * Inbox DISCOVERY (which container) stays a cheap effect off the session — it
  * runs once per login/storage switch, NOT on every reload, so a mark-read /
  * dismiss / live-notification never re-fetches the profile.
@@ -73,7 +79,13 @@ export function useInbox(): UseInbox {
   // the loading state and touches no cache (so a switch never lists a stale
   // pod's inbox). Once discovered with no inbox, resolve to an empty list.
   const ready = status === "logged-in" && Boolean(webId) && Boolean(activeStorage) && discovered;
-  const key = ready ? "inbox" : "";
+  // Key per discovered inbox URL once discovery settles. The inbox is
+  // active-storage-dependent, so the key carries the discovered URL → a storage
+  // switch (different discovered inbox) changes the key and revalidates against
+  // the new storage rather than painting the previous one. When discovery
+  // settles with NO inbox, fall back to a storage-scoped sentinel so the
+  // empty-list result still caches/paints without colliding across storages.
+  const key = ready ? (inboxUrl ? `inbox:${inboxUrl}` : `inbox:none:${activeStorage}`) : "";
   const fetcher = useCallback(async (): Promise<InboxNotification[]> => {
     return inbox ? inbox.list() : [];
   }, [inbox]);

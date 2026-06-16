@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSession } from "@/components/session-provider";
 import { useSwrRead } from "@/components/use-swr-read";
 import { readCache } from "@/lib/swr-cache";
-import type { AsyncState, RevalidatableState } from "@/components/use-pod-data";
+import type { RevalidatableState } from "@/components/use-pod-data";
 import {
   detectPurchaseFeature,
   domainsApiBase,
@@ -35,15 +35,19 @@ export interface DomainsListState extends RevalidatableState<DomainBinding[]> {
  * The account's domain bindings, from the user's own pod server.
  *
  * Stale-while-revalidate: the list goes through the shared {@link useSwrRead}
- * cache (keyed `domains`), so navigating back to the settings page paints the
- * last-known bindings INSTANTLY and revalidates in the background.
+ * cache, keyed PER API BASE (`domains:<base>`). The fetcher reads from `base`
+ * (the active storage's domains API), so the key MUST carry `base` — otherwise a
+ * SAME-WebID storage switch (same `(webId, key)`, different `base`) would not
+ * revalidate and would paint the PREVIOUS storage's bindings (roborev finding).
+ * Scoping the key to `base` makes a storage switch change the key → cold/
+ * revalidate against the new storage, with a separate cache partition per base.
  */
 export function useDomains(): DomainsListState {
   const { activeStorage } = useSession();
   const base = activeStorage ? domainsApiBase(activeStorage) : undefined;
 
   const { data, error, loading, revalidating, reload } = useSwrRead<DomainBinding[]>(
-    base ? "domains" : "",
+    base ? `domains:${base}` : "",
     // Only invoked when the key is non-empty (base/storage known).
     () => listDomains(base as string),
   );
@@ -62,11 +66,16 @@ export interface DomainDetailState extends RevalidatableState<DomainBinding> {
 
 /**
  * One binding's detail + the verify loop, with stale-while-revalidate caching
- * (keyed per domain, `domain:<domain>`) so re-opening a binding paints instantly.
- * `checkNow` drives POST verify; a background poll re-runs it every 30 s while
- * the state is pollable and the document is visible — DNS propagation takes
- * time, the user shouldn't have to hammer a button. A successful check writes
- * the AUTHORITATIVE binding back through the cache (the verify POST is itself
+ * (keyed PER API BASE + domain, `domain:<base>:<domain>`) so re-opening a
+ * binding paints instantly. The detail read AND the verify POST are scoped to
+ * `base` (the active storage's domains API), so the key MUST carry `base` too —
+ * otherwise a SAME-WebID storage switch would keep the same `(webId, key)` for
+ * the same domain name across two different storages and never revalidate,
+ * painting the wrong storage's binding (roborev finding). `checkNow` drives POST
+ * verify; a background poll re-runs it every 30 s while the state is pollable and
+ * the document is visible — DNS propagation takes time, the user shouldn't have
+ * to hammer a button. A successful check writes the AUTHORITATIVE binding back
+ * through the cache UNDER THE SAME `base`-scoped key (the verify POST is itself
  * authoritative; the cache only renders its result).
  */
 export function useDomain(domain: string | undefined): DomainDetailState {
@@ -75,7 +84,7 @@ export function useDomain(domain: string | undefined): DomainDetailState {
   const checkingRef = useRef(false);
 
   const base = activeStorage ? domainsApiBase(activeStorage) : undefined;
-  const key = base && domain ? `domain:${domain}` : "";
+  const key = base && domain ? `domain:${base}:${domain}` : "";
 
   const { data, error, loading, revalidating, reload } = useSwrRead<DomainBinding>(
     key,
@@ -92,7 +101,10 @@ export function useDomain(domain: string | undefined): DomainDetailState {
       // rendered binding reflects it at once (render-only cache, never a write
       // decision).
       const binding = await verifyDomain(base, domain);
-      readCache.set(webId, `domain:${domain}`, binding);
+      // Write back under the SAME `base`-scoped key the read hook uses, so the
+      // authoritative verify result updates the binding rendered for THIS
+      // storage (and never bleeds into another storage's slot).
+      readCache.set(webId, `domain:${base}:${domain}`, binding);
       return binding;
     } finally {
       checkingRef.current = false;

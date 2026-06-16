@@ -343,8 +343,10 @@ New:
   trust copy).
 - `src/lib/node-net-browser-shim.ts` / `src/lib/empty-module.ts` — browser
   replacements for the SDK's Node-only `node:net`/`node:dns/promises` (static
-  export). Tracked upstream follow-up: a browser-safe DNS-less SSRF mode in
-  `@jeswr/federation-client`.
+  export). REMOVED in feat/drop-net-shim (pss #96): the upstream follow-up
+  shipped — `@jeswr/federation-client` ≥ `5ec0461` (pss #92) has a browser-safe
+  DNS-less SSRF mode (no top-level `node:` import), so the shim + the
+  `NormalModuleReplacementPlugin` are no longer needed.
 - Tests: `use-federation-registry.test.ts`, `federations-page.test.tsx`,
   `nav-items.test.ts`, `federation-members.test.ts`.
 
@@ -355,4 +357,5 @@ Touched (additive):
 - `src/components/instant-nav-registry.ts` / `instant-nav.test.ts` — registry +
   READ_HOOKS + PREFETCH_EXEMPT entries for the new read hook.
 - `package.json` — `@jeswr/federation-client` (github:#main); `next.config.ts` —
-  `NormalModuleReplacementPlugin` for the SDK's `node:` builtins.
+  formerly carried a `NormalModuleReplacementPlugin` for the SDK's `node:`
+  builtins (removed in feat/drop-net-shim / pss #96 — see above).

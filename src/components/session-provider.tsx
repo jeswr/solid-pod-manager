@@ -52,6 +52,12 @@ import {
 } from "@/lib/session-profile";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 import { readCache } from "@/lib/swr-cache";
+// Eager import so the native-fetch snapshot (src/lib/native-fetch.ts) is taken
+// at this module's eval time — i.e. BEFORE the runtime effect below calls
+// `ReactiveFetchManager.registerGlobally()` patches globalThis.fetch. This
+// guarantees third-party (WebID-index) requests use the UNPATCHED fetch and the
+// user's DPoP auth is never attached to a foreign origin (see native-fetch.ts).
+import "@/lib/native-fetch";
 
 type Status = "loading" | "logged-out" | "authenticating" | "logged-in";
 

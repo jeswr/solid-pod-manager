@@ -13,6 +13,7 @@ import {
   codecFor,
   dateRevivingCodec,
   jsonCodec,
+  isRetiredDurableKey,
   MAX_AGE_MS,
   purgeDurableCacheByKeyPrefix,
   purgeRetiredDurableKeys,
@@ -588,5 +589,34 @@ describe("durable-cache retired-key purge (private community feed boot migration
     // Empty prefix and null storage are guarded (best-effort).
     expect(() => purgeDurableCacheByKeyPrefix("", s)).not.toThrow();
     expect(() => purgeDurableCacheByKeyPrefix("community:", null)).not.toThrow();
+  });
+
+  // The AUTHORITATIVE boundary (roborev Medium ×2): retired keys are barred at
+  // the durable read/write path itself — so the guarantee holds REGARDLESS of
+  // codec registration and REGARDLESS of when the boot purge runs (a synchronous
+  // render-time hydrate of a `community:` key is still a miss).
+  it("isRetiredDurableKey flags community: keys (and not registered ones)", () => {
+    expect(isRetiredDurableKey(COMMUNITY_KEY)).toBe(true);
+    expect(isRetiredDurableKey("community:_:0:::")).toBe(true);
+    expect(isRetiredDurableKey(APPS)).toBe(false);
+    expect(isRetiredDurableKey(ACTIVITY)).toBe(false);
+  });
+
+  it("writeDurableCache NEVER persists a retired key (write no-op at the boundary)", () => {
+    const s = new MemoryStorage();
+    writeDurableCache(WEBID_A, COMMUNITY_KEY, { body: SECRET }, s);
+    expect(s.length).toBe(0);
+    expect(s.getItem(storageKey(WEBID_A, COMMUNITY_KEY))).toBeNull();
+  });
+
+  it("readDurableCache NEVER hydrates a retired key — even when a VALID envelope is on disk", () => {
+    const s = new MemoryStorage();
+    // Forge a fully-valid legacy envelope directly (as a prior codec build would
+    // have written, or a hand-set entry that survived the purge). The retired-key
+    // guard runs BEFORE the codec/version/age checks, so a synchronous render-time
+    // hydrate (useSwrRead) is a MISS regardless of codec registration or timing.
+    s.setItem(storageKey(WEBID_A, COMMUNITY_KEY), legacyEnvelope(WEBID_A));
+    expect(s.getItem(storageKey(WEBID_A, COMMUNITY_KEY))).not.toBeNull(); // bytes ARE present
+    expect(readDurableCache(WEBID_A, COMMUNITY_KEY, s)).toBeNull(); // ...but never surfaced
   });
 });

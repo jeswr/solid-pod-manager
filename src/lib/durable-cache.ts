@@ -398,6 +398,28 @@ const storageKeyFor = (webId: string, modelKey: string) =>
   `${PREFIX}${webId}${SEP}${modelKey}`;
 
 /**
+ * Model-key prefixes that are MEMORY-ONLY and must NEVER touch the durable
+ * (`localStorage`) layer — the `community:` feed interleaves PRIVATE Matrix
+ * messages and is cached through the memory-only {@link memoryReadCache}
+ * (swr-cache.ts), never the durable {@link readCache}. Keep this in lock-step
+ * with the memory-only caches: a key routed there because its value can hold
+ * private third-party content belongs here too.
+ *
+ * This is the AUTHORITATIVE durable-layer boundary, enforced inside
+ * {@link writeDurableCache}/{@link readDurableCache} BEFORE any codec lookup, so
+ * a retired key is a write no-op AND a read miss regardless of whether a codec is
+ * (mistakenly) registered for it and regardless of when the boot purge runs
+ * ({@link purgeRetiredDurableKeys} is then only cleanup of already-persisted
+ * bytes, not the guarantee itself) — roborev finding, Medium.
+ */
+const RETIRED_DURABLE_KEY_PREFIXES: readonly string[] = ["community:"];
+
+/** True when `modelKey` is a memory-only key barred from the durable layer. */
+export function isRetiredDurableKey(modelKey: string): boolean {
+  return RETIRED_DURABLE_KEY_PREFIXES.some((p) => modelKey.startsWith(p));
+}
+
+/**
  * Read the cached model for a (WebID, key) pair, or `null` when there is no
  * usable snapshot (absent, NO REGISTERED CODEC ⇒ memory-only, wrong version,
  * WebID/key mismatch, too old, or unparseable). A missing or mismatched WebID is
@@ -415,6 +437,9 @@ export function readDurableCache<T>(
 ): T | null {
   // No authenticated identity ⇒ nothing to match against ⇒ cache miss (no hydrate).
   if (!storage || !modelKey || !webId) return null;
+  // Retired (memory-only) key ⇒ never hydrate from disk, even if a codec was
+  // mistakenly registered or a legacy snapshot survives the boot purge.
+  if (isRetiredDurableKey(modelKey)) return null;
   // No registered codec ⇒ this key is memory-only ⇒ nothing was persisted.
   const codec = codecFor(modelKey);
   if (!codec) return null;
@@ -448,6 +473,10 @@ export function writeDurableCache<T>(
   now: number = Date.now(),
 ): void {
   if (!storage || !modelKey || !webId || value === undefined) return;
+  // Retired (memory-only) key ⇒ NEVER persist, even if a codec is mistakenly
+  // registered for it. This is the authoritative durable-layer boundary for
+  // private content (e.g. `community:` Matrix bodies) — roborev finding, Medium.
+  if (isRetiredDurableKey(modelKey)) return;
   // No registered codec ⇒ memory-only ⇒ do not persist (no unverified round-trip).
   const codec = codecFor(modelKey);
   if (!codec) return;
@@ -562,21 +591,19 @@ export function purgeDurableCacheByKeyPrefix(
 }
 
 /**
- * Model-key prefixes that are MEMORY-ONLY and must NEVER live on disk, so any
- * snapshot a prior build (or a mistaken codec registration) wrote is purged once
- * at app start. Keep this in lock-step with the memory-only caches in
- * `swr-cache.ts`: a key routed through {@link memoryReadCache} because its value
- * can hold private third-party content (the `community:` feed interleaves PRIVATE
- * Matrix messages) belongs here so the durable layer is swept clean of it too.
- */
-const RETIRED_DURABLE_KEY_PREFIXES: readonly string[] = ["community:"];
-
-/**
- * One-time boot migration: purge every durable snapshot under a memory-only key
- * prefix ({@link RETIRED_DURABLE_KEY_PREFIXES}) across all WebIDs. Called once
- * from the app shell so private content a prior build may have persisted does not
- * linger on disk until the next logout. Idempotent + best-effort: re-running it
- * (or running it when nothing is present) is a no-op and never throws.
+ * Cleanup migration: purge every durable snapshot under a memory-only key prefix
+ * ({@link RETIRED_DURABLE_KEY_PREFIXES}, e.g. `community:`) across all WebIDs.
+ *
+ * NOTE — this is now CLEANUP of any bytes a prior build (or a transient mistaken
+ * codec registration) left on disk, NOT the guarantee itself: the authoritative
+ * boundary is {@link isRetiredDurableKey}, enforced inside
+ * {@link writeDurableCache}/{@link readDurableCache} so a retired key is never
+ * written and never read back regardless of codec state or migration timing
+ * (roborev finding, Medium). Calling this at boot simply reclaims the storage
+ * promptly instead of leaving stale (already-unreadable) entries until logout.
+ *
+ * Idempotent + best-effort: re-running it (or running it when nothing is present)
+ * is a no-op and never throws.
  */
 export function purgeRetiredDurableKeys(
   storage: SyncStorage | null = defaultStorage(),

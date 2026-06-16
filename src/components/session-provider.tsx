@@ -221,11 +221,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     return controllerRef.current;
   }, []);
 
-  // One-time boot migration: sweep the durable cache clean of any MEMORY-ONLY
-  // model key (the `community:` feed carries PRIVATE Matrix content) that a prior
-  // build — or a future codec misregistration — might have persisted, so private
-  // content never lingers on disk until the next logout/account-switch (roborev
-  // HIGH). Best-effort + idempotent; runs before any session-dependent read.
+  // Boot CLEANUP: reclaim any durable (`localStorage`) bytes a prior build may
+  // have persisted under a memory-only key (the `community:` feed carries PRIVATE
+  // Matrix content). The privacy GUARANTEE itself does NOT depend on this effect's
+  // timing — `isRetiredDurableKey` in durable-cache.ts makes `community:` a write
+  // no-op AND a read miss at the durable boundary, so even a synchronous
+  // render-time hydrate (useSwrRead) can never surface that content before this
+  // runs (roborev HIGH + Mediums). This effect just purges the dead entries
+  // promptly instead of leaving them until logout. Best-effort + idempotent.
   useEffect(() => {
     purgeRetiredDurableKeys();
   }, []);

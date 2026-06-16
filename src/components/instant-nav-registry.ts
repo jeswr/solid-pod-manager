@@ -18,11 +18,20 @@
  */
 
 import type { SwrCache } from "@/lib/swr-cache";
+import { domainsApiBase } from "@/lib/domains";
 
 /** The representative WebID every registry seed/key is scoped to. */
 export const WEBID = "https://alice.example/profile#me";
 /** The representative active storage the storage-scoped keys are built from. */
 export const STORAGE = "https://alice.example/storage/";
+/**
+ * The domains API base for {@link STORAGE} — built with the SAME `domainsApiBase`
+ * the `useDomains`/`useDomain` hooks use (the API ORIGIN, not the raw storage
+ * URL), so the registry seeds the slot the hooks actually read. Keying it the raw
+ * STORAGE would seed a slot the hooks never touch and let domain coverage pass
+ * while the real key is broken (roborev finding, Low).
+ */
+const DOMAINS_BASE = domainsApiBase(STORAGE);
 
 /**
  * One read-page hook's entry in the registry: the bare cache key it reads under
@@ -33,6 +42,14 @@ export const STORAGE = "https://alice.example/storage/";
 export interface ReadPageHook {
   /** The hook export name (documentation + failure messages). */
   hook: string;
+  /**
+   * The `use-*.ts` source file this hook lives in. Ties each registry entry back
+   * to a `READ_HOOKS` source-file entry (instant-nav.test.ts) so the structural
+   * guard can assert EVERY read source file has at least one registry entry — a
+   * read hook added to READ_HOOKS without a registry entry then breaks the build
+   * (roborev finding, Medium: the registry-coverage guard read a hard-coded list).
+   */
+  source: string;
   /** The page(s) it backs (documentation). */
   page: string;
   /**
@@ -55,6 +72,7 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   // use-files.ts — the headline fix: per-container listing.
   {
     hook: "useFolder",
+    source: "use-files.ts",
     page: "/files",
     key: `files:${STORAGE}documents/`,
     seed: (c) => c.set(WEBID, `files:${STORAGE}documents/`, [{ url: `${STORAGE}documents/a.txt` }]),
@@ -62,6 +80,7 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   // use-friends.ts — friend list.
   {
     hook: "useFriends",
+    source: "use-friends.ts",
     page: "/people (friends)",
     key: "friends",
     seed: (c) => c.set(WEBID, "friends", ["https://bob.example/profile#me"]),
@@ -70,6 +89,7 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   // container is active-storage-dependent, so the key carries the discovered URL).
   {
     hook: "useInbox",
+    source: "use-inbox.ts",
     page: "/inbox",
     key: `inbox:${STORAGE}inbox/`,
     seed: (c) => c.set(WEBID, `inbox:${STORAGE}inbox/`, [{ id: "urn:notif:1" }]),
@@ -78,6 +98,7 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   // reads the active storage's contacts store).
   {
     hook: "usePeople",
+    source: "use-people.ts",
     page: "people-picker (/people, /contacts pickers)",
     key: `people:${STORAGE}`,
     seed: (c) =>
@@ -86,6 +107,7 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   // use-productivity.ts — list view, keyed per store container.
   {
     hook: "useItems",
+    source: "use-productivity.ts",
     page: "/notes /calendar /contacts /bookmarks /tasks /issues",
     key: `productivity:${STORAGE}notes/`,
     seed: (c) => c.set(WEBID, `productivity:${STORAGE}notes/`, [{ url: `${STORAGE}notes/1`, data: {} }]),
@@ -93,6 +115,7 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   // use-productivity.ts — single item, keyed per item URL.
   {
     hook: "useItem",
+    source: "use-productivity.ts",
     page: "/notes/edit /calendar/edit /contacts/edit /tasks/edit /issues/edit",
     key: `productivity-item:${STORAGE}notes/1`,
     seed: (c) => c.set(WEBID, `productivity-item:${STORAGE}notes/1`, { url: `${STORAGE}notes/1`, data: {} }),
@@ -101,22 +124,29 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   // from the active storage's domains API base).
   {
     hook: "useDomains",
+    source: "use-domains.ts",
     page: "/settings/domains",
-    key: `domains:${STORAGE}`,
-    seed: (c) => c.set(WEBID, `domains:${STORAGE}`, [{ domain: "alice.example", status: "verified" }]),
+    key: `domains:${DOMAINS_BASE}`,
+    seed: (c) =>
+      c.set(WEBID, `domains:${DOMAINS_BASE}`, [{ domain: "alice.example", status: "verified" }]),
   },
   // use-domains.ts — one binding's detail, keyed PER API BASE + domain (detail
   // read AND verify POST are scoped to the base).
   {
     hook: "useDomain",
+    source: "use-domains.ts",
     page: "/settings/domains/[domain]",
-    key: `domain:${STORAGE}:alice.example`,
+    key: `domain:${DOMAINS_BASE}:alice.example`,
     seed: (c) =>
-      c.set(WEBID, `domain:${STORAGE}:alice.example`, { domain: "alice.example", status: "verified" }),
+      c.set(WEBID, `domain:${DOMAINS_BASE}:alice.example`, {
+        domain: "alice.example",
+        status: "verified",
+      }),
   },
   // use-chat.ts — message listing, keyed per chat container.
   {
     hook: "useChat",
+    source: "use-chat.ts",
     page: "/chat",
     key: `chat:${STORAGE}chats/general/`,
     seed: (c) => c.set(WEBID, `chat:${STORAGE}chats/general/`, [{ id: "urn:msg:1", content: "hi" }]),
@@ -124,6 +154,7 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   // use-type-index.ts — type-index management view.
   {
     hook: "useTypeIndex",
+    source: "use-type-index.ts",
     page: "/settings/type-index",
     key: "type-index",
     seed: (c) => c.set(WEBID, "type-index", { public: [], private: [] }),
@@ -132,24 +163,28 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   //     covers the WHOLE read surface, not just the newly-converted hooks). ---
   {
     hook: "useRecentActivity",
+    source: "use-activity.ts",
     page: "/ (home) /activity",
     key: "recent-activity",
     seed: (c) => c.set(WEBID, "recent-activity", [{ url: "urn:entry:1" }]),
   },
   {
     hook: "useCategorySummaries",
+    source: "use-pod-data.ts",
     page: "/ (home) /my-data",
     key: "category-summaries",
     seed: (c) => c.set(WEBID, "category-summaries", [{ category: { id: "notes" }, hasData: true }]),
   },
   {
     hook: "useCategoryItems",
+    source: "use-pod-data.ts",
     page: "/category/[id]",
     key: "category-items:notes",
     seed: (c) => c.set(WEBID, "category-items:notes", [{ url: `${STORAGE}notes/1` }]),
   },
   {
     hook: "useConnectedApps",
+    source: "use-permissions.ts",
     page: "/connected-apps",
     // Storage-scoped (`connected-apps:<storage>`): the model is THIS storage's ACL
     // grants, so a SAME-WebID storage switch must change the key and revalidate
@@ -159,6 +194,7 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
   },
   {
     hook: "useAssignedTasks",
+    source: "use-federation-tasks.ts",
     page: "/tasks (assigned-to-me)",
     key: `assigned-tasks:${STORAGE}`,
     seed: (c) => c.set(WEBID, `assigned-tasks:${STORAGE}`, [{ task: { title: "t" } }]),

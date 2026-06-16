@@ -290,10 +290,13 @@ interface CodecRule {
 
 const CODECS: readonly CodecRule[] = [
   // Connected-apps is storage-scoped (`connected-apps:<activeStorage>`, built by
-  // {@link connectedAppsKey}) so two storages of one WebID never share a grants
-  // slot — hence a PREFIX match (the prefix MUST equal CONNECTED_APPS_KEY_PREFIX,
-  // the codec and the key being two ends of one snapshot). It is JSON-plain.
-  { match: { prefix: CONNECTED_APPS_KEY_PREFIX }, codec: jsonCodec() },
+  // {@link connectedAppsKey}). Two PRECISE rules rather than a bare `connected-apps`
+  // prefix (roborev finding, Low): the bare legacy key (`exact`) AND only keys
+  // under the `connected-apps:` DELIMITED namespace (`prefix`). A bare prefix
+  // would also match an unrelated future key like `connected-apps-foo`, silently
+  // persisting it with this JSON codec and weakening the opt-in-codec guarantee.
+  { match: { exact: CONNECTED_APPS_KEY_PREFIX }, codec: jsonCodec() },
+  { match: { prefix: `${CONNECTED_APPS_KEY_PREFIX}:` }, codec: jsonCodec() },
   { match: { exact: "category-summaries" }, codec: jsonCodec() },
   { match: { exact: "recent-activity" }, codec: jsonCodec() },
   // The "Assigned to me" federation view. The key is storage-scoped

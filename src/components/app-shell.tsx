@@ -7,9 +7,11 @@ import { useSession } from "@/components/session-provider";
 import { usePrefetch } from "@/components/use-prefetch";
 import { LoginScreen } from "@/components/login-screen";
 import { SidebarNav, BottomNav } from "@/components/sidebar-nav";
+import { FeedbackButton } from "@jeswr/app-shell";
 import { Brand } from "@/components/brand";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { AccountMenu } from "@/components/account-menu";
+import { APP_VERSION } from "@/lib/app-version";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -28,7 +30,7 @@ import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/s
 const PUBLIC_ROUTES = new Set(["/privacy", "/terms"]);
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { status, profileStatus, retryProfile } = useSession();
+  const { status, profileStatus, retryProfile, webId } = useSession();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const pathname = usePathname();
 
@@ -104,6 +106,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="ml-auto flex items-center gap-1">
+            {/* Shared suite feedback control (@jeswr/app-shell): report an issue /
+                give feedback / get help. Files to THIS app's repo
+                (jeswr/solid-pod-manager) in GitHub prefill mode (`submit` unset —
+                the suite-wide feedback-proxy hook is wired in later). The signed-in
+                WebID is passed but only attached to the issue if the reporter ticks
+                the consent box in the dialog. Sits alongside PM's own theme toggle
+                + account menu — those are unchanged. */}
+            <FeedbackButton
+              repo="jeswr/solid-pod-manager"
+              appName="Pod Manager"
+              appVersion={APP_VERSION}
+              webId={webId}
+            />
             <ThemeToggle />
             <AccountMenu />
           </div>

@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin } from "vitest/config";
+import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 
@@ -24,12 +25,29 @@ function rawTurtle(): Plugin {
 // browser — keep the two runners fully separate so `vitest run` never tries
 // to execute a `*.spec.ts` e2e file.
 export default defineConfig({
-  plugins: [rawTurtle()],
+  // react() transpiles the `.test.tsx` React render tests (JSX → the automatic
+  // react-jsx runtime). The data-layer `.test.ts` suites are plain TS and
+  // unaffected. rawTurtle() keeps the vendored SHACL `.ttl` imports working.
+  plugins: [react(), rawTurtle()],
   test: {
+    // Default to the no-DOM `node` env: the data layer + hook cache tests need
+    // no DOM. The handful of React render tests (`*.test.tsx`) opt into jsdom
+    // per-file via a `// @vitest-environment jsdom` docblock (Vitest 4 dropped
+    // `environmentMatchGlobs`), so only those files pay for a DOM.
     environment: "node",
+    // RTL's automatic per-test cleanup (unmount the previous render) keys off
+    // the global test hooks, so the `.test.tsx` render tests don't leak DOM
+    // between cases. The data-layer suites don't rely on globals, so this is
+    // a safe addition.
+    globals: true,
+    // jest-dom matchers + a `matchMedia` polyfill for the jsdom render tests.
+    // Safe to register globally: it only touches `window` when one exists
+    // (guarded), so the `node`-env tests are unaffected.
+    setupFiles: ["src/test/setup-dom.ts"],
     include: [
       "src/lib/**/*.test.ts",
       "src/components/**/*.test.ts",
+      "src/components/**/*.test.tsx",
       "scripts/**/*.test.mjs",
     ],
     exclude: ["e2e/**", "node_modules/**"],
@@ -38,5 +56,9 @@ export default defineConfig({
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
+    // Force a SINGLE React instance across the app + the @jeswr/app-shell
+    // package, so the FeedbackButton render test can't trip an
+    // invalid-hook-call from app-shell resolving its own nested React copy.
+    dedupe: ["react", "react-dom"],
   },
 });

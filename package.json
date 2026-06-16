@@ -15,6 +15,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@jeswr/app-shell": "github:jeswr/app-shell#main",
     "@jeswr/fetch-rdf": "^0.1.0",
     "@jeswr/solid-task-model": "github:jeswr/solid-task-model#main",
     "@rdfjs/wrapper": "^0.34.0",
@@ -40,13 +41,17 @@
     "@playwright/test": "^1.60.0",
     "@rdfjs/types": "^2.0.1",
     "@tailwindcss/postcss": "^4",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/n3": "^1.26.1",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.0.2",
     "eslint": "^9",
     "eslint-config-next": "15.5.19",
     "jose": "^6.2.3",
+    "jsdom": "^29.1.1",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.8"

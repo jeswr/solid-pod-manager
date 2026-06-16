@@ -2,6 +2,14 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+/* Make Tailwind v4 scan the shared @jeswr/app-shell package so the utility
+   classes its <FeedbackButton/> dialog emits are generated into our build.
+   We DO NOT import app-shell's tokens.css/theme.css — PM already defines the
+   matching OKLCH token set below (the app-shell components resolve against the
+   SAME --background/--foreground/--border/etc. tokens), so importing them would
+   clobber PM's own theme. `@source` only adds class detection, not styles. */
+@source "../../node_modules/@jeswr/app-shell/dist";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

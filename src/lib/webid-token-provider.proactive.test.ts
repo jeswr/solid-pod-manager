@@ -111,14 +111,71 @@ const refreshGrants = () =>
   as.tokenRequests.filter((r) => r.get("grant_type") === "refresh_token");
 
 /**
- * Advance the fake clock and fully drain the proactive refresh chain it kicks
- * off. The refresh grant chains several awaits (oauth4webapi discovery cache,
- * the grant request, ES256 verify), so a single `advanceTimersByTimeAsync` does
- * not always flush them all in one pass — drain a few extra microtask rounds.
+ * The REAL `setImmediate`, captured at module-load time — before any test runs
+ * `vi.useFakeTimers()` (which only replaces the globals from inside each `it`).
+ * {@link yieldToRealLoop} uses it to hand control back to the genuine Node event
+ * loop so REAL async work the fake clock cannot drive — chiefly the ES256
+ * `crypto.subtle.sign` inside oauth4webapi's DPoP-proof generation, a native
+ * promise NOT tied to the fake timers — actually completes before we re-inspect
+ * state. This is the load-sensitive piece: under the full parallel suite that
+ * native crypto is slower than the bounded microtask flush
+ * `advanceTimersByTimeAsync` performs, so without a real-loop yield the chain
+ * stalls mid-flight and the next `tick` advances past a not-yet-armed timer.
+ */
+const realSetImmediate = setImmediate;
+const yieldToRealLoop = (): Promise<void> =>
+  new Promise<void>((resolve) => realSetImmediate(resolve));
+
+/**
+ * Advance the fake clock by exactly `ms`, then fully settle the proactive-refresh
+ * chain the fired timers kicked off — WITHOUT advancing the clock any further.
+ *
+ * Each proactive fire runs fire-and-forget (`void this.#fireProactive()`) through
+ * a multi-await chain: oauth4webapi discovery cache → DPoP-proof generation
+ * (`crypto.subtle.sign`, a REAL native async op) → the refresh-grant fetch →
+ * response processing → on failure, `#handleProactiveFailure`, which ARMS the
+ * next backoff timer inside an awaited async method. The chain mixes fake-timer
+ * work with REAL crypto/fetch promises.
+ *
+ * The OLD helper drained a FIXED 5 rounds of `advanceTimersByTimeAsync(0)`. In
+ * isolation that is ample, but `advanceTimersByTimeAsync` only flushes a bounded
+ * microtask slice between fake-timer fires — it does NOT wait for the native
+ * ES256 crypto promise. Under the CPU-starved parallel suite that crypto resolves
+ * LATE, so the chain stalled before arming its next timer; the test's exact
+ * `tick(2_000)`/second `tick(65_000)` then advanced past a timer that did not yet
+ * exist, and the grant never fired (the observed flake — grant count 0 or a
+ * dropped cycle). The fix settles on QUIESCENCE: alternately flush the fake
+ * microtask/zero-timer queue AND YIELD TO THE REAL EVENT LOOP (so native crypto
+ * completes), stopping once the armed fake-timer count has held steady across
+ * several consecutive real-loop yields. That makes draining independent of
+ * wall-clock pressure. Bounded so a genuine hang fails fast rather than looping.
  */
 async function tick(ms: number): Promise<void> {
   await vi.advanceTimersByTimeAsync(ms);
-  for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(0);
+  await settle();
+}
+
+/**
+ * Drain the in-flight proactive-refresh chain WITHOUT advancing the clock, by
+ * quiescence rather than a fixed round count. Each pass flushes the fake
+ * microtask + zero-delay-timer queue, then yields to the REAL loop so native
+ * crypto/fetch promises resolve; we stop once the armed-timer count is stable
+ * across several consecutive passes (the chain has reached a steady state — any
+ * remaining timers are future backoff/reschedule timers we deliberately do NOT
+ * advance into here). The consecutive-stable requirement guards against exiting
+ * in the gap before a continuation arms its next timer (e.g. before a failed
+ * attempt's backoff timer exists, or before a successful cycle re-arms). Bounded.
+ */
+async function settle(): Promise<void> {
+  let stable = 0;
+  let prev = Number.NaN;
+  for (let i = 0; i < 300 && stable < 6; i++) {
+    await vi.advanceTimersByTimeAsync(0); // flush fake microtasks + 0ms timers
+    await yieldToRealLoop(); // let native crypto/fetch promises complete
+    const count = vi.getTimerCount();
+    stable = count === prev ? stable + 1 : 0;
+    prev = count;
+  }
 }
 
 beforeEach(async () => {
@@ -225,11 +282,14 @@ describe("proactive refresh: scheduling", () => {
 
     // Fire the proactive timer NOW, with the lazy grant provably in flight. It
     // reads the in-flight #sessions entry and must JOIN it — not start a 2nd.
+    // (Don't `settle()` yet: the lazy grant is parked on the gate, so the chain
+    // is intentionally NOT quiescent until released below.)
     await vi.advanceTimersByTimeAsync(65_000);
+    await yieldToRealLoop(); // let the proactive fire reach its `await inFlight`
 
     releaseToken(); // release the single in-flight grant
     await lazy;
-    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+    await settle(); // drain both paths to quiescence (real crypto included)
 
     expect(refreshGrants()).toHaveLength(1); // ONE grant shared by both paths
     expect(getCode).toHaveBeenCalledTimes(1); // and never a popup

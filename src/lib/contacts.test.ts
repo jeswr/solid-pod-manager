@@ -201,6 +201,56 @@ describe("address-book write path (SolidOS layout)", () => {
     expect(forIndividual.some((l) => l.container === CONTAINER)).toBe(true);
   });
 
+  it("writes a groups index listing the default group (SolidOS discovers groups via it)", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Ada" });
+    const groupsIndex = pod.dataset(`${CONTAINER}groups.ttl`);
+    const defaultGroupSubject = `${CONTAINER}Group/Contacts.ttl#this`;
+    // The groups index includes the default group under the book.
+    expect(
+      [...groupsIndex.match(null, null, null)].some(
+        (q) =>
+          q.predicate.value === `${VCARD}includesGroup` && q.object.value === defaultGroupSubject,
+      ),
+    ).toBe(true);
+  });
+
+  it("list() PROPAGATES a non-404 failure rather than masking it as empty", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Ada", email: "ada@x.io" });
+    // A fetch that 500s on the people index must surface, not return [].
+    const failing: typeof fetch = async (input, init) => {
+      const u = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (u === PEOPLE_DOC && (init?.method ?? "GET").toUpperCase() === "GET") {
+        return new Response("boom", { status: 500 });
+      }
+      return pod.fetch(input, init);
+    };
+    const store2 = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: failing });
+    await expect(store2.list()).rejects.toBeTruthy();
+  });
+
+  it("dedupes a migrated + lingering-legacy duplicate by stable identity", async () => {
+    const pod = createMemoryPod();
+    // Seed a legacy flat contact AND an equivalent canonical contact (same email)
+    // to simulate a migration whose legacy delete was aborted (412) — both linger.
+    await pod.fetch(`${CONTAINER}dup.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}dup.ttl#it> a vcard:Individual ; vcard:fn "Dup Person" ; vcard:hasEmail <mailto:dup@x.io> .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Dup Person", email: "dup@x.io" });
+    const items = await store.list();
+    // Two on disk (legacy + canonical), but ONE in the deduped list.
+    expect(items).toHaveLength(1);
+    // The canonical copy wins (its URL is the Person/<uuid> doc).
+    expect(items[0].url).toMatch(/Person\//);
+  });
+
   it("prunes the people index + group membership on delete", async () => {
     const pod = createMemoryPod();
     const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
@@ -272,12 +322,18 @@ describe("forward migration of legacy flat contacts (non-destructive)", () => {
 describe("scope guard (confused-deputy)", () => {
   const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID });
 
-  it("accepts canonical person/group docs and legacy flat contacts", () => {
+  it("accepts canonical person docs and legacy flat contacts only", () => {
     expect(isContactsResource(`${CONTAINER}Person/abc/index.ttl`, CONTAINER)).toBe(true);
-    expect(isContactsResource(`${CONTAINER}Group/Family.ttl`, CONTAINER)).toBe(true);
     expect(isContactsResource(`${CONTAINER}old-contact.ttl`, CONTAINER)).toBe(true);
     expect(isLegacyFlatContact(`${CONTAINER}old-contact.ttl`, CONTAINER)).toBe(true);
     expect(isLegacyFlatContact(`${CONTAINER}Person/abc/index.ttl`, CONTAINER)).toBe(false);
+  });
+
+  it("REJECTS group documents from the item CRUD (confused-deputy)", () => {
+    // SolidOS group docs are structural — only the store's own bootstrap writes
+    // them. The ?id=-driven item CRUD must never overwrite/delete a group.
+    expect(isContactsResource(`${CONTAINER}Group/Contacts.ttl`, CONTAINER)).toBe(false);
+    expect(isContactsResource(`${CONTAINER}Group/Family.ttl`, CONTAINER)).toBe(false);
   });
 
   it("rejects structural docs, the container, traversal + foreign origins", () => {
@@ -291,7 +347,7 @@ describe("scope guard (confused-deputy)", () => {
     expect(isContactsResource(`${CONTAINER}x.ttl?id=1`, CONTAINER)).toBe(false);
   });
 
-  it("read/update/remove fail closed on an out-of-scope URL", async () => {
+  it("read/update/remove fail closed on an out-of-scope URL (incl. a group doc)", async () => {
     await expect(store.read("https://evil.example/x.ttl")).rejects.toBeInstanceOf(
       ContactsScopeError,
     );
@@ -301,6 +357,13 @@ describe("scope guard (confused-deputy)", () => {
     await expect(store.remove(`${CONTAINER}index.ttl`)).rejects.toBeInstanceOf(
       ContactsScopeError,
     );
+    // A crafted ?id= pointing at the default group must be refused.
+    await expect(store.remove(`${CONTAINER}Group/Contacts.ttl`)).rejects.toBeInstanceOf(
+      ContactsScopeError,
+    );
+    await expect(
+      store.update(`${CONTAINER}Group/Contacts.ttl`, { fn: "evil" }),
+    ).rejects.toBeInstanceOf(ContactsScopeError);
   });
 });
 

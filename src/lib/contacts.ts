@@ -41,8 +41,10 @@ import {
   addressBookSubject,
   buildAddressBook,
   buildGroup,
+  buildGroupsIndex,
   buildPeopleIndex,
   buildPerson,
+  groupSubject,
   parsePerson,
   personSubject,
 } from "@jeswr/solid-task-model/contacts";
@@ -277,14 +279,27 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
    * pod shows the full set. A missing book/container just means "nothing yet".
    */
   async list(): Promise<StoredItem<Contact>[]> {
-    const [canonical, legacy] = await Promise.all([
-      this.listCanonical().catch(() => [] as StoredItem<Contact>[]),
-      this.listLegacy().catch(() => [] as StoredItem<Contact>[]),
-    ]);
+    // Each lister already narrows "absent" to 404/403 → []; any OTHER failure
+    // (parse error, 5xx, auth) PROPAGATES rather than masquerading as "no
+    // contacts" (roborev Medium). The two run concurrently.
+    const [canonical, legacy] = await Promise.all([this.listCanonical(), this.listLegacy()]);
+    // Dedupe by URL first (a doc listed via both paths), THEN by a stable
+    // contact identity so a contact that exists as BOTH a migrated canonical doc
+    // and a not-yet-deleted legacy file (e.g. a 412 aborted the legacy delete)
+    // surfaces ONCE — the canonical copy wins (roborev Medium). Canonical items
+    // are inserted first so they take precedence on an identity collision.
     const byUrl = new Map<string, StoredItem<Contact>>();
     for (const item of canonical) byUrl.set(item.url, item);
     for (const item of legacy) if (!byUrl.has(item.url)) byUrl.set(item.url, item);
-    return [...byUrl.values()];
+    const seenIdentity = new Set<string>();
+    const out: StoredItem<Contact>[] = [];
+    for (const item of byUrl.values()) {
+      const id = contactIdentity(item.data);
+      if (id && seenIdentity.has(id)) continue;
+      if (id) seenIdentity.add(id);
+      out.push(item);
+    }
+    return out;
   }
 
   /** Read the canonical people index, then GET each person document. */
@@ -467,6 +482,7 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
     };
     await this.createOnly(this.bookDoc, buildAddressBook(this.bookDoc, book));
     await this.ensureDefaultGroup();
+    await this.ensureGroupsIndex();
     await this.ensureRegistered();
   }
 
@@ -478,6 +494,20 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
       members: [],
     });
     await this.createOnly(this.defaultGroupDoc, ds);
+  }
+
+  /**
+   * Ensure the GROUPS INDEX (`vcard:groupIndex` target) exists and lists the
+   * default group. SolidOS discovers groups THROUGH this document (not the book's
+   * `includesGroup` alone), so without it the default group — and therefore every
+   * contact, which SolidOS browses BY GROUP — stays invisible (roborev High).
+   * Create-only; idempotent.
+   */
+  private async ensureGroupsIndex(): Promise<void> {
+    const ds = buildGroupsIndex(this.bookSubject, [
+      { group: groupSubject(this.defaultGroupDoc), name: DEFAULT_GROUP_NAME },
+    ]);
+    await this.createOnly(this.groupsDoc, ds);
   }
 
   /**
@@ -633,6 +663,23 @@ function stripFragment(iri: string): string {
   return i === -1 ? iri : iri.slice(0, i);
 }
 
+/**
+ * A stable contact identity used to de-duplicate `list()` when the SAME contact
+ * exists as both a migrated canonical doc and a not-yet-deleted legacy file (a
+ * 412 aborted the legacy delete). WebID is the strongest key; else email; else a
+ * name+phone composite. Returns `undefined` when no distinguishing field exists
+ * (two distinct nameless/detail-less contacts must NOT collapse into one), so
+ * such entries are never deduped (URL-uniqueness still applies).
+ */
+function contactIdentity(c: Contact): string | undefined {
+  if (c.webId?.trim()) return `webid:${c.webId.trim().toLowerCase()}`;
+  if (c.email?.trim()) return `email:${c.email.trim().toLowerCase()}`;
+  const name = c.fn?.trim().toLowerCase();
+  const phone = c.phone?.trim();
+  if (name && phone) return `np:${name}|${phone}`;
+  return undefined;
+}
+
 // --- index mutators (pure; operate on a dataset, return "changed") -----------
 // The contacts DOCUMENTS are always model-built; these only splice the
 // index-listing EDGES (`vcard:inAddressBook`/`vcard:fn`/`vcard:hasMember`) into
@@ -722,10 +769,19 @@ export class ContactsScopeError extends Error {
 }
 
 /**
- * Is `url` a contacts DOCUMENT strictly inside `container` (no `..`, no query/
- * fragment)? Accepts the canonical `Person/<seg>/index.ttl`, the canonical
- * `Group/<slug>.ttl`, and the legacy flat `<slug>.ttl`. Rejects the container
- * root, the book/index docs themselves, sub-containers, and anything off-origin.
+ * Is `url` a CONTACT (person) DOCUMENT the item CRUD (`read`/`update`/`remove`)
+ * may act on — strictly inside `container`, no `..`, no query/fragment? Accepts
+ * ONLY the canonical person doc (`Person/<seg>/index.ttl`) and the legacy flat
+ * contact (`<slug>.ttl`).
+ *
+ * Deliberately REJECTS the address-book STRUCTURAL documents — the book root
+ * (`index.ttl`), the people/groups indexes, AND the group documents
+ * (`Group/<slug>.ttl`). Those are written only by the store's OWN internal
+ * bootstrap/index paths (which never pass a caller-supplied URL through this
+ * guard); exposing them to the `?id=`-driven item CRUD would let a crafted link
+ * OVERWRITE a group with a person doc or DELETE it (a confused-deputy —
+ * roborev High). Group editing, if ever added, goes through a dedicated group
+ * API, never the contact item store.
  */
 export function isContactsResource(url: string, container: string): boolean {
   let parsed: URL;
@@ -747,15 +803,14 @@ export function isContactsResource(url: string, container: string): boolean {
   const segs = rest.split("/");
   // Canonical person: Person/<seg>/index.ttl (exactly 3 segments).
   if (segs.length === 3 && segs[0] === "Person" && segs[2] === "index.ttl") return true;
-  // Canonical group: Group/<slug>.ttl (exactly 2 segments).
-  if (segs.length === 2 && segs[0] === "Group" && segs[1].endsWith(".ttl")) return true;
   // Legacy flat contact: <slug>.ttl directly in the container (1 segment), but
-  // NOT the structural docs (index/people/groups).
+  // NOT the structural docs (index/people/groups). Group/<slug>.ttl is a
+  // 2-segment path and is NOT accepted here (it is a structural doc — see above).
   if (segs.length === 1 && segs[0].endsWith(".ttl") && !isStructuralDoc(segs[0])) return true;
   return false;
 }
 
-/** The structural address-book docs that are NOT contacts. */
+/** The structural address-book docs that are NOT contact item resources. */
 function isStructuralDoc(seg: string): boolean {
   return seg === INDEX_DOC || seg === PEOPLE_DOC || seg === GROUPS_DOC;
 }

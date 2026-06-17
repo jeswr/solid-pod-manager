@@ -1,12 +1,21 @@
 "use client";
 
 /**
- * The Solid session bridge for React. `@solid/reactive-authentication` has no
- * session object: it patches `globalThis.fetch` and upgrades on `401`. This
- * provider owns that single patch and the LOGIN POPUP LIFECYCLE (first-party —
- * the library's `<authorization-code-flow>` web component is gone; see
- * `src/lib/popup-login.ts` for the rules), and exposes a small reactive
- * session for the UI.
+ * The Solid session bridge for React. There is no upstream session object: the
+ * authenticated `fetch` is a patched `globalThis.fetch`. This provider owns that
+ * single patch and the LOGIN POPUP LIFECYCLE (first-party — the library's
+ * `<authorization-code-flow>` web component is gone; see `src/lib/popup-login.ts`
+ * for the rules), and exposes a small reactive session for the UI.
+ *
+ * The global fetch patch is the PROACTIVE-ATTACH wrapper (`proactive-auth-fetch.ts`),
+ * NOT reactive-auth's `ReactiveFetchManager`: it attaches the DPoP token on the FIRST
+ * request to an allowed (own-pod) origin instead of sending every request
+ * unauthenticated and upgrading on a 401 — eliminating the per-resource "401 dance"
+ * (#123). The credential-origin boundary (`allowedOriginsRef`) is derived from the
+ * active session's WebID + issuer + storage origins and read fresh per request, so the
+ * token never reaches a foreign origin. The existing `WebIdDPoPTokenProvider` (issuer-
+ * session cache + proactive refresh + refresh-grant restore) is unchanged; only WHEN it
+ * upgrades changed (proactive, not reactive-on-401).
  *
  * Login model (first-party UI): the user picks a provider, or enters EITHER a
  * WebID OR a bare issuer URL in one smart input (`src/lib/login-input.ts`).
@@ -45,6 +54,11 @@ import {
 } from "@/lib/session-persistence";
 import { fetchProfile, type PodProfile } from "@/lib/profile";
 import { readCache } from "@/lib/swr-cache";
+import { nativeFetch } from "@/lib/native-fetch";
+import {
+  computeAllowedOrigins,
+  installProactiveAuthFetch,
+} from "@/lib/proactive-auth-fetch";
 
 type Status = "loading" | "logged-out" | "authenticating" | "logged-in";
 
@@ -126,6 +140,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // popup, and a click handler cannot await (the user activation would be
   // spent). Null until the auth module loads; the probe then says "open".
   const providerSyncRef = useRef<WebIdDPoPTokenProvider>(null);
+  // The CURRENT credential-origin boundary — the set of resource origins the
+  // proactive-auth fetch may attach the session's DPoP token to. Read FRESH per
+  // request by the global fetch wrapper, so a post-login storage/WebID change
+  // updates the boundary without re-installing the wrapper. Empty (fail-closed)
+  // until a session resolves its WebID + storages.
+  const allowedOriginsRef = useRef<ReadonlySet<string>>(new Set<string>());
+  // The active issuer's origin(s) — scopes the proactive-auth wrapper's
+  // provider-internal-OAuth bypass (a CSS pod shares its IdP's origin, so the wrapper must
+  // not re-upgrade the provider's own token/discovery calls). Empty until a session
+  // resolves; cleared on logout.
+  const issuerOriginRef = useRef<ReadonlySet<string>>(new Set<string>());
   const [status, setStatus] = useState<Status>("loading");
   const [webId, setWebId] = useState<string>();
   const [profile, setProfile] = useState<PodProfile>();
@@ -154,18 +179,70 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     return controllerRef.current;
   }, []);
 
-  // Register the reactive fetch manager exactly once, as early as possible.
+  /**
+   * Recompute the credential-origin boundary from the active session and store it in
+   * {@link allowedOriginsRef} (the proactive-auth fetch reads it fresh per request). The
+   * allowed set is the WebID's origin + the issuer's origin + every advertised storage
+   * origin — the origins a user's own resources are served from.
+   *
+   * `allowInsecureLoopback` is enabled ONLY when the APP itself runs on a loopback origin
+   * (dev/test CSS over HTTP at http://localhost); a deployed HTTPS app leaves it false, so
+   * the boundary's cleartext guard DROPS any http: origin — the DPoP token can never ride
+   * over plaintext in production. (The boundary is fail-closed regardless: an empty set
+   * attaches the token to nothing.)
+   */
+  const refreshAllowedOrigins = useCallback(
+    (id: string | undefined, storages: string[], issuer: string | undefined) => {
+      const appOnLoopback =
+        typeof location !== "undefined" &&
+        (location.hostname === "localhost" ||
+          location.hostname === "127.0.0.1" ||
+          // `Location.hostname` returns the IPv6 loopback WITHOUT brackets (`::1`), unlike a
+          // URL parsed from `http://[::1]/` (`[::1]`); accept both so an app served from the
+          // IPv6 loopback in dev/test still enables the loopback exception.
+          location.hostname === "::1" ||
+          location.hostname === "[::1]");
+      allowedOriginsRef.current = computeAllowedOrigins({
+        allowedOrigins: storages,
+        webId: id,
+        issuer,
+        allowInsecureLoopback: appOnLoopback,
+      });
+      // The issuer origin alone (same cleartext rules) — scopes the OAuth-bypass so only
+      // calls to the IdP are excluded from proactive upgrade, never a pod resource write.
+      issuerOriginRef.current = computeAllowedOrigins({
+        allowedOrigins: issuer ? [issuer] : [],
+        includeWebIdOrigin: false,
+        includeIssuerOrigin: false,
+        allowInsecureLoopback: appOnLoopback,
+      });
+    },
+    [],
+  );
+
+  /**
+   * Close the credential boundary AND clear every session pointer the proactive-auth fetch
+   * consults. MUST be called on EVERY failure path that may have opened the boundary before
+   * the session fully landed (e.g. `provider.login()` succeeds but the subsequent
+   * `fetchProfile()` throws): otherwise the wrapper could keep attaching the DPoP token for
+   * the stale issuer/origin while the UI is logged-out (the roborev finding). Idempotent.
+   */
+  const closeCredentialBoundary = useCallback(() => {
+    allowedOriginsRef.current = new Set<string>();
+    issuerOriginRef.current = new Set<string>();
+    activeIssuerRef.current = undefined;
+    pendingWebIdRef.current = undefined;
+  }, []);
+
+  // Wire the token provider + install the proactive-auth global fetch wrapper exactly
+  // once, as early as possible.
   useEffect(() => {
     if (registeredRef.current) return;
     registeredRef.current = true;
 
     let cancelled = false;
     providerReadyRef.current = (async () => {
-      const [{ ReactiveFetchManager }, { WebIdDPoPTokenProvider }] =
-        await Promise.all([
-          import("@solid/reactive-authentication"),
-          import("@/lib/webid-token-provider"),
-        ]);
+      const { WebIdDPoPTokenProvider } = await import("@/lib/webid-token-provider");
 
       const controller = getController();
       const callbackUri = new URL("/callback.html", location.href).toString();
@@ -211,8 +288,63 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         },
       );
 
-      const manager = new ReactiveFetchManager([provider]);
-      manager.registerGlobally();
+      // Patch the global `fetch` with the PROACTIVE-ATTACH wrapper (replacing the old
+      // reactive `ReactiveFetchManager`, which sent every request unauthenticated first
+      // and only upgraded on a 401 — paying a wasted 401→upgrade→retry per distinct URL,
+      // the "401 dance"). The wrapper attaches the DPoP token PROACTIVELY on the first
+      // request to an allowed origin and does one bounded 401 re-upgrade; it reads the
+      // CURRENT credential-origin boundary fresh per request, and is anchored on the
+      // KNOWN-PRISTINE `nativeFetch` snapshot (never the live, possibly-patched global),
+      // so it can never chain a foreign request through another patcher's fetch.
+      // Install ONCE (the `registeredRef` guard above ensures this effect body runs a
+      // single time for the app's lifetime); we deliberately never un-patch (see the
+      // cleanup note). `installProactiveAuthFetch` returns an uninstall we don't retain.
+      installProactiveAuthFetch({
+        provider,
+        allowedOrigins: () => allowedOriginsRef.current,
+        // The active issuer's origin — used ONLY to scope the provider-internal-OAuth
+        // bypass (so a token/refresh/discovery call to the IdP is never re-upgraded, even
+        // when the pod shares the IdP's origin). https-only / loopback-in-dev, matching the
+        // resource boundary's cleartext rule. Empty when logged out.
+        issuerOrigins: () => issuerOriginRef.current,
+        baseFetch: nativeFetch,
+        // SESSION-LIVENESS gate: attach proactively ONLY when the active issuer's session
+        // can renew WITHOUT interaction (a live token or a refresh token — a plain fetch).
+        // `WebIdDPoPTokenProvider.matches()` always returns true, so without this a PASSIVE
+        // read during silent restore (the profile fetch) for an account whose refresh token
+        // is dead would start the interactive popup flow from a background fetch — breaking
+        // the fail-closed silent-restore invariant. When not renewable, the request is left
+        // unauthenticated; an explicit login (fresh session) passes the gate.
+        //
+        // RESIDUAL — the single tracked follow-up (a provider API change, deferred out of
+        // this fetch-wrapper change per "keep the provider intact"): `upgrade()` can fall
+        // back to the interactive authorization-code flow, and `canRenewWithoutInteraction`
+        // is the only signal we have to avoid that — but it is COARSE, with two consequences
+        // this gate trades off DELIBERATELY toward "never a passive popup":
+        //   (a) FALSE-POSITIVE: a refresh token cached NOW can be REVOKED before `upgrade()`
+        //       redeems it → `#renew` falls back to the code flow. From a background fetch the
+        //       browser BLOCKS `window.open`, so the worst case is the app's blocked-popup
+        //       affordance ("Continue signing in"), NOT a silent surprise window; and every
+        //       login/restore failure path closes the boundary.
+        //   (b) FALSE-NEGATIVE: a still-logged-in session whose access token expired with NO
+        //       refresh token issued returns false here, so a private read goes out
+        //       unauthenticated and 401s instead of using the silent-first re-auth. We accept
+        //       the 401 (the user re-logs-in with one click) rather than risk (a)'s passive
+        //       popup — the fail-closed direction.
+        // The complete fix is a NON-INTERACTIVE upgrade mode on `WebIdDPoPTokenProvider`
+        // (`upgrade(req, { interactive: false })` that returns the request unauthenticated
+        // instead of running the code flow); then this gate can attach whenever ANY
+        // non-interactive renewal is possible and never risk a background popup.
+        canAttachNonInteractively: () => {
+          const issuer = activeIssuerRef.current;
+          if (!issuer) return false;
+          try {
+            return provider.canRenewWithoutInteraction(new URL(issuer));
+          } catch {
+            return false;
+          }
+        },
+      });
       providerSyncRef.current = provider;
       return provider;
     })();
@@ -232,38 +364,75 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           : null;
       if (last) {
         try {
-          // If a DPoP-bound refresh-token session was persisted for this
-          // account's issuer, restore it via a refresh grant FIRST — a plain
-          // token-endpoint fetch, NO popup/iframe. This is what removes the
-          // brief window a returning user used to see: the in-memory session is
-          // rebuilt before any private read can 401. On failure (expired /
-          // revoked refresh token) restoreIssuer clears the dead entry and
-          // returns undefined; we fall through to the public-profile restore,
-          // and a later private read re-auths silently while the IdP cookie
-          // lives — exactly the previous behaviour, still no popup on restore.
+          // Restore the DPoP-bound refresh-token session via a refresh grant FIRST — a
+          // plain token-endpoint fetch, NO popup/iframe — rebuilding a RENEWABLE in-memory
+          // session before any private read can 401.
+          //
+          // FAIL-CLOSED, deliberately (the suite's silent-restore INVARIANT, AGENTS.md /
+          // CLAUDE.md §Cross-app UX: "restore is fail-closed, so any could-not-rebuild /
+          // could-not-verify path resolves to login, never a falsely-asserted session").
+          // We proceed to logged-in restore ONLY when restoreIssuer actually rebuilt a
+          // renewable session. This resolves a genuine THREE-WAY tension surfaced by review:
+          //   (a) a background read must NOT pop a window (no passive popup) — so the wrapper
+          //       attaches/refreshes only while non-interactively renewable;
+          //   (b) the UI must not claim logged-in while every private read 401s with no
+          //       silent recovery — so a public-shell-only "restore" is wrong; and
+          //   (c) returning-user reload should be seamless.
+          // There is NO no-window path to a fresh session once the refresh token is dead
+          // (a prompt=none attempt needs a popup, blocked outside a user gesture), so the
+          // invariant-compliant choice for the dead-token case is (b)+(a): fall back to
+          // login. PM persists a refresh token on EVERY login (IndexedDB), so this case is
+          // rare (cleared storage / IndexedDB unavailable); the user then re-authenticates
+          // with ONE click that completes silently (no typing, no visible window) while the
+          // IdP cookie lives via `openPopupUnlessRenewable` + the silent-first probe. So:
+          // renewable session ⇒ restore + logged-in; otherwise ⇒ logged-out.
           const issuer = remembered.find((a) => a.webId === last)?.issuer;
+          let restored = false;
           if (issuer) {
             const provider = await providerReadyRef.current;
-            await provider?.restoreIssuer(new URL(issuer)).catch(() => undefined);
-            if (!cancelled) activeIssuerRef.current = issuer;
+            const outcome = await provider
+              ?.restoreIssuer(new URL(issuer))
+              .catch(() => undefined);
+            if (outcome && !cancelled) {
+              activeIssuerRef.current = issuer;
+              restored = true;
+            }
           }
-          await restore(last);
+          if (restored) {
+            await restore(last);
+          } else if (!cancelled) {
+            // No renewable session → fall back to login, boundary closed.
+            closeCredentialBoundary();
+            setStatus("logged-out");
+          }
         } catch {
+          // A failed silent restore must leave the boundary CLOSED (the wrapper attaches
+          // nothing) while we fall back to login — never a stale-issuer open boundary.
+          closeCredentialBoundary();
           if (!cancelled) setStatus("logged-out");
         }
       } else if (!cancelled) {
         setStatus("logged-out");
       }
     })().catch(() => {
+      closeCredentialBoundary();
       if (!cancelled) setStatus("logged-out");
     });
 
     return () => {
       cancelled = true;
-      // Tear down proactive-refresh timers + the visibility listeners on
-      // unmount so nothing leaks (no orphaned intervals, no token churn) after
-      // this provider is discarded. Fire-and-forget; teardown is idempotent.
-      void providerReadyRef.current?.then((p) => p?.teardown()).catch(() => {});
+      // Registration is ONE-TIME (`registeredRef` guards the effect body) and the provider
+      // + its global fetch patch are a SINGLETON meant to live for the app's lifetime
+      // (matching the old `ReactiveFetchManager.registerGlobally()`, which was never
+      // reversed). So this cleanup intentionally does NOT (a) un-patch the global fetch, nor
+      // (b) tear down the provider's proactive-refresh timers. Doing either would break
+      // React StrictMode's dev setup→cleanup→setup probe: the SECOND setup returns early at
+      // the `registeredRef` guard, so it would NOT re-install the wrapper or re-arm the
+      // provider — leaving the global as the unauthenticated pristine fetch and the provider
+      // torn down (the roborev finding). The proactive-refresh timers are visibility-gated
+      // and bound to this singleton; a root-level SessionProvider unmounts only at full app
+      // teardown, so not tearing them down here leaks nothing in practice. (A proper split
+      // of one-time install from per-mount restore is a tracked follow-up.)
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -280,12 +449,31 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // its loading skeleton (e.g. an external app deep-linking into
     // /connected-apps/grant). See connected-apps e2e.
     pendingWebIdRef.current = id;
-    const p = await fetchProfile(id);
+    // Open a PRELIMINARY boundary (WebID + issuer origins) BEFORE the profile read: the
+    // profile fetch goes through the proactive-auth global fetch, and a PRIVATE profile
+    // (or authenticated discovery doc) must be authenticated on its first request rather
+    // than left public (the proactive wrapper does not reactively upgrade on a 401, unlike
+    // the old manager). The WebID's own origin covers the profile doc in the common case;
+    // the storage origins are added below once discovered.
+    refreshAllowedOrigins(id, [], activeIssuerRef.current);
+    let p: PodProfile;
+    try {
+      p = await fetchProfile(id);
+    } catch (e) {
+      // The boundary was opened before the (failed) profile read — close it so the wrapper
+      // does not keep attaching the token for a session that never landed (the roborev
+      // finding). The caller's catch then sets status logged-out.
+      closeCredentialBoundary();
+      throw e;
+    }
+    // Widen the boundary to this account's storage origins too, so the first authenticated
+    // pod read (which the page fires immediately) is proactively authenticated.
+    refreshAllowedOrigins(id, p.storages, activeIssuerRef.current);
     setWebId(id);
     setProfile(p);
     setActive(p.storages[0]);
     setStatus("logged-in");
-  }, []);
+  }, [refreshAllowedOrigins, closeCredentialBoundary]);
 
   /**
    * The shared back half of every login: run the code flow against the
@@ -295,6 +483,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const completeLogin = useCallback(
     async (issuer: string, knownWebId: string | undefined, silentFirst = false) => {
       setStatus("authenticating");
+      // CLOSE the (possibly PRIOR account's) credential boundary BEFORE running the new
+      // login's OIDC discovery/token requests. Otherwise, on an account switch, the old
+      // session's allowed-origin set could still be active while `provider.login(newIssuer)`
+      // fetches the new issuer — and if the new issuer's origin happens to be in the OLD
+      // allow-list, those provider-internal OAuth requests could be upgraded with the OLD
+      // account's DPoP token (the roborev finding). The new boundary is opened only AFTER
+      // the new session lands. (The provider's own OAuth fetch is also issuer-scoped-bypassed
+      // once issuerOriginRef is set, but clearing first removes the stale-account window.)
+      closeCredentialBoundary();
       try {
         const provider = await providerReadyRef.current;
         if (!provider) throw new Error("Auth is not initialised yet");
@@ -322,7 +519,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           if (prev && prev !== id) readCache.clearWebId(prev);
           return id;
         });
+        // Open a PRELIMINARY boundary (WebID + issuer origins) BEFORE the profile read so
+        // a PRIVATE profile / authenticated discovery doc is authenticated on its first
+        // request (the proactive wrapper does not reactively upgrade on a 401).
+        refreshAllowedOrigins(id, [], issuer);
         const p = await fetchProfile(id);
+        // Widen to this account's storage origins before the first authenticated pod read.
+        refreshAllowedOrigins(id, p.storages, issuer);
         setProfile(p);
         setActive(p.storages[0]);
         setStatus("logged-in");
@@ -342,11 +545,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       } catch (e) {
         getController().closeIfOpen();
         setBlockedPopup(null);
+        // Close the credential boundary on ANY failure after `provider.login()` may have
+        // landed a live session + opened the boundary (e.g. a failed `fetchProfile`): leave
+        // the wrapper attaching nothing while the UI reports logged-out (the roborev
+        // finding).
+        closeCredentialBoundary();
         setStatus("logged-out");
         throw e;
       }
     },
-    [getController],
+    [getController, refreshAllowedOrigins, closeCredentialBoundary],
   );
 
   const login = useCallback(
@@ -360,14 +568,20 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // the popup opens here, synchronously, exactly as before.
       openPopupUnlessRenewable(getController(), providerSyncRef.current, opts?.issuer);
       setStatus("authenticating");
+      // Close the (possibly PRIOR account's) credential boundary up front: the smart-input
+      // discovery below runs BEFORE completeLogin opens the new boundary, and on an account
+      // switch the old boundary could otherwise attach the OLD account's token to the NEW
+      // login target's WebID/issuer discovery request when they share an origin (the roborev
+      // finding). The discovery read is public anyway.
+      closeCredentialBoundary();
       try {
         // Resolve the smart input: WebID (deref → solid:oidcIssuer) or bare
-        // issuer (OIDC discovery). A remembered issuer (recent account) skips
-        // ambiguity; several advertised issuers without a choice throw so the
-        // UI can let the USER pick — never silently the first.
+        // issuer (OIDC discovery), through the PRISTINE credential-free fetch — a public
+        // discovery read must never carry a session token (defense in depth alongside the
+        // boundary close above).
         let issuer = opts?.issuer;
         let knownWebId: string | undefined;
-        const target: LoginTarget = await resolveLoginInput(input);
+        const target: LoginTarget = await resolveLoginInput(input, nativeFetch);
         if (target.kind === "webid") {
           knownWebId = target.webId;
           if (!issuer) {
@@ -382,11 +596,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         await completeLogin(issuer, knownWebId, opts?.silentFirst ?? false);
       } catch (e) {
         getController().closeIfOpen();
+        closeCredentialBoundary();
         setStatus("logged-out");
         throw e;
       }
     },
-    [completeLogin, getController],
+    [completeLogin, getController, closeCredentialBoundary],
   );
 
   const loginWithIssuer = useCallback(
@@ -411,6 +626,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // a render-speed optimization only; clearing it here is the security
     // boundary for the read snapshots (writes already re-read fresh).
     readCache.clearAll();
+    // Close the credential boundary: a logged-out session must attach the token to
+    // NOTHING. The provider's `matches` also guards, but clearing here is the explicit
+    // boundary — the proactive-auth fetch reads this set fresh on its next request.
+    allowedOriginsRef.current = new Set<string>();
+    issuerOriginRef.current = new Set<string>();
     setWebId(undefined);
     setProfile(undefined);
     setActive(undefined);

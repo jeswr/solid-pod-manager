@@ -126,3 +126,29 @@ SolidOS-parity QUICK WINS — touched:
   Extracted `RdfViewer` to `rdf-table.tsx`.
 - `src/components/typed-views/registry.tsx` — adds `viewMetaFor(resource)`
   reporting `{ hasTypedView, source, tableClass }` for the switcher.
+
+Auth — proactive-attach fetch (eliminate the per-resource 401 dance, #123 Phase 1):
+
+- `src/lib/native-fetch.ts` — the pristine native `fetch` snapshot (captured at
+  module load, before any patching) — the credential-free / foreign-origin base.
+- `src/lib/auth-origin-boundary.ts` — the credential-origin boundary
+  (`computeAllowedOrigins` / `isOriginAllowed` / `htuOf` / `isUseDpopNonceChallenge`
+  / `parseWwwAuthenticate`), VENDORED verbatim from `@jeswr/solid-elements`
+  `src/auth/index.ts` @ `df0fbe4` (the seam's `/auth` module drags
+  `@jeswr/solid-session-restore` + a second reactive-auth at top level, so the
+  dependency-free pure helpers are vendored per the suite rule — NO
+  `@jeswr/solid-elements` runtime dependency is added; follow-up: a dependency-free
+  `@jeswr/solid-elements/auth-boundary` subexport to import instead).
+- `src/lib/auth-origin-boundary.test.ts` — exhaustive boundary tests (fail-closed,
+  cleartext guard, loopback opt-in, multi-challenge WWW-Authenticate parse).
+- `src/lib/proactive-auth-fetch.ts` — the proactive-attach global `fetch` wrapper:
+  attaches the DPoP token on the FIRST request to an allowed origin (no wasted
+  unauthenticated probe), one bounded 401 re-upgrade, anchored on the pristine base.
+- `src/lib/proactive-auth-fetch.test.ts` — the dance regression guard (401s do not
+  scale with resource count) + the foreign-origin boundary + bounded-retry tests.
+- `src/components/session-provider.tsx` — swapped `ReactiveFetchManager` for
+  `installProactiveAuthFetch`, deriving the allowed-origin boundary from the active
+  session's WebID + issuer + storages (read fresh per request); provider unchanged.
+- `e2e/auth-401-budget.spec.ts` + `e2e/seed-children.ts` — the Playwright 401-budget
+  e2e against local CSS (≤1 401 per storage root; total ≤ #roots; count does not
+  scale with child count).

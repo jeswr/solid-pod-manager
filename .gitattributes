@@ -1,1 +1,5 @@
 * text=auto eol=lf
+
+# Vendored npm tarballs are binary — never EOL-normalize (was silently corrupting
+# the @solid/reactive-authentication tgz vs its package-lock integrity hash).
+vendor/*.tgz binary

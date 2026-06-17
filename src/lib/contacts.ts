@@ -720,9 +720,12 @@ function migrationKeys(c: Contact): string[] {
   // The full-tuple key only counts as a signal when at least one detail beyond a
   // (possibly shared) name is present — a bare-name contact has no twin signal.
   // JSON-encode the tuple so a field containing the delimiter can't collide with
-  // a different tuple (roborev Low — a naive `a|b` join is ambiguous).
+  // a different tuple (roborev Low). The WebID is INCLUDED in the tuple: with
+  // any-key twin matching, two contacts that share a name but differ ONLY by
+  // WebID must produce DIFFERENT full keys, or the WebID-less one would falsely
+  // collapse the WebID-bearing one (roborev Medium).
   if (name && (email || phone || webId || note)) {
-    keys.push(`full:${JSON.stringify([name, email, phone, note])}`);
+    keys.push(`full:${JSON.stringify([name, email, phone, note, webId])}`);
   }
   return keys;
 }

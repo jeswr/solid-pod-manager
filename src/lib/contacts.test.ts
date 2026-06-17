@@ -320,8 +320,10 @@ describe("address-book write path (SolidOS layout)", () => {
 
   it("uses a delimiter-safe full-tuple key (no `|` collision)", async () => {
     const pod = createMemoryPod();
-    // Two distinct legacy contacts whose naive `name|email` joins would COLLIDE
-    // ("a|b" + "" vs "a" + "b|") must stay distinct under the JSON-encoded key.
+    // These two DISTINCT contacts produce the SAME naive `name|email|phone|note`
+    // join (`a|b|||n`): legacy = ("a|b","","","n"); canonical = ("a","b","","|n").
+    // A naive pipe-join would alias them into one twin and HIDE the legacy; the
+    // JSON-encoded tuple keeps them apart so both still show.
     await pod.fetch(`${CONTAINER}c1.ttl`, {
       method: "PUT",
       headers: { "content-type": "text/turtle" },
@@ -329,9 +331,24 @@ describe("address-book write path (SolidOS layout)", () => {
 <${CONTAINER}c1.ttl#it> a vcard:Individual ; vcard:fn "a|b" ; vcard:note "n" .`,
     });
     const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
-    // Canonical with name "a" and note "b|n" — a naive `name|email|phone|note`
-    // join could alias with the legacy's "a|b"+"n"; the JSON key keeps them apart.
-    await store.create({ fn: "a", note: "b|n" });
+    await store.create({ fn: "a", email: "b", note: "|n" });
+    const items = await store.list();
+    expect(items).toHaveLength(2);
+  });
+
+  it("keeps two contacts that share a name but differ ONLY by WebID", async () => {
+    const pod = createMemoryPod();
+    // Same fn, different WebIDs — distinct people. The full key includes the
+    // WebID, so they do not collapse (roborev Medium round-5).
+    await pod.fetch(`${CONTAINER}same-name.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}same-name.ttl#it> a vcard:Individual ; vcard:fn "John Smith" ;
+  vcard:url <https://john1.example/card#me> .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "John Smith", webId: "https://john2.example/card#me" });
     const items = await store.list();
     expect(items).toHaveLength(2);
   });

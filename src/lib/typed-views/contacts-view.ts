@@ -2,12 +2,14 @@
 /**
  * Contacts typed-view (design: `docs/typed-data-views.md` §2.2, §4, P1).
  *
- * Targets the real vcard shape this app writes (`src/lib/contacts.ts`):
- * `vcard:Individual` with `vcard:fn`, `vcard:hasEmail` (a `mailto:` IRI),
- * `vcard:hasTelephone` (a `tel:` IRI), `vcard:note`. WebID-style profiles
- * (`foaf:Person` with `foaf:name`/`vcard:hasPhoto`) are the avatar-bearing
- * sibling — handled by reusing `ProfileAgent`'s `displayName`/`avatarUrl`
- * fallback chains verbatim.
+ * Targets the SolidOS-interoperable vcard shape this app now writes
+ * (`src/lib/contacts.ts` over `@jeswr/solid-task-model/contacts`):
+ * `vcard:Individual` with `vcard:fn`, email/phone in EITHER the STRUCTURED
+ * `vcard:hasEmail [ vcard:value <mailto:..> ]` form (canonical) OR a legacy
+ * direct `vcard:hasEmail <mailto:..>` IRI, plus `vcard:note`. WebID-style
+ * profiles (`foaf:Person` with `foaf:name`/`vcard:hasPhoto`) are the
+ * avatar-bearing sibling — handled by reusing `ProfileAgent`'s
+ * `displayName`/`avatarUrl` fallback chains verbatim.
  *
  * Pure: extracts a plain `{ items: ContactCard[] }` model the React card
  * renders as a profile-card list — avatar + name + email/phone actions, no raw
@@ -120,11 +122,46 @@ function objectLiteral(
   return undefined;
 }
 
+const VCARD_VALUE = `${VCARD}value`;
+
+/**
+ * Read a contact's email/phone IRI in EITHER the SolidOS-canonical STRUCTURED
+ * form (`subject vcard:hasEmail [ vcard:value <mailto:..> ]`) or the legacy
+ * DIRECT-IRI form (`subject vcard:hasEmail <mailto:..>`). The structured form is
+ * preferred (it is what `@jeswr/solid-task-model/contacts` writes). Only an IRI
+ * with `requiredScheme` is returned — pod data is untrusted, so a
+ * `javascript:`/`http:`/literal value is dropped rather than handed to UI.
+ */
+function contactValueUri(
+  dataset: DatasetCore,
+  subject: string,
+  predicate: string,
+  requiredScheme: "mailto:" | "tel:",
+): string | undefined {
+  const guard = (v: string | undefined) =>
+    v && v.toLowerCase().startsWith(requiredScheme) ? v : undefined;
+  for (const quad of dataset as Iterable<Quad>) {
+    if (quad.subject.value !== subject || quad.predicate.value !== predicate) continue;
+    if (quad.object.termType === "NamedNode") {
+      // Direct-IRI form (legacy).
+      const direct = guard(quad.object.value);
+      if (direct) return direct;
+    } else if (quad.object.termType === "BlankNode") {
+      // Structured form: follow the blank node's vcard:value.
+      const value = objectIri(dataset, quad.object.value, VCARD_VALUE);
+      const structured = guard(value);
+      if (structured) return structured;
+    }
+  }
+  return undefined;
+}
+
 /** Extract one card from a contact subject, reusing `ProfileAgent` for name/avatar. */
 function extractCard(dataset: DatasetCore, subject: string): ContactCard {
   const agent = new ProfileAgent(subject, dataset, DataFactory);
-  const emailUri = objectIri(dataset, subject, `${VCARD}hasEmail`);
-  const phoneUri = objectIri(dataset, subject, `${VCARD}hasTelephone`);
+  // Read BOTH the structured (SolidOS-canonical) and legacy direct-IRI forms.
+  const emailUri = contactValueUri(dataset, subject, `${VCARD}hasEmail`, "mailto:");
+  const phoneUri = contactValueUri(dataset, subject, `${VCARD}hasTelephone`, "tel:");
   return {
     id: subject,
     name: agent.displayName, // foaf:name → schema:name → vcard:fn → … → the IRI

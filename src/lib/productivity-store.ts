@@ -59,6 +59,39 @@ export interface StoredItem<T> {
 }
 
 /**
+ * The CRUD surface the UI hooks (`useItems`/`useItem`) and pages consume. The
+ * generic {@link ProductivityStore} implements it (Notes/Calendar/…), and so
+ * does the bespoke `AddressBookContactsStore` (a SolidOS `vcard:AddressBook`
+ * isn't a flat one-resource-per-item container, so it can't be a
+ * `ProductivityStore`, but it exposes the SAME surface). Hooks/pages depend on
+ * THIS interface, not the concrete class, so both backings are interchangeable.
+ */
+export interface ItemStore<T> {
+  /** The container these items live in (always ends in `/`). */
+  readonly container: string;
+  /** List every item. */
+  list(): Promise<StoredItem<T>[]>;
+  /** Read one item by URL (`undefined` when it holds no item of this type). */
+  read(url: string): Promise<StoredItem<T> | undefined>;
+  /** Create a new item; returns its URL + ETag. */
+  create(data: T, slugHint?: string): Promise<{ url: string; etag: string | null }>;
+  /**
+   * Overwrite an existing item (conditional on `etag`). Returns the surviving
+   * item's ETag and, when the write MOVED the item to a new resource (e.g. a
+   * contacts store migrating a legacy flat file into the canonical layout), the
+   * new `url` so the caller can re-point at it. `url` is omitted for an in-place
+   * update.
+   */
+  update(
+    url: string,
+    data: T,
+    etag?: string | null,
+  ): Promise<{ etag: string | null; url?: string }>;
+  /** Delete an item (idempotent). */
+  remove(url: string): Promise<void>;
+}
+
+/**
  * Per-app configuration that turns the generic store into a typed one.
  *
  * @typeParam T - the app's plain-data payload (e.g. a `Note`).
@@ -96,7 +129,7 @@ export interface StoreConfig<T> {
  * Construct via {@link createStore}. Production callers pass NO `fetchImpl`
  * (the auth-patched global runs); tests inject one (AGENTS.md §Reading data).
  */
-export class ProductivityStore<T> {
+export class ProductivityStore<T> implements ItemStore<T> {
   private readonly containerUrl: string;
 
   constructor(

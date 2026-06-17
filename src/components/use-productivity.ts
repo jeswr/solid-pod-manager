@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { useSwrRead } from "@/components/use-swr-read";
 import {
-  type ProductivityStore,
+  type ItemStore,
   type StoredItem,
 } from "@/lib/productivity-store";
 import type { AdvisoryHandler } from "@/lib/shacl/advisory";
@@ -45,8 +45,8 @@ export function useStore<T>(
     podRoot: string;
     webId: string;
     onAdvisory?: AdvisoryHandler;
-  }) => ProductivityStore<T>,
-): ProductivityStore<T> | undefined {
+  }) => ItemStore<T>,
+): ItemStore<T> | undefined {
   const { webId, activeStorage, status } = useSession();
   return useMemo(() => {
     if (status !== "logged-in" || !webId || !activeStorage) return undefined;
@@ -70,7 +70,7 @@ export function useStore<T>(
  * mutates through the `store` (a fresh server write), not the cached snapshot.
  */
 export function useItems<T>(
-  store: ProductivityStore<T> | undefined,
+  store: ItemStore<T> | undefined,
 ): RevalidatableState<StoredItem<T>[]> & { reload: () => void } {
   // Per-container key; no store yet → empty key (no fetch, loading state),
   // matching the previous "no store → loading" behaviour exactly.
@@ -96,7 +96,7 @@ export function useItems<T>(
  * go through the `store`, not the cached snapshot.
  */
 export function useItem<T>(
-  store: ProductivityStore<T> | undefined,
+  store: ItemStore<T> | undefined,
   url: string | undefined,
 ): RevalidatableState<StoredItem<T> | undefined> & { reload: () => void } {
   const key = store && url ? `productivity-item:${url}` : "";

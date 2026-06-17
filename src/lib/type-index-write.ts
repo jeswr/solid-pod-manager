@@ -25,11 +25,24 @@ import {
   resolvePrivateIndex,
 } from "./type-index.js";
 
-/** A registration the caller wants present: class → container. */
+/**
+ * A registration the caller wants present, identifying WHERE instances of
+ * `forClass` live. Supply EXACTLY ONE of:
+ *   - `container` — a `solid:instanceContainer` (a container listing instances;
+ *     must end in `/`); or
+ *   - `instance` — a `solid:instance` (a SINGLE resource holding the instance,
+ *     e.g. an address book's `contacts/index.ttl#this` root).
+ *
+ * Both forms are spec registrations; an app may register the same class under
+ * both (a container AND a specific instance) by passing two entries — they are
+ * matched independently and de-duplicated by `(forClass, target)`.
+ */
 export interface DesiredRegistration {
   forClass: string;
-  /** Container URL (must end in `/`). */
-  container: string;
+  /** `solid:instanceContainer` URL (must end in `/`). Mutually exclusive with `instance`. */
+  container?: string;
+  /** `solid:instance` URL (a single resource). Mutually exclusive with `container`. */
+  instance?: string;
 }
 
 export interface EnsureRegistrationsResult {
@@ -99,18 +112,32 @@ export async function ensureTypeRegistrations(opts: {
 
   let added = 0;
   for (const desired of registrations) {
+    // Exactly one of container/instance must be supplied — fail closed so a
+    // caller never mints a registration with neither (or both) target.
+    if (Boolean(desired.container) === Boolean(desired.instance)) {
+      throw new TypeError(
+        "DesiredRegistration: provide exactly one of `container` or `instance`.",
+      );
+    }
+    // `solid:instanceContainer` targets MUST be container URLs (trailing slash).
+    const container = desired.container
+      ? desired.container.endsWith("/")
+        ? desired.container
+        : `${desired.container}/`
+      : undefined;
     const exists = index
       .locate(desired.forClass)
-      .some((l) => l.container === desired.container);
+      .some((l) => l.container === container && l.instance === desired.instance);
     if (exists) continue;
     const reg = new TypeRegistration(
-      `${indexUrl}#reg-${fragmentFor(desired)}`,
+      `${indexUrl}#reg-${fragmentFor({ ...desired, container })}`,
       indexDs,
       DataFactory,
     );
     reg.markRegistration();
     reg.forClass = desired.forClass;
-    reg.instanceContainer = desired.container;
+    if (container) reg.instanceContainer = container;
+    if (desired.instance) reg.instance = desired.instance;
     added += 1;
   }
 
@@ -317,9 +344,14 @@ function documentUrl(webId: string): string {
   return u.toString();
 }
 
-/** Deterministic fragment for a registration (FNV-1a over class|container). */
+/**
+ * Deterministic fragment for a registration (FNV-1a over class|target). The
+ * target is the container OR the instance, so two registrations for the SAME
+ * class but different targets (e.g. `vcard:Individual` container AND
+ * `vcard:AddressBook` instance) get distinct, stable subjects.
+ */
 function fragmentFor(reg: DesiredRegistration): string {
-  const input = `${reg.forClass}|${reg.container}`;
+  const input = `${reg.forClass}|${reg.container ?? reg.instance ?? ""}`;
   let hash = 0x811c9dc5;
   for (let i = 0; i < input.length; i++) {
     hash ^= input.charCodeAt(i);

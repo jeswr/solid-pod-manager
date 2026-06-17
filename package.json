@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "check:shapes": "node scripts/check-shapes.mjs",
+    "check:lockfile-transport": "node scripts/check-lockfile-transport.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test"

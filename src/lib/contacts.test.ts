@@ -295,6 +295,47 @@ describe("address-book write path (SolidOS layout)", () => {
     expect(items.map((i) => i.data.fn).sort()).toEqual(["Housemate A", "Housemate B"]);
   });
 
+  it("matches a twin per-canonical, NOT against a pooled key set", async () => {
+    const pod = createMemoryPod();
+    // Legacy contact carries a WebID + a name. Its STRONG keys are
+    // [webid:c, full:"legacy name"|...]. We seed two canonical contacts that each
+    // hold ONE of those key-shapes but for DIFFERENT people: A shares the WebID
+    // (so A IS the legacy's twin — same person), B coincidentally shares nothing.
+    await pod.fetch(`${CONTAINER}twin.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}twin.ttl#it> a vcard:Individual ; vcard:fn "Twin Legacy" ;
+  vcard:url <https://c.example/card#me> .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Canonical C", webId: "https://c.example/card#me" }); // shares WebID
+    await store.create({ fn: "Canonical D", email: "d@x.io" }); // unrelated
+    const items = await store.list();
+    // The legacy shares the WebID with C only → twin of C → deduped (canonical
+    // wins). Result: C + D (2), the legacy collapsed into C.
+    expect(items).toHaveLength(2);
+    expect(items.map((i) => i.data.fn).sort()).toEqual(["Canonical C", "Canonical D"]);
+  });
+
+  it("uses a delimiter-safe full-tuple key (no `|` collision)", async () => {
+    const pod = createMemoryPod();
+    // Two distinct legacy contacts whose naive `name|email` joins would COLLIDE
+    // ("a|b" + "" vs "a" + "b|") must stay distinct under the JSON-encoded key.
+    await pod.fetch(`${CONTAINER}c1.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}c1.ttl#it> a vcard:Individual ; vcard:fn "a|b" ; vcard:note "n" .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    // Canonical with name "a" and note "b|n" — a naive `name|email|phone|note`
+    // join could alias with the legacy's "a|b"+"n"; the JSON key keeps them apart.
+    await store.create({ fn: "a", note: "b|n" });
+    const items = await store.list();
+    expect(items).toHaveLength(2);
+  });
+
   it("dedupes a migrated + lingering-legacy duplicate by stable identity", async () => {
     const pod = createMemoryPod();
     // Seed a legacy flat contact AND an equivalent canonical contact (same email)

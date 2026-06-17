@@ -291,19 +291,19 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
     // copy. A legacy file with no canonical twin still shows (URL-deduped).
     const byUrl = new Map<string, StoredItem<Contact>>();
     for (const item of canonical) byUrl.set(item.url, item);
-    // Build the set of canonical migration-identity keys (a STRICT identity — see
-    // migrationKeys). A legacy file is dropped ONLY when ALL of its
-    // migration-identity keys are also present in the canonical set, i.e. it is a
-    // genuine migration twin (same WebID, or same name+email/name+phone). Email
-    // ALONE is never a twin signal (distinct people can share an email — roborev
-    // Medium), so a legacy contact sharing only an email with a canonical one
-    // still shows.
-    const canonicalKeys = new Set<string>();
-    for (const c of canonical) for (const k of migrationKeys(c.data)) canonicalKeys.add(k);
+    // Compute each canonical contact's STRICT migration-identity key set (see
+    // migrationKeys). A legacy file is a migration remnant ONLY when it shares a
+    // strong key with ONE SAME canonical contact — keys are matched per-canonical,
+    // never pooled (a global set could "match" a legacy whose WebID came from
+    // canonical A and whose tuple came from canonical B — roborev Medium). Email
+    // or phone ALONE is never a twin signal (distinct people can share a household
+    // address — round-3), so such a legacy contact still shows.
+    const canonicalKeySets = canonical.map((c) => new Set(migrationKeys(c.data)));
     for (const item of legacy) {
       if (byUrl.has(item.url)) continue; // same doc surfaced by both paths
       const keys = migrationKeys(item.data);
-      const isTwin = keys.length > 0 && keys.every((k) => canonicalKeys.has(k));
+      const isTwin =
+        keys.length > 0 && canonicalKeySets.some((set) => keys.some((k) => set.has(k)));
       if (isTwin) continue; // migration remnant — the canonical copy wins
       byUrl.set(item.url, item);
     }
@@ -719,8 +719,10 @@ function migrationKeys(c: Contact): string[] {
   const note = c.note?.trim() ?? "";
   // The full-tuple key only counts as a signal when at least one detail beyond a
   // (possibly shared) name is present — a bare-name contact has no twin signal.
+  // JSON-encode the tuple so a field containing the delimiter can't collide with
+  // a different tuple (roborev Low — a naive `a|b` join is ambiguous).
   if (name && (email || phone || webId || note)) {
-    keys.push(`full:${name}|${email}|${phone}|${note}`);
+    keys.push(`full:${JSON.stringify([name, email, phone, note])}`);
   }
   return keys;
 }

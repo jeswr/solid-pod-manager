@@ -283,23 +283,24 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
     // (parse error, 5xx, auth) PROPAGATES rather than masquerading as "no
     // contacts" (roborev Medium). The two run concurrently.
     const [canonical, legacy] = await Promise.all([this.listCanonical(), this.listLegacy()]);
-    // Dedupe by URL first (a doc listed via both paths), THEN by a stable
-    // contact identity so a contact that exists as BOTH a migrated canonical doc
-    // and a not-yet-deleted legacy file (e.g. a 412 aborted the legacy delete)
-    // surfaces ONCE — the canonical copy wins (roborev Medium). Canonical items
-    // are inserted first so they take precedence on an identity collision.
+    // Canonical contacts are returned in FULL — two distinct people that happen to
+    // share an email/WebID/name are NEVER collapsed (roborev Medium). The ONLY
+    // dedupe is CROSS-SOURCE: a LEGACY file whose contact identity already exists
+    // among the canonical set is a not-yet-deleted migration remnant (a 412
+    // aborted the legacy delete), so it is dropped in favour of the canonical
+    // copy. A legacy file with no canonical twin still shows (URL-deduped).
     const byUrl = new Map<string, StoredItem<Contact>>();
     for (const item of canonical) byUrl.set(item.url, item);
-    for (const item of legacy) if (!byUrl.has(item.url)) byUrl.set(item.url, item);
-    const seenIdentity = new Set<string>();
-    const out: StoredItem<Contact>[] = [];
-    for (const item of byUrl.values()) {
+    const canonicalIdentities = new Set(
+      canonical.map((i) => contactIdentity(i.data)).filter((id): id is string => Boolean(id)),
+    );
+    for (const item of legacy) {
+      if (byUrl.has(item.url)) continue; // same doc surfaced by both paths
       const id = contactIdentity(item.data);
-      if (id && seenIdentity.has(id)) continue;
-      if (id) seenIdentity.add(id);
-      out.push(item);
+      if (id && canonicalIdentities.has(id)) continue; // migration remnant — canonical wins
+      byUrl.set(item.url, item);
     }
-    return out;
+    return [...byUrl.values()];
   }
 
   /** Read the canonical people index, then GET each person document. */
@@ -316,8 +317,16 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
       personDocs.map(async (docUrl) => {
         try {
           return await this.read(docUrl);
-        } catch {
-          return undefined; // a vanished/unreadable person is skipped, not fatal
+        } catch (e) {
+          // A STALE index entry whose person doc is gone (404) or unreadable
+          // (403) is expected — a deleted contact whose index prune failed
+          // self-heals here. ANY OTHER failure (500/parse/auth) must NOT be
+          // masked as "skip this contact" (roborev Medium) — re-throw it so the
+          // list surfaces the real error rather than silently dropping people.
+          if (e instanceof ItemReadError && (e.status === 404 || e.status === 403)) {
+            return undefined;
+          }
+          throw e;
         }
       }),
     );
@@ -354,8 +363,12 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
       try {
         const item = await this.read(entry.url);
         if (item) items.push(item);
-      } catch {
-        // skip an unreadable legacy file; the rest still load
+      } catch (e) {
+        // A legacy file that vanished (404) / is unreadable (403) is skipped; any
+        // other failure (500/parse/auth) propagates rather than being masked
+        // (roborev Medium — mirrors listCanonical).
+        if (e instanceof ItemReadError && (e.status === 404 || e.status === 403)) continue;
+        throw e;
       }
     }
     return items;
@@ -497,17 +510,20 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
   }
 
   /**
-   * Ensure the GROUPS INDEX (`vcard:groupIndex` target) exists and lists the
-   * default group. SolidOS discovers groups THROUGH this document (not the book's
+   * Ensure the GROUPS INDEX (`vcard:groupIndex` target) lists the default group.
+   * SolidOS discovers groups THROUGH this document (not the book's
    * `includesGroup` alone), so without it the default group — and therefore every
    * contact, which SolidOS browses BY GROUP — stays invisible (roborev High).
-   * Create-only; idempotent.
+   *
+   * Read-modify-write (not create-only) so an EXISTING groups index that is empty
+   * or missing the default group is REPAIRED idempotently while preserving any
+   * other groups already listed (roborev Low) — a half-finished prior bootstrap
+   * never leaves discovery permanently broken. A missing doc is created fresh.
    */
   private async ensureGroupsIndex(): Promise<void> {
-    const ds = buildGroupsIndex(this.bookSubject, [
-      { group: groupSubject(this.defaultGroupDoc), name: DEFAULT_GROUP_NAME },
-    ]);
-    await this.createOnly(this.groupsDoc, ds);
+    await this.rmwIndex(this.groupsDoc, (ds) =>
+      upsertGroupsIndexEntry(ds, this.bookSubject, groupSubject(this.defaultGroupDoc), DEFAULT_GROUP_NAME),
+    );
   }
 
   /**
@@ -653,6 +669,11 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
         etag: null,
       };
     }
+    if (url === this.groupsDoc) {
+      // An empty groups index; the default-group entry is spliced in by the
+      // ensureGroupsIndex mutator (so the same upsert path repairs an existing one).
+      return { dataset: buildGroupsIndex(this.bookSubject, []), etag: null };
+    }
     return { dataset: buildPeopleIndex(this.bookSubject, []), etag: null };
   }
 }
@@ -741,6 +762,40 @@ function removeGroupMember(ds: DatasetCore, personSubjectIri: string): boolean {
   const toDelete = [...ds.match(groupSubj, p, o)];
   for (const q of toDelete) ds.delete(q);
   return toDelete.length > 0;
+}
+
+/**
+ * Add `book vcard:includesGroup <group>` + the group's `a vcard:Group` + `vcard:fn`
+ * to the GROUPS INDEX, idempotently — repairs an empty/partial index while
+ * preserving any other groups it lists. Returns whether anything changed.
+ */
+function upsertGroupsIndexEntry(
+  ds: DatasetCore,
+  bookSubject: string,
+  groupSubjectIri: string,
+  name: string,
+): boolean {
+  const { namedNode, literal, quad } = DataFactory;
+  const book = namedNode(bookSubject);
+  const group = namedNode(groupSubjectIri);
+  let changed = false;
+  const includes = namedNode(`${VCARD}includesGroup`);
+  if ([...ds.match(book, includes, group)].length === 0) {
+    ds.add(quad(book, includes, group));
+    changed = true;
+  }
+  const typeP = namedNode(RDF_TYPE);
+  const groupType = namedNode(`${VCARD}Group`);
+  if ([...ds.match(group, typeP, groupType)].length === 0) {
+    ds.add(quad(group, typeP, groupType));
+    changed = true;
+  }
+  const fnP = namedNode(`${VCARD}fn`);
+  if (name && [...ds.match(group, fnP, null)].length === 0) {
+    ds.add(quad(group, fnP, literal(name)));
+    changed = true;
+  }
+  return changed;
 }
 
 /** The single `vcard:Group` subject in a group document, if exactly one. */

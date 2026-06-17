@@ -232,6 +232,51 @@ describe("address-book write path (SolidOS layout)", () => {
     await expect(store2.list()).rejects.toBeTruthy();
   });
 
+  it("does NOT collapse two distinct CANONICAL contacts that share an email", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Alice One", email: "shared@x.io" });
+    await store.create({ fn: "Bob Two", email: "shared@x.io" });
+    const items = await store.list();
+    // Both are real, separate person docs — identity dedupe is cross-source only.
+    expect(items).toHaveLength(2);
+  });
+
+  it("list() PROPAGATES a 500 from a referenced person document (not skipped)", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    const { url: person } = await store.create({ fn: "Ada" });
+    const failing: typeof fetch = async (input, init) => {
+      const u = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (u === person && (init?.method ?? "GET").toUpperCase() === "GET") {
+        return new Response("boom", { status: 500 });
+      }
+      return pod.fetch(input, init);
+    };
+    const store2 = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: failing });
+    await expect(store2.list()).rejects.toBeTruthy();
+  });
+
+  it("repairs an EXISTING empty groups index (idempotent RMW, not create-only)", async () => {
+    const pod = createMemoryPod();
+    // Pre-seed an empty groups.ttl (a half-finished prior bootstrap).
+    await pod.fetch(`${CONTAINER}groups.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.\n<${BOOK_SUBJECT}> a vcard:AddressBook .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Ada" });
+    const groupsIndex = pod.dataset(`${CONTAINER}groups.ttl`);
+    const defaultGroupSubject = `${CONTAINER}Group/Contacts.ttl#this`;
+    expect(
+      [...groupsIndex.match(null, null, null)].some(
+        (q) =>
+          q.predicate.value === `${VCARD}includesGroup` && q.object.value === defaultGroupSubject,
+      ),
+    ).toBe(true);
+  });
+
   it("dedupes a migrated + lingering-legacy duplicate by stable identity", async () => {
     const pod = createMemoryPod();
     // Seed a legacy flat contact AND an equivalent canonical contact (same email)

@@ -21,6 +21,8 @@ import { issuesStore, sortIssues, openCount, type Issue, type IssueState } from 
 import { assignTask } from "@/lib/assign-task";
 import { AssignError } from "@/lib/errors";
 import { useStore, useItems } from "@/components/use-productivity";
+import { useTrackerMeta } from "@/components/use-tracker";
+import { TrackerMetaPanel } from "@/components/tracker-meta-panel";
 import { useSession } from "@/components/session-provider";
 import { PeoplePicker } from "@/components/people-picker";
 import { LaunchInApp } from "@/components/launch-in-app";
@@ -51,6 +53,13 @@ export default function IssuesPage() {
   const store = useStore<Issue>(issuesStore);
   const { data, loading, error, reload } = useItems(store);
   const [assignOpen, setAssignOpen] = useState(false);
+
+  // Surface the tracker-document metadata (READ ONLY) when this Issues container
+  // carries a `wf:Tracker` config doc (`<container>index.ttl#this`). `null` means
+  // "no tracker configured" (the common case for a plain PM Issues container);
+  // a parsed config renders the collapsible metadata panel. Cross-app: a tracker
+  // written by solid-issues / the SolidOS pane shows here, via the shared model.
+  const tracker = useTrackerMeta(store?.container);
 
   const issues = useMemo(() => sortIssues(data ?? []), [data]);
   const open = useMemo(() => (data ? openCount(data) : 0), [data]);
@@ -104,6 +113,8 @@ export default function IssuesPage() {
           onCancel={() => setAssignOpen(false)}
         />
       )}
+
+      {tracker.data ? <TrackerMetaPanel meta={tracker.data} /> : null}
 
       {error ? (
         <ErrorState error={error} onRetry={reload} />

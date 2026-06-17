@@ -382,3 +382,37 @@ Touched:
   `chatContainerFromUrl` normaliser; read-only `send` guard.
 - `src/components/use-chat.ts` — `readOnly` flag; `allowForeign` wiring.
 - `src/app/chat/page.tsx` — read-only "external chat" note replaces the compose box.
+
+## Claude Opus 4.8 — shared `wf:Tracker` read path (task #100 / G7 Builder consumer)
+
+Read-only consumption of the newly-published shared `wf:Tracker` model. PM's
+`/issues` read path surfaces the tracker-document metadata (title, issue class,
+state store, categories, assignee group, workflow states + transitions) when the
+Issues container carries a `wf:Tracker` config doc (`<container>index.ttl#this`,
+the SolidOS / solid-issues convention). Typed via the shared model — never raw
+RDF (#61). Same-pod authenticated read (NOT the foreign-origin boundary).
+
+Dependency: `@jeswr/solid-task-model` pinned to `github:jeswr/solid-task-model#e5ee9ee`
+(v0.2.0, the published `./tracker` client-safe subexport). Imported ONLY from
+`@jeswr/solid-task-model/tracker` — the barrel `.` pulls `node:fs` via shape.ts
+and would break the Next static export.
+
+Net-new:
+
+- `src/lib/tracker.ts` — `readTrackerMeta` (probes `index.ttl`, 404 ⇒ none,
+  403/5xx/parse ⇒ fail-closed re-throw, 200-non-tracker ⇒ none), `toTrackerMeta`,
+  `toWorkflowStates` (resolves open/closed + transitions via the shared
+  `statusState`/`canTransition`), `shortIriLabel`, `trackerKey`/`TRACKER_KEY_PREFIX`.
+- `src/lib/tracker.test.ts` — parse round-trip via the shared `serializeTracker`,
+  404/403/5xx/non-tracker paths, key + label helpers.
+- `src/components/use-tracker.ts` — `useTrackerMeta` over `useSwrRead`
+  (keyed `tracker:<container>`, implicitly storage-scoped; watches the doc URL).
+- `src/components/tracker-meta-panel.tsx` — collapsible read-only metadata panel.
+
+Touched (ADD-ONLY shared registries):
+
+- `src/app/issues/page.tsx` — renders the tracker panel when a config is present.
+- `src/lib/prefetch.ts` — `tracker:<issuesContainer>` prefetch target.
+- `src/components/instant-nav-registry.ts` — `useTrackerMeta` registry entry.
+- `src/components/instant-nav.test.ts` — `use-tracker.ts` in READ_HOOKS.
+- `src/components/instant-nav-prefetch.test.ts` — tracker mock + expected key.

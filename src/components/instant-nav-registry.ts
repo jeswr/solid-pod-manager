@@ -236,6 +236,26 @@ export const READ_PAGE_HOOKS: ReadPageHook[] = [
       }),
   },
   {
+    hook: "useTrackerMeta",
+    source: "use-tracker.ts",
+    page: "/issues (wf:Tracker config-doc metadata)",
+    // Keyed PER CONTAINER (`tracker:<containerUrl>`) — implicitly storage-scoped
+    // since the container is derived from the active storage, so a same-WebID
+    // storage switch changes the container (and the key) and revalidates against
+    // the new pod rather than painting the previous pod's tracker config. The
+    // value is a TrackerMeta (a parsed config) or null (no tracker configured).
+    key: `tracker:${STORAGE}issues/`,
+    seed: (c) =>
+      c.set(WEBID, `tracker:${STORAGE}issues/`, {
+        docUrl: `${STORAGE}issues/index.ttl`,
+        title: "Issues",
+        issueClass: "http://www.w3.org/2005/01/wf/flow#Task",
+        categories: [],
+        groupMembers: [],
+        workflowStates: [],
+      }),
+  },
+  {
     hook: "useCommunityFeed",
     source: "use-community.ts",
     page: "/community (Solid Community — forum + Matrix rooms)",

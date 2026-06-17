@@ -13,7 +13,7 @@ import { useId, useState } from "react";
 import { ChevronDown, GitBranch, Settings2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { shortIriLabel, type TrackerMeta } from "@/lib/tracker";
+import { isHttpUrl, shortIriLabel, type TrackerMeta } from "@/lib/tracker";
 
 /** One metadata field row: a label and its value (or `null` to omit). */
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -98,14 +98,22 @@ export function TrackerMetaPanel({ meta }: { meta: TrackerMeta }) {
                 <ul className="flex flex-col gap-1">
                   {meta.groupMembers.map((m) => (
                     <li key={m}>
-                      <a
-                        href={m}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs underline underline-offset-2 break-all hover:text-foreground"
-                      >
-                        {m}
-                      </a>
+                      {/* Defence-in-depth: `toTrackerMeta` already filters to
+                          http(s), but pod RDF is untrusted — only render a LINK
+                          for an http(s) WebID; anything else shows as plain text
+                          so a non-http scheme can never become an anchor href. */}
+                      {isHttpUrl(m) ? (
+                        <a
+                          href={m}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs underline underline-offset-2 break-all hover:text-foreground"
+                        >
+                          {m}
+                        </a>
+                      ) : (
+                        <span className="text-xs break-all text-muted-foreground">{m}</span>
+                      )}
                     </li>
                   ))}
                 </ul>

@@ -146,7 +146,33 @@ export function shortIriLabel(iri: string): string {
   return segments.length > 0 ? segments[segments.length - 1] : iri;
 }
 
-/** Map the shared {@link TrackerData} into the UI's {@link TrackerMeta}. */
+/**
+ * True for an absolute `http:`/`https:` URL. Pod RDF is UNTRUSTED input, so any
+ * value rendered as a link target (or otherwise dereferenced) MUST pass this —
+ * a hostile tracker doc could otherwise carry a `javascript:` / `data:` named
+ * node that, rendered as an anchor `href`, would be an XSS / phishing vector
+ * (roborev finding, Medium).
+ */
+export function isHttpUrl(value: string | undefined): value is string {
+  if (!value) return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Map the shared {@link TrackerData} into the UI's {@link TrackerMeta}.
+ *
+ * SECURITY: `groupMembers` are rendered as anchor `href`s, so they are filtered
+ * to http(s) WebIDs here at the seam — the shared model's `groupMembers` READ
+ * accessor does NOT scheme-filter (only its WRITE does), so a hostile pod doc
+ * could otherwise inject a non-http scheme. A dropped member is simply not shown
+ * (the data model stays well-formed; pod data is untrusted) — roborev finding,
+ * Medium.
+ */
 export function toTrackerMeta(docUrl: string, data: TrackerData): TrackerMeta {
   return {
     docUrl,
@@ -156,7 +182,8 @@ export function toTrackerMeta(docUrl: string, data: TrackerData): TrackerMeta {
     issueClass: data.issueClass ?? "http://www.w3.org/2005/01/wf/flow#Task",
     stateStore: data.stateStore,
     categories: data.categories ?? [],
-    groupMembers: data.groupMembers ?? [],
+    // Only http(s) WebIDs — see the SECURITY note above (href-rendered, untrusted).
+    groupMembers: (data.groupMembers ?? []).filter(isHttpUrl),
     workflowStates: data.workflow ? toWorkflowStates(data.workflow) : [],
   };
 }

@@ -11,6 +11,7 @@ import {
   trackerDocUrl,
   trackerKey,
   shortIriLabel,
+  isHttpUrl,
   TRACKER_DOC_LEAF,
   TRACKER_KEY_PREFIX,
   type TrackerMeta,
@@ -100,6 +101,39 @@ describe("toTrackerMeta", () => {
     expect(meta.groupMembers).toEqual([]);
     expect(meta.stateStore).toBeUndefined();
     expect(meta.workflowStates).toEqual([]);
+  });
+
+  it("SECURITY: drops non-http(s) group members (href-rendered, untrusted pod RDF)", () => {
+    const meta = toTrackerMeta(DOC, {
+      title: "t",
+      // A hostile tracker doc could carry a javascript:/data:/mailto: member; the
+      // shared model's groupMembers READ accessor does not scheme-filter, so the
+      // seam must — only the http(s) WebID survives into the rendered model.
+      groupMembers: [
+        "https://bob.example/profile#me",
+        "javascript:alert(1)",
+        "data:text/html,<script>1</script>",
+        "mailto:bob@example.com",
+        "http://alice.example/card#me",
+      ],
+    });
+    expect(meta.groupMembers).toEqual([
+      "https://bob.example/profile#me",
+      "http://alice.example/card#me",
+    ]);
+  });
+});
+
+describe("isHttpUrl", () => {
+  it("accepts http(s) absolute URLs only", () => {
+    expect(isHttpUrl("https://alice.example/profile#me")).toBe(true);
+    expect(isHttpUrl("http://alice.example/card#me")).toBe(true);
+    expect(isHttpUrl("javascript:alert(1)")).toBe(false);
+    expect(isHttpUrl("data:text/html,x")).toBe(false);
+    expect(isHttpUrl("mailto:bob@example.com")).toBe(false);
+    expect(isHttpUrl("not a url")).toBe(false);
+    expect(isHttpUrl(undefined)).toBe(false);
+    expect(isHttpUrl("")).toBe(false);
   });
 });
 

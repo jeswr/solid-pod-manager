@@ -19,7 +19,7 @@
     "@jeswr/federation-client": "github:jeswr/federation-client#5ec046165f8d8e53c371ee6bcc94b43725bdda8c",
     "@jeswr/fetch-rdf": "^0.1.0",
     "@jeswr/solid-community-feeds": "github:jeswr/solid-community-feeds#b38babe3e386f93f92126cb448b3f6821dbe8e87",
-    "@jeswr/solid-task-model": "github:jeswr/solid-task-model#e5ee9ee",
+    "@jeswr/solid-task-model": "github:jeswr/solid-task-model#5b51d85",
     "@rdfjs/wrapper": "^0.34.0",
     "@solid/object": "^0.6.0",
     "@solid/reactive-authentication": "file:vendor/solid-reactive-authentication-0.1.3-pr11-14.tgz",

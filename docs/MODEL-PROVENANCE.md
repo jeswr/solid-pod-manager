@@ -416,3 +416,57 @@ Touched (ADD-ONLY shared registries):
 - `src/components/instant-nav-registry.ts` — `useTrackerMeta` registry entry.
 - `src/components/instant-nav.test.ts` — `use-tracker.ts` in READ_HOOKS.
 - `src/components/instant-nav-prefetch.test.ts` — tracker mock + expected key.
+
+## Claude Opus 4.8 — SolidOS `vcard:AddressBook` contacts (task #102/#105 / G6 Builder B)
+
+Rewrote PM's contacts onto the SolidOS-interoperable address-book layout via the
+shared `@jeswr/solid-task-model/contacts` model (a contact added in PM,
+solid-issues, or SolidOS is the SAME RDF). Email/phone/WebID are written in the
+STRUCTURED `vcard:hasEmail [ a vcard:Home; vcard:value <mailto:..> ]` form
+SolidOS's contacts pane reads; reads accept both structured + legacy direct-IRI.
+
+Dependency: `@jeswr/solid-task-model` repinned `e5ee9ee` → `5b51d85` (v0.3.0, the
+client-safe `./contacts` subexport). Imported ONLY from
+`@jeswr/solid-task-model/contacts` — the barrel `.` pulls `node:fs` via shape.ts
+and would break the Next static export (build:prod confirms `/contacts` +
+`/contacts/edit` prerender).
+
+Layout (canonical SolidOS, under PM's existing `contacts/`): `index.ttl`
+(`#this a vcard:AddressBook`, `dc:title`+`vcard:fn`, `nameEmailIndex`/`groupIndex`,
+`acl:owner`), `people.ttl` (nameEmailIndex), `groups.ttl`,
+`Group/Contacts.ttl` (default group — SolidOS browses people BY GROUP, so every
+contact joins ≥1 group), `Person/<uuid>/index.ttl` (the contact doc, minted with
+`crypto.randomUUID()` + `vcard:hasUID urn:uuid:`).
+
+Behaviour: write = ensure-book (idempotent, create-only) → mint person → write
+person doc (create-only) → patch people-index + default-group membership via
+conditional read-modify-write with bounded 412 retry. Read = enumerate from the
+people index, GET each person doc, parse both email forms. Migration (forward,
+non-destructive) = legacy flat `contacts/<slug>.ttl` are still READ (unioned,
+deduped); on a contact's next `update` it migrates into `Person/<uuid>/index.ttl`
++ indexes, then deletes the flat file ONLY after the canonical form is confirmed
+written (write-then-delete, ETag-guarded). Type Index = the `vcard:AddressBook`
+INSTANCE registration is added ADDITIVELY alongside the existing
+`vcard:Individual` container registration.
+
+Touched:
+
+- `src/lib/contacts.ts` — rewritten as `AddressBookContactsStore` (stable
+  `contactsStore(opts)` surface: `list`/`read`/`create`/`update`/`remove`/
+  `container`); `Contact` unchanged; `parseContact`/`buildContact`/`stripScheme`/
+  `toMailto`/`toTel` retained; new `isContactsResource`/`isLegacyFlatContact`/
+  `ContactsScopeError`; scope guard loosened to allow `Person/<uuid>/index.ttl` +
+  `Group/<slug>.ttl`.
+- `src/lib/contacts.test.ts` — write-layout / structured round-trip / re-index /
+  type-index instance / delete-prune / forward-migration / scope-guard tests.
+- `src/lib/type-index-write.ts` — `DesiredRegistration` extended to a single
+  `solid:instance` registration (mutually exclusive with `container`); fragment
+  keyed on the target.
+- `src/lib/productivity-store.ts` — extracted the `ItemStore<T>` interface
+  (`ProductivityStore` implements it) so the hooks/pages accept the bespoke
+  contacts store; `update` may return a new `url` (migration move).
+- `src/lib/typed-views/contacts-view.ts` — reads BOTH structured + direct-IRI
+  email/phone, scheme-guarded.
+- `src/components/use-productivity.ts`, `src/lib/pod-search.ts`,
+  `src/app/people/page.tsx` — typed against `ItemStore<T>` (ADD-ONLY widening).
+- `package.json` — model repin to `#5b51d85`.

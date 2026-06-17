@@ -21,7 +21,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import type { StoredItem } from "@/lib/productivity-store";
+import type { ItemStore, StoredItem } from "@/lib/productivity-store";
 
 export default function PeoplePage() {
   return (
@@ -266,7 +266,7 @@ function GroupCard({
   onChanged,
 }: {
   group: StoredItem<Group>;
-  store: ReturnType<typeof groupsStore> | undefined;
+  store: ItemStore<Group> | undefined;
   onChanged: () => void;
 }) {
   const [editing, setEditing] = useState(false);

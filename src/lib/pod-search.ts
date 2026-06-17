@@ -47,7 +47,7 @@ import { tasksStore, type Task } from "./tasks.js";
 import { calendarStore, type CalendarEvent } from "./calendar.js";
 import { issuesStore, type Issue } from "./issues.js";
 import { scheduleStore, type Poll } from "./schedule.js";
-import type { ProductivityStore } from "./productivity-store.js";
+import type { ItemStore } from "./productivity-store.js";
 import {
   typeIndexLinks,
   readTypeIndex,
@@ -199,7 +199,7 @@ interface TypedSource {
 function typedSource<T>(spec: {
   type: SearchResultType;
   forClass: string;
-  store: (ctx: SearchContext, fetchImpl?: typeof fetch) => ProductivityStore<T>;
+  store: (ctx: SearchContext, fetchImpl?: typeof fetch) => ItemStore<T>;
   href: (url: string) => string;
   match: (data: T, needle: string) => { label: string; snippet?: string } | null;
 }): TypedSource {

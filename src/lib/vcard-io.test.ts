@@ -189,7 +189,7 @@ describe("vCard round-trip", () => {
     const pod = createMemoryPod();
     const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
     const [parsed] = importVCard(["BEGIN:VCARD", "FN:Bad Email", "EMAIL:bad%ZZ@y.z", "END:VCARD"].join("\r\n"));
-    await store.create(parsed, parsed.fn);
+    await store.create(parsed);
     const items = await store.list();
     expect(items).toHaveLength(1);
     expect(items[0].data.fn).toBe("Bad Email");

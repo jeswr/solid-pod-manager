@@ -4,10 +4,18 @@ import {
   buildContact,
   contactsStore,
   CONTACT_CLASS,
+  ADDRESS_BOOK_CLASS,
+  ContactsScopeError,
+  isContactsResource,
+  isLegacyFlatContact,
   stripScheme,
   toMailto,
   toTel,
 } from "./contacts.js";
+import { buildPerson, addressBookSubject } from "@jeswr/solid-task-model/contacts";
+import { DataFactory } from "n3";
+import { discoverRegistrations } from "./type-index.js";
+import { freshRdf } from "./rdf-read.js";
 import {
   createMemoryPod,
   TEST_POD_ROOT,
@@ -15,6 +23,12 @@ import {
 } from "./integrations/core/testing.js";
 
 const url = `${TEST_POD_ROOT}contacts/c.ttl`;
+const CONTAINER = `${TEST_POD_ROOT}contacts/`;
+const BOOK_DOC = `${CONTAINER}index.ttl`;
+const PEOPLE_DOC = `${CONTAINER}people.ttl`;
+const BOOK_SUBJECT = addressBookSubject(BOOK_DOC);
+const VCARD = "http://www.w3.org/2006/vcard/ns#";
+const DataFactoryValue = DataFactory.namedNode(`${VCARD}value`);
 
 describe("uri helpers", () => {
   it("wraps and strips mailto:", () => {
@@ -75,7 +89,7 @@ describe("contactsStore (I/O)", () => {
   it("creates, updates and deletes a contact", async () => {
     const pod = createMemoryPod();
     const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
-    const { url: created, etag } = await store.create({ fn: "Grace", email: "grace@navy.mil" }, "Grace");
+    const { url: created, etag } = await store.create({ fn: "Grace", email: "grace@navy.mil" });
     let items = await store.list();
     expect(items).toHaveLength(1);
     expect(items[0].data.email).toBe("grace@navy.mil");
@@ -87,5 +101,404 @@ describe("contactsStore (I/O)", () => {
     await store.remove(created);
     items = await store.list();
     expect(items).toHaveLength(0);
+  });
+});
+
+// --- SolidOS address-book layout (task #102/#105) -----------------------------
+
+describe("address-book write path (SolidOS layout)", () => {
+  it("creates the book, people index, default group + canonical person doc", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    const { url: person } = await store.create({ fn: "Ada Lovelace", email: "ada@x.io" });
+
+    // Person doc is at contacts/Person/<uuid>/index.ttl.
+    expect(person).toMatch(/contacts\/Person\/[0-9a-f-]+\/index\.ttl$/);
+
+    // The book root exists and is a vcard:AddressBook with the index links.
+    const book = pod.dataset(BOOK_DOC);
+    expect(
+      [...book.match(null, null, null)].some(
+        (q) => q.predicate.value.endsWith("#type") && q.object.value === ADDRESS_BOOK_CLASS,
+      ),
+    ).toBe(true);
+    expect(pod.get(BOOK_DOC)).toContain("nameEmailIndex");
+    // acl:owner is the WebID.
+    expect(pod.get(BOOK_DOC)).toContain(TEST_WEBID);
+
+    // The people index lists the person back-linked to the book.
+    const people = pod.dataset(PEOPLE_DOC);
+    const subj = `${person}#this`;
+    expect(
+      [...people.match(null, null, null)].some(
+        (q) =>
+          q.subject.value === subj &&
+          q.predicate.value === `${VCARD}inAddressBook` &&
+          q.object.value === BOOK_SUBJECT,
+      ),
+    ).toBe(true);
+
+    // The default group exists and lists the person as a member (SolidOS browses
+    // BY GROUP, so a contact must be in ≥1 group to be visible).
+    const groupDoc = `${CONTAINER}Group/Contacts.ttl`;
+    const group = pod.dataset(groupDoc);
+    expect(
+      [...group.match(null, null, null)].some(
+        (q) => q.predicate.value === `${VCARD}hasMember` && q.object.value === subj,
+      ),
+    ).toBe(true);
+
+    // The person doc writes the STRUCTURED email form SolidOS reads.
+    const personDs = pod.dataset(person);
+    expect([...personDs.match(null, DataFactoryValue, null)].length).toBeGreaterThan(0);
+    expect(pod.get(person)).toContain("vcard:value");
+  });
+
+  it("writes structured email/phone/webid that round-trip through read", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    const { url: person } = await store.create({
+      fn: "Grace",
+      email: "grace@navy.mil",
+      phone: "+1 555 0100",
+      webId: "https://grace.example/card#me",
+      note: "Compiler pioneer",
+    });
+    const read = await store.read(person);
+    expect(read?.data).toEqual({
+      fn: "Grace",
+      email: "grace@navy.mil",
+      phone: "+15550100",
+      webId: "https://grace.example/card#me",
+      note: "Compiler pioneer",
+    });
+  });
+
+  it("re-indexes the people-index fn on a rename", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    const { url: person, etag } = await store.create({ fn: "Ada" });
+    await store.update(person, { fn: "Ada Lovelace" }, etag);
+    const people = pod.get(PEOPLE_DOC) ?? "";
+    expect(people).toContain("Ada Lovelace");
+    // The list reflects the new name too.
+    const items = await store.list();
+    expect(items[0].data.fn).toBe("Ada Lovelace");
+  });
+
+  it("registers the address book as a solid:instance ADDITIVELY (keeps the container)", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Ada" });
+
+    const { dataset } = await freshRdf(`${TEST_POD_ROOT}profile/card`, pod.fetch);
+    const discovered = await discoverRegistrations(TEST_WEBID, dataset, pod.fetch);
+    const forBook = discovered.locations.filter((l) => l.forClass === ADDRESS_BOOK_CLASS);
+    const forIndividual = discovered.locations.filter((l) => l.forClass === CONTACT_CLASS);
+    // The book is registered as a single instance (contacts/index.ttl#this).
+    expect(forBook.some((l) => l.instance === BOOK_SUBJECT)).toBe(true);
+    // The legacy container registration for vcard:Individual is still present.
+    expect(forIndividual.some((l) => l.container === CONTAINER)).toBe(true);
+  });
+
+  it("writes a groups index listing the default group (SolidOS discovers groups via it)", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Ada" });
+    const groupsIndex = pod.dataset(`${CONTAINER}groups.ttl`);
+    const defaultGroupSubject = `${CONTAINER}Group/Contacts.ttl#this`;
+    // The groups index includes the default group under the book.
+    expect(
+      [...groupsIndex.match(null, null, null)].some(
+        (q) =>
+          q.predicate.value === `${VCARD}includesGroup` && q.object.value === defaultGroupSubject,
+      ),
+    ).toBe(true);
+  });
+
+  it("list() PROPAGATES a non-404 failure rather than masking it as empty", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Ada", email: "ada@x.io" });
+    // A fetch that 500s on the people index must surface, not return [].
+    const failing: typeof fetch = async (input, init) => {
+      const u = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (u === PEOPLE_DOC && (init?.method ?? "GET").toUpperCase() === "GET") {
+        return new Response("boom", { status: 500 });
+      }
+      return pod.fetch(input, init);
+    };
+    const store2 = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: failing });
+    await expect(store2.list()).rejects.toBeTruthy();
+  });
+
+  it("does NOT collapse two distinct CANONICAL contacts that share an email", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Alice One", email: "shared@x.io" });
+    await store.create({ fn: "Bob Two", email: "shared@x.io" });
+    const items = await store.list();
+    // Both are real, separate person docs — identity dedupe is cross-source only.
+    expect(items).toHaveLength(2);
+  });
+
+  it("list() PROPAGATES a 500 from a referenced person document (not skipped)", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    const { url: person } = await store.create({ fn: "Ada" });
+    const failing: typeof fetch = async (input, init) => {
+      const u = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (u === person && (init?.method ?? "GET").toUpperCase() === "GET") {
+        return new Response("boom", { status: 500 });
+      }
+      return pod.fetch(input, init);
+    };
+    const store2 = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: failing });
+    await expect(store2.list()).rejects.toBeTruthy();
+  });
+
+  it("repairs an EXISTING empty groups index (idempotent RMW, not create-only)", async () => {
+    const pod = createMemoryPod();
+    // Pre-seed an empty groups.ttl (a half-finished prior bootstrap).
+    await pod.fetch(`${CONTAINER}groups.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.\n<${BOOK_SUBJECT}> a vcard:AddressBook .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Ada" });
+    const groupsIndex = pod.dataset(`${CONTAINER}groups.ttl`);
+    const defaultGroupSubject = `${CONTAINER}Group/Contacts.ttl#this`;
+    expect(
+      [...groupsIndex.match(null, null, null)].some(
+        (q) =>
+          q.predicate.value === `${VCARD}includesGroup` && q.object.value === defaultGroupSubject,
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps a legacy contact that shares ONLY an email with a canonical one", async () => {
+    const pod = createMemoryPod();
+    // A distinct legacy person (different name) who happens to share a household
+    // email with a canonical contact must NOT be dropped as a migration twin.
+    await pod.fetch(`${CONTAINER}housemate.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}housemate.ttl#it> a vcard:Individual ; vcard:fn "Housemate B" ; vcard:hasEmail <mailto:house@x.io> .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Housemate A", email: "house@x.io" });
+    const items = await store.list();
+    // Both show — shared email alone is not a twin signal.
+    expect(items).toHaveLength(2);
+    expect(items.map((i) => i.data.fn).sort()).toEqual(["Housemate A", "Housemate B"]);
+  });
+
+  it("matches a twin per-canonical, NOT against a pooled key set", async () => {
+    const pod = createMemoryPod();
+    // Legacy contact carries a WebID + a name. Its STRONG keys are
+    // [webid:c, full:"legacy name"|...]. We seed two canonical contacts that each
+    // hold ONE of those key-shapes but for DIFFERENT people: A shares the WebID
+    // (so A IS the legacy's twin — same person), B coincidentally shares nothing.
+    await pod.fetch(`${CONTAINER}twin.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}twin.ttl#it> a vcard:Individual ; vcard:fn "Twin Legacy" ;
+  vcard:url <https://c.example/card#me> .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Canonical C", webId: "https://c.example/card#me" }); // shares WebID
+    await store.create({ fn: "Canonical D", email: "d@x.io" }); // unrelated
+    const items = await store.list();
+    // The legacy shares the WebID with C only → twin of C → deduped (canonical
+    // wins). Result: C + D (2), the legacy collapsed into C.
+    expect(items).toHaveLength(2);
+    expect(items.map((i) => i.data.fn).sort()).toEqual(["Canonical C", "Canonical D"]);
+  });
+
+  it("uses a delimiter-safe full-tuple key (no `|` collision)", async () => {
+    const pod = createMemoryPod();
+    // These two DISTINCT contacts produce the SAME naive `name|email|phone|note`
+    // join (`a|b|||n`): legacy = ("a|b","","","n"); canonical = ("a","b","","|n").
+    // A naive pipe-join would alias them into one twin and HIDE the legacy; the
+    // JSON-encoded tuple keeps them apart so both still show.
+    await pod.fetch(`${CONTAINER}c1.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}c1.ttl#it> a vcard:Individual ; vcard:fn "a|b" ; vcard:note "n" .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "a", email: "b", note: "|n" });
+    const items = await store.list();
+    expect(items).toHaveLength(2);
+  });
+
+  it("keeps two contacts that share a name but differ ONLY by WebID", async () => {
+    const pod = createMemoryPod();
+    // Same fn, different WebIDs — distinct people. The full key includes the
+    // WebID, so they do not collapse (roborev Medium round-5).
+    await pod.fetch(`${CONTAINER}same-name.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}same-name.ttl#it> a vcard:Individual ; vcard:fn "John Smith" ;
+  vcard:url <https://john1.example/card#me> .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "John Smith", webId: "https://john2.example/card#me" });
+    const items = await store.list();
+    expect(items).toHaveLength(2);
+  });
+
+  it("dedupes a migrated + lingering-legacy duplicate by stable identity", async () => {
+    const pod = createMemoryPod();
+    // Seed a legacy flat contact AND an equivalent canonical contact (same email)
+    // to simulate a migration whose legacy delete was aborted (412) — both linger.
+    await pod.fetch(`${CONTAINER}dup.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}dup.ttl#it> a vcard:Individual ; vcard:fn "Dup Person" ; vcard:hasEmail <mailto:dup@x.io> .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Dup Person", email: "dup@x.io" });
+    const items = await store.list();
+    // Two on disk (legacy + canonical), but ONE in the deduped list.
+    expect(items).toHaveLength(1);
+    // The canonical copy wins (its URL is the Person/<uuid> doc).
+    expect(items[0].url).toMatch(/Person\//);
+  });
+
+  it("prunes the people index + group membership on delete", async () => {
+    const pod = createMemoryPod();
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    const { url: person } = await store.create({ fn: "Ada" });
+    await store.remove(person);
+    const subj = `${person}#this`;
+    const people = pod.dataset(PEOPLE_DOC);
+    expect([...people.match(null, null, null)].some((q) => q.subject.value === subj)).toBe(false);
+    const group = pod.dataset(`${CONTAINER}Group/Contacts.ttl`);
+    expect([...group.match(null, null, null)].some((q) => q.object.value === subj)).toBe(false);
+    expect(await store.list()).toHaveLength(0);
+  });
+});
+
+describe("forward migration of legacy flat contacts (non-destructive)", () => {
+  /** Seed a legacy flat `contacts/<slug>.ttl` (subject `#it`, direct-IRI email). */
+  function legacyTurtle(): string {
+    return `@prefix vcard: <${VCARD}>.
+<${url}#it> a vcard:Individual ;
+  vcard:fn "Legacy Person" ;
+  vcard:hasEmail <mailto:legacy@old.example> .`;
+  }
+
+  it("reads a legacy flat contact (union, deduped) without migrating on read", async () => {
+    const pod = createMemoryPod();
+    await pod.fetch(url, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: legacyTurtle(),
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    const items = await store.list();
+    expect(items).toHaveLength(1);
+    expect(items[0].data.fn).toBe("Legacy Person");
+    expect(items[0].data.email).toBe("legacy@old.example");
+    // Read did not migrate — the flat file is still present.
+    expect(pod.get(url)).toBeTruthy();
+  });
+
+  it("migrates a legacy contact forward on update, then deletes the flat file", async () => {
+    const pod = createMemoryPod();
+    const put = await pod.fetch(url, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: legacyTurtle(),
+    });
+    const legacyEtag = put.headers.get("etag");
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+
+    const { url: migrated } = await store.update(
+      url,
+      { fn: "Legacy Person", email: "legacy@old.example" },
+      legacyEtag,
+    );
+    // The new canonical person doc exists ...
+    expect(migrated).toBeDefined();
+    if (!migrated) throw new Error("expected a migrated url");
+    expect(migrated).toMatch(/contacts\/Person\/[0-9a-f-]+\/index\.ttl$/);
+    expect(pod.get(migrated)).toContain("vcard:value");
+    // ... and the flat file was deleted ONLY after the new form was written.
+    expect(pod.get(url)).toBeUndefined();
+    // The list now shows exactly one (canonical) contact.
+    const items = await store.list();
+    expect(items).toHaveLength(1);
+    expect(items[0].url).toBe(migrated);
+  });
+});
+
+describe("scope guard (confused-deputy)", () => {
+  const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID });
+
+  it("accepts canonical person docs and legacy flat contacts only", () => {
+    expect(isContactsResource(`${CONTAINER}Person/abc/index.ttl`, CONTAINER)).toBe(true);
+    expect(isContactsResource(`${CONTAINER}old-contact.ttl`, CONTAINER)).toBe(true);
+    expect(isLegacyFlatContact(`${CONTAINER}old-contact.ttl`, CONTAINER)).toBe(true);
+    expect(isLegacyFlatContact(`${CONTAINER}Person/abc/index.ttl`, CONTAINER)).toBe(false);
+  });
+
+  it("REJECTS group documents from the item CRUD (confused-deputy)", () => {
+    // SolidOS group docs are structural — only the store's own bootstrap writes
+    // them. The ?id=-driven item CRUD must never overwrite/delete a group.
+    expect(isContactsResource(`${CONTAINER}Group/Contacts.ttl`, CONTAINER)).toBe(false);
+    expect(isContactsResource(`${CONTAINER}Group/Family.ttl`, CONTAINER)).toBe(false);
+  });
+
+  it("rejects structural docs, the container, traversal + foreign origins", () => {
+    expect(isContactsResource(`${CONTAINER}index.ttl`, CONTAINER)).toBe(false);
+    expect(isContactsResource(`${CONTAINER}people.ttl`, CONTAINER)).toBe(false);
+    expect(isContactsResource(`${CONTAINER}groups.ttl`, CONTAINER)).toBe(false);
+    expect(isContactsResource(CONTAINER, CONTAINER)).toBe(false);
+    expect(isContactsResource(`${CONTAINER}Person/../../evil.ttl`, CONTAINER)).toBe(false);
+    expect(isContactsResource(`${CONTAINER}sub/`, CONTAINER)).toBe(false);
+    expect(isContactsResource("https://evil.example/contacts/x.ttl", CONTAINER)).toBe(false);
+    expect(isContactsResource(`${CONTAINER}x.ttl?id=1`, CONTAINER)).toBe(false);
+  });
+
+  it("read/update/remove fail closed on an out-of-scope URL (incl. a group doc)", async () => {
+    await expect(store.read("https://evil.example/x.ttl")).rejects.toBeInstanceOf(
+      ContactsScopeError,
+    );
+    await expect(
+      store.update("https://evil.example/x.ttl", { fn: "x" }),
+    ).rejects.toBeInstanceOf(ContactsScopeError);
+    await expect(store.remove(`${CONTAINER}index.ttl`)).rejects.toBeInstanceOf(
+      ContactsScopeError,
+    );
+    // A crafted ?id= pointing at the default group must be refused.
+    await expect(store.remove(`${CONTAINER}Group/Contacts.ttl`)).rejects.toBeInstanceOf(
+      ContactsScopeError,
+    );
+    await expect(
+      store.update(`${CONTAINER}Group/Contacts.ttl`, { fn: "evil" }),
+    ).rejects.toBeInstanceOf(ContactsScopeError);
+  });
+});
+
+// buildPerson is exercised indirectly through the store; asserting its
+// structured output here documents the SolidOS contract directly.
+describe("model contract (buildPerson structured form)", () => {
+  it("writes a structured vcard:hasEmail node with a vcard:value mailto:", () => {
+    const pdoc = `${CONTAINER}Person/zzz/index.ttl`;
+    const ds = buildPerson(pdoc, {
+      name: "Ada",
+      inAddressBook: BOOK_SUBJECT,
+      emails: ["mailto:ada@x.io"],
+    });
+    const valueQuads = [...ds.match(null, DataFactoryValue, null)];
+    expect(valueQuads.some((q) => q.object.value === "mailto:ada@x.io")).toBe(true);
   });
 });

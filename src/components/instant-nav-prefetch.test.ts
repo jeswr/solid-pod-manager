@@ -151,6 +151,25 @@ vi.mock("@/lib/tasks", () => ({ tasksStore: mockStore("tasks/") }));
 vi.mock("@/lib/issues", () => ({ issuesStore: mockStore("issues/") }));
 vi.mock("@/lib/schedule", () => ({ scheduleStore: mockStore("schedule/") }));
 
+// tracker — keep the REAL key helpers (`trackerKey`/`TRACKER_KEY_PREFIX` are part
+// of the single-source-of-truth key formula); mock only the network-touching
+// `readTrackerMeta` so prefetch resolves deterministically. Returns a parsed
+// TrackerMeta (a tracker IS configured in this fixture's issues container).
+vi.mock("@/lib/tracker", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tracker")>();
+  return {
+    ...actual,
+    readTrackerMeta: vi.fn(async () => ({
+      docUrl: `${STORAGE}issues/index.ttl`,
+      title: "Issues",
+      issueClass: "http://www.w3.org/2005/01/wf/flow#Task",
+      categories: [],
+      groupMembers: [],
+      workflowStates: [],
+    })),
+  };
+});
+
 // durable-cache: keep the real `assignedTasksKey` (storage-scoped key formula).
 // (No mock — its key formula is part of the single-source-of-truth contract.)
 
@@ -200,6 +219,7 @@ const EXPECTED_WARM_KEYS: ExpectedKey[] = [
   { label: "useItems(tasks)", key: `productivity:${STORAGE}tasks/` },
   { label: "useItems(issues)", key: `productivity:${STORAGE}issues/` },
   { label: "useItems(schedule)", key: `productivity:${STORAGE}schedule/` },
+  { label: "useTrackerMeta(issues)", key: `tracker:${STORAGE}issues/` },
   { label: "useInbox", key: `inbox:${INBOX_URL}` },
 ];
 

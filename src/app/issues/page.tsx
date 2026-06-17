@@ -15,24 +15,28 @@
  */
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { CircleDot, Plus, UserPlus } from "lucide-react";
+import { CircleDot, Plus, TriangleAlert, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { issuesStore, sortIssues, openCount, type Issue, type IssueState } from "@/lib/issues";
 import { assignTask } from "@/lib/assign-task";
 import { AssignError } from "@/lib/errors";
 import { useStore, useItems } from "@/components/use-productivity";
+import { useTrackerMeta } from "@/components/use-tracker";
+import { TrackerMetaPanel } from "@/components/tracker-meta-panel";
 import { useSession } from "@/components/session-provider";
 import { PeoplePicker } from "@/components/people-picker";
 import { LaunchInApp } from "@/components/launch-in-app";
-import { EmptyState, ErrorState } from "@/components/states";
+import { EmptyState, ErrorState, errorMessage } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2 } from "lucide-react";
 import { formatDate } from "@/lib/format";
+import type { TrackerMeta } from "@/lib/tracker";
 import type { StoredItem } from "@/lib/productivity-store";
 
 const STATE_LABEL: Record<IssueState, string> = {
@@ -51,6 +55,13 @@ export default function IssuesPage() {
   const store = useStore<Issue>(issuesStore);
   const { data, loading, error, reload } = useItems(store);
   const [assignOpen, setAssignOpen] = useState(false);
+
+  // Surface the tracker-document metadata (READ ONLY) when this Issues container
+  // carries a `wf:Tracker` config doc (`<container>index.ttl#this`). `null` means
+  // "no tracker configured" (the common case for a plain PM Issues container);
+  // a parsed config renders the collapsible metadata panel. Cross-app: a tracker
+  // written by solid-issues / the SolidOS pane shows here, via the shared model.
+  const tracker = useTrackerMeta(store?.container);
 
   const issues = useMemo(() => sortIssues(data ?? []), [data]);
   const open = useMemo(() => (data ? openCount(data) : 0), [data]);
@@ -105,6 +116,8 @@ export default function IssuesPage() {
         />
       )}
 
+      <TrackerMetaSection tracker={tracker} />
+
       {error ? (
         <ErrorState error={error} onRetry={reload} />
       ) : loading ? (
@@ -138,6 +151,41 @@ export default function IssuesPage() {
       )}
     </div>
   );
+}
+
+/**
+ * The tracker-document metadata section (READ ONLY). FAIL-CLOSED on an ambiguous
+ * read (roborev finding, Medium): `readTrackerMeta` re-throws on 403/5xx/parse
+ * errors (only a genuine 404 means "no tracker"), so an ERROR must NOT be
+ * indistinguishable from "no tracker configured", and a stale cached panel must
+ * not stay visible under an unresolved error. So:
+ *   - `error` set → render a small, non-blocking error notice with retry, and
+ *     DO NOT render the (possibly stale) metadata panel.
+ *   - no error + parsed config → render the panel.
+ *   - no error + `null` (a clean 404 / non-tracker doc) → render nothing.
+ * The tracker is auxiliary, so its error never blocks the issue list below.
+ */
+function TrackerMetaSection({
+  tracker,
+}: {
+  tracker: { data?: TrackerMeta | null; error?: Error; reload: () => void };
+}) {
+  if (tracker.error) {
+    return (
+      <Alert variant="destructive">
+        <TriangleAlert className="size-4" aria-hidden="true" />
+        <AlertTitle>Couldn&rsquo;t load the tracker configuration</AlertTitle>
+        <AlertDescription className="flex flex-col items-start gap-3">
+          <span>{errorMessage(tracker.error)}</span>
+          <Button size="sm" variant="outline" onClick={tracker.reload}>
+            Try again
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  }
+  if (tracker.data) return <TrackerMetaPanel meta={tracker.data} />;
+  return null;
 }
 
 function IssueRow({ issue }: { issue: StoredItem<Issue> }) {

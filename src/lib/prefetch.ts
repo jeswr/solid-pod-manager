@@ -49,6 +49,7 @@ import { appPrefsKey, fetchAppPrefs } from "./app-prefs.js";
 import { discoverAssignedTasks } from "./federation-tasks.js";
 import { inboxFor } from "./inbox.js";
 import { listFolder, asContainerUrl } from "./files.js";
+import { readTrackerMeta, trackerKey } from "./tracker.js";
 import type { ProductivityStore } from "./productivity-store.js";
 import { notesStore } from "./notes.js";
 import { calendarStore } from "./calendar.js";
@@ -252,6 +253,20 @@ export function buildPrefetchTargets(ctx: PrefetchContext): PrefetchTarget[] {
         fetch: () => store.list(),
       });
     }
+
+    // useTrackerMeta(issues) — `tracker:<issuesContainer>`. The Issues container
+    // is the one that can carry a `wf:Tracker` config doc; warm its metadata so
+    // /issues paints the tracker panel on first visit. Same-pod read (cheap GET
+    // of `index.ttl`; absent ⇒ `null`, never creates anything). The container is
+    // derived the SAME way the hook derives it (`issuesStore(...).container`), and
+    // the key uses the SAME `trackerKey` builder, so prefetch warms the exact slot
+    // `useTrackerMeta` reads. Resolves to `null` for a container without a config.
+    const issuesContainer = issuesStore({ podRoot: activeStorage, webId }).container;
+    targets.push({
+      label: "useTrackerMeta(issues)",
+      key: trackerKey(issuesContainer),
+      fetch: async () => (await readTrackerMeta(issuesContainer)) ?? null,
+    });
   }
 
   return targets;

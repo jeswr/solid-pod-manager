@@ -341,6 +341,7 @@ const READ_HOOKS: readonly string[] = [
   "use-community.ts", // useCommunityFeed (useCommunityPrefs facades useAppPrefs, exempt below)
   "use-app-prefs.ts", // useAppPrefs (pod-backed app preferences, task #89)
   "use-federation-registry.ts", // useFederationMembers (registry-asserted memberships, /federations)
+  "use-tracker.ts", // useTrackerMeta (wf:Tracker config doc metadata, /issues read path)
 ];
 
 /**

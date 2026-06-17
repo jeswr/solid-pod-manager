@@ -277,6 +277,24 @@ describe("address-book write path (SolidOS layout)", () => {
     ).toBe(true);
   });
 
+  it("keeps a legacy contact that shares ONLY an email with a canonical one", async () => {
+    const pod = createMemoryPod();
+    // A distinct legacy person (different name) who happens to share a household
+    // email with a canonical contact must NOT be dropped as a migration twin.
+    await pod.fetch(`${CONTAINER}housemate.ttl`, {
+      method: "PUT",
+      headers: { "content-type": "text/turtle" },
+      body: `@prefix vcard: <${VCARD}>.
+<${CONTAINER}housemate.ttl#it> a vcard:Individual ; vcard:fn "Housemate B" ; vcard:hasEmail <mailto:house@x.io> .`,
+    });
+    const store = contactsStore({ podRoot: TEST_POD_ROOT, webId: TEST_WEBID, fetchImpl: pod.fetch });
+    await store.create({ fn: "Housemate A", email: "house@x.io" });
+    const items = await store.list();
+    // Both show — shared email alone is not a twin signal.
+    expect(items).toHaveLength(2);
+    expect(items.map((i) => i.data.fn).sort()).toEqual(["Housemate A", "Housemate B"]);
+  });
+
   it("dedupes a migrated + lingering-legacy duplicate by stable identity", async () => {
     const pod = createMemoryPod();
     // Seed a legacy flat contact AND an equivalent canonical contact (same email)

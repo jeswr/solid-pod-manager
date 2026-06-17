@@ -291,13 +291,20 @@ export class AddressBookContactsStore implements ItemStore<Contact> {
     // copy. A legacy file with no canonical twin still shows (URL-deduped).
     const byUrl = new Map<string, StoredItem<Contact>>();
     for (const item of canonical) byUrl.set(item.url, item);
-    const canonicalIdentities = new Set(
-      canonical.map((i) => contactIdentity(i.data)).filter((id): id is string => Boolean(id)),
-    );
+    // Build the set of canonical migration-identity keys (a STRICT identity — see
+    // migrationKeys). A legacy file is dropped ONLY when ALL of its
+    // migration-identity keys are also present in the canonical set, i.e. it is a
+    // genuine migration twin (same WebID, or same name+email/name+phone). Email
+    // ALONE is never a twin signal (distinct people can share an email — roborev
+    // Medium), so a legacy contact sharing only an email with a canonical one
+    // still shows.
+    const canonicalKeys = new Set<string>();
+    for (const c of canonical) for (const k of migrationKeys(c.data)) canonicalKeys.add(k);
     for (const item of legacy) {
       if (byUrl.has(item.url)) continue; // same doc surfaced by both paths
-      const id = contactIdentity(item.data);
-      if (id && canonicalIdentities.has(id)) continue; // migration remnant — canonical wins
+      const keys = migrationKeys(item.data);
+      const isTwin = keys.length > 0 && keys.every((k) => canonicalKeys.has(k));
+      if (isTwin) continue; // migration remnant — the canonical copy wins
       byUrl.set(item.url, item);
     }
     return [...byUrl.values()];
@@ -685,20 +692,37 @@ function stripFragment(iri: string): string {
 }
 
 /**
- * A stable contact identity used to de-duplicate `list()` when the SAME contact
- * exists as both a migrated canonical doc and a not-yet-deleted legacy file (a
- * 412 aborted the legacy delete). WebID is the strongest key; else email; else a
- * name+phone composite. Returns `undefined` when no distinguishing field exists
- * (two distinct nameless/detail-less contacts must NOT collapse into one), so
- * such entries are never deduped (URL-uniqueness still applies).
+ * The STRICT migration-twin identity keys for a contact — used to recognise that
+ * a not-yet-deleted legacy file is the SAME contact as a migrated canonical doc
+ * (a 412 aborted the legacy delete), WITHOUT ever collapsing two genuinely
+ * distinct people.
+ *
+ * Migration re-writes the contact's fields verbatim, so a true twin matches on a
+ * STRONG signal:
+ *   - the WebID (a person identifier — a strong key on its own); and/or
+ *   - the FULL field tuple `name|email|phone|note` (exact equality of everything
+ *     the contact carries).
+ *
+ * Email or phone ALONE is deliberately NOT a key (distinct people can share a
+ * household email/number — roborev Medium). A legacy file is treated as a twin
+ * only when EVERY key it produces is also present on a canonical contact, so a
+ * contact with no strong signal (e.g. a bare name) is never deduped (URL
+ * uniqueness still applies). Returns `[]` when no strong signal exists.
  */
-function contactIdentity(c: Contact): string | undefined {
-  if (c.webId?.trim()) return `webid:${c.webId.trim().toLowerCase()}`;
-  if (c.email?.trim()) return `email:${c.email.trim().toLowerCase()}`;
-  const name = c.fn?.trim().toLowerCase();
-  const phone = c.phone?.trim();
-  if (name && phone) return `np:${name}|${phone}`;
-  return undefined;
+function migrationKeys(c: Contact): string[] {
+  const keys: string[] = [];
+  const webId = c.webId?.trim().toLowerCase();
+  if (webId) keys.push(`webid:${webId}`);
+  const name = c.fn?.trim().toLowerCase() ?? "";
+  const email = c.email?.trim().toLowerCase() ?? "";
+  const phone = c.phone?.trim() ?? "";
+  const note = c.note?.trim() ?? "";
+  // The full-tuple key only counts as a signal when at least one detail beyond a
+  // (possibly shared) name is present — a bare-name contact has no twin signal.
+  if (name && (email || phone || webId || note)) {
+    keys.push(`full:${name}|${email}|${phone}|${note}`);
+  }
+  return keys;
 }
 
 // --- index mutators (pure; operate on a dataset, return "changed") -----------

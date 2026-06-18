@@ -1039,6 +1039,52 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(base.peek(ISSUER_HREF)).toBeDefined(); // newer login's credential intact
   });
 
+  it("MEDIUM: a stale expired-session login whose refresh FAILS does NOT bump/evict the winner in the fresh-auth fall-through", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM, round 14): login A reuses a settled-but-expired
+    // session and tries the shared refresh grant; it parks. A newer same-issuer login B wins
+    // (bumps epoch + commits). A's refresh then FAILS, and A falls through to the fresh-auth block,
+    // which bumps the epoch + EVICTS #sessions/#settledSessions — wiping B's session — before A's
+    // own #authenticate aborts. The fix re-checks (caller predicate + entry epoch) before that
+    // destructive block and aborts A. Observable: B's session survives (an upgrade reuses it, no
+    // re-auth) and the store still holds B's credential.
+    vi.useFakeTimers();
+    const store = new StructuredCloneSessionStore();
+    const { provider, getCode } = makeProvider(store);
+    await provider.login(ISSUER); // settle A
+    expect(getCode).toHaveBeenCalledTimes(1);
+    const aGen = () => true; // A's caller predicate stays true (the leak is the epoch path)
+
+    // Expire A's access token so a re-login takes the refresh-grant path.
+    vi.setSystemTime(Date.now() + 3601 * 1000);
+    const gate = makeRefreshGate(as.fetch);
+    vi.stubGlobal("fetch", gate.fetchImpl);
+
+    // A re-login (same WebID ⇒ takes settled+expired+refresh path) — parks on the shared refresh.
+    const aLogin = provider.login(ISSUER, { stillCurrent: aGen }).catch((e) => e);
+    await pumpUntil(gate.parked);
+
+    // B wins: a fresh same-issuer login (different WebID) bumps the epoch + commits + persists.
+    // (B uses its own auth-code flow which passes the single-shot gate.)
+    await provider.login(ISSUER, { expectedWebId: "https://pod.test/gail#me" });
+    const bToken = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(bToken).toBeDefined();
+
+    // Make A's parked refresh FAIL (revoke server-side, keep B's token), then release so A's stale
+    // login falls through to the fresh-auth block — where the fix must ABORT it (epoch advanced).
+    as.activeRefreshTokens.clear();
+    if (bToken) as.activeRefreshTokens.add(bToken);
+    gate.releaseToken();
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await aLogin;
+
+    // ── THE FENCE: A's stale login did NOT bump/evict — B's session + credential are intact.
+    expect(store.peek(ISSUER_HREF)?.refreshToken).toBe(bToken);
+    await provider.upgrade(new Request("https://pod.test/b-after"));
+    // getCode: A's initial login (1) + B's login (2). A's stale re-login ABORTED before any new
+    // authorize, and the upgrade reused B's settled session ⇒ still 2, never a 3rd.
+    expect(getCode).toHaveBeenCalledTimes(2);
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

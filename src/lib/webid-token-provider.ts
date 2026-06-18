@@ -824,6 +824,12 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     // the original join-the-in-flight-work behaviour for dedup.
     if (forLogin) {
       const expectedWebId = forLogin.expectedWebId;
+      // Capture the issuer epoch at the START of this login attempt, so the fresh-auth
+      // supersession block below can re-check it after any awaited refresh grant (the #123
+      // whole-branch round-14 MEDIUM): a login superseded (logout / newer same-issuer login)
+      // WHILE it awaited `#sharedRefresh` must NOT then bump the epoch + evict the WINNER's
+      // session in the fresh-auth fall-through.
+      const entryEpoch = this.#epochOf(issuer.href);
       const cachedSettled = this.#settledSessions.get(issuer.href);
       // SAME-ISSUER ACCOUNT-SWITCH GUARD (the #123 roborev MEDIUM): only treat a settled session
       // as reusable when it matches the requested WebID (or none was requested). Switching to a
@@ -875,6 +881,17 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
           // authentication, which must NOT be exposed (next block).
           settled.refreshToken = undefined;
         }
+      }
+      // SUPERSESSION RE-CHECK BEFORE FRESH-AUTH (the #123 whole-branch round-14 MEDIUM): the
+      // fresh-auth block below performs DESTRUCTIVE issuer-wide mutations (bump epoch + evict
+      // `#sessions`/`#settledSessions`/`#inflightRefreshGrants`). If this login was SUPERSEDED — by
+      // a logout / a newer same-issuer login — WHILE it awaited the shared refresh grant above (the
+      // refresh-failure fall-through), it must NOT run them, or it would wipe the WINNER's freshly
+      // established session before its own `#authenticate` aborts. Abort if the caller's predicate
+      // says stale, OR the issuer epoch advanced since this attempt started (a forget / superseding
+      // login). A still-current FIRST login (no prior epoch entry, nothing superseded) passes.
+      if (!stillCurrent() || this.#epochOf(issuer.href) !== entryEpoch) {
+        throw new DOMException("Login superseded", "AbortError");
       }
       // SUPERSEDE BACKGROUND WORK (the #123 whole-branch HIGH #1, scoped per the whole-branch
       // MEDIUM): a FRESH authentication is the genuine supersession point — a new identity / an

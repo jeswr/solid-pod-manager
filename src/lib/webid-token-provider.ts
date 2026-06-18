@@ -1086,7 +1086,11 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       );
       // #begin's success path already rescheduled via #scheduleProactive.
     } catch (e) {
-      await this.#handleProactiveFailure(issuer, e);
+      // Thread the cycle's `fenced` predicate + the refresh token being redeemed so the failure
+      // handler's DESTRUCTIVE cleanup is fence-gated + token-scoped (the #123 whole-branch round-5
+      // HIGH): a stale proactive failure (a newer login already superseded this issuer) must NOT
+      // wipe the newer session/credential.
+      await this.#handleProactiveFailure(issuer, e, fenced, current.refreshToken);
     }
   }
 
@@ -1099,15 +1103,40 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    *    After the budget is spent, stop scheduling (the lazy path will recover on
    *    the next real request).
    */
-  async #handleProactiveFailure(issuer: URL, error: unknown): Promise<void> {
+  async #handleProactiveFailure(
+    issuer: URL,
+    error: unknown,
+    fenced: () => boolean = () => true,
+    refreshToken?: string,
+  ): Promise<void> {
     const scheduler = this.#schedulers.get(issuer.href);
     if (scheduler === undefined || this.#destroyed) return;
 
     if (isInvalidGrant(error)) {
+      // FENCE-GATED DESTRUCTIVE CLEANUP (the #123 whole-branch round-5 HIGH): a STALE proactive
+      // failure — a `forgetIssuer` (logout) or a SUPERSEDING login already bumped this issuer's
+      // epoch and (re)committed — must NOT clear the NEWER session/credential. When the fence is
+      // stale, only the (in-memory) scheduler for this dead cycle is cleared; the newer login owns
+      // everything else. The dead refresh token WE redeemed is already invalid server-side, so
+      // there is nothing of ours to delete that the newer login hasn't already replaced.
+      if (!fenced()) {
+        this.#clearScheduler(issuer.href);
+        return;
+      }
       this.#clearScheduler(issuer.href);
       this.#settledSessions.delete(issuer.href);
       this.#sessions.delete(issuer.href);
-      await this.#clearPersisted(issuer);
+      // TOKEN-SCOPED persistence clear: delete only when the store still holds the exact (now-dead)
+      // refresh token WE tried to redeem — never a newer login's freshly-persisted token. Falls
+      // back to the plain clear only when the redeemed token is unknown (then the fence above is
+      // the guard).
+      if (refreshToken !== undefined) {
+        await this.#sessionStore
+          ?.compareAndDelete(issuer.href, refreshToken)
+          .catch(() => false);
+      } else {
+        await this.#clearPersisted(issuer);
+      }
       return;
     }
 
@@ -1535,28 +1564,27 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * cancelled/abandoned credential be silently reused.
    */
   async forgetIssuer(issuer: URL): Promise<void> {
-    // Capture the refresh token of the credential we are about to forget BEFORE clearing it, so
-    // the persistence clear below can be ATOMICALLY scoped to exactly that token (the #123
-    // whole-branch round-4 MEDIUM). Prefer the in-memory settled token; fall back to the persisted
-    // record (a cold provider with only a persisted session, or an in-memory token that lags a
-    // proactive re-persist). `undefined` ⇒ nothing of ours to clear.
-    const forgottenToken =
-      this.#settledSessions.get(issuer.href)?.refreshToken ??
-      (await this.#sessionStore?.get(issuer.href).catch(() => undefined))?.refreshToken;
+    // SYNCHRONOUS PROLOGUE FIRST (the #123 whole-branch round-5 HIGH): bump the epoch + capture
+    // the forgotten token + clear all in-memory state with NO intervening `await`, so a retry
+    // login cannot commit in a gap before the bump/clear and then be wiped by this cleanup. The
+    // ONLY token source read synchronously is the in-memory settled session; the (async) persisted
+    // fallback read happens LATER, after the bump, gated on the epoch (so it cannot wipe a newer
+    // login). Reading the settled token BEFORE the synchronous delete keeps it for the scoped clear.
+    const settledToken = this.#settledSessions.get(issuer.href)?.refreshToken;
     // EPOCH CANCELLATION (the #123 whole-branch HIGH #2): BUMP the issuer epoch BEFORE clearing
     // any state, so an in-flight `#commitSession` / proactive / lazy refresh that finishes AFTER
     // this forget (a pending commit carries the default always-current predicate) sees a stale
     // captured epoch and publishes/persists NOTHING — it can no longer RESURRECT the issuer we are
-    // about to forget. The bump must precede the clears: a path that re-checks its fence between
-    // the bump and the clears already sees the new epoch and yields. CAPTURE the post-bump epoch
-    // so the async persistence clear below can be ownership-scoped (the #123 whole-branch MEDIUM).
+    // about to forget. CAPTURE the post-bump epoch so the async persistence clear below can be
+    // ownership-scoped (the #123 whole-branch MEDIUM).
     const forgottenEpoch = this.#bumpEpoch(issuer.href);
-    // The in-memory clears run SYNCHRONOUSLY here (single-threaded), so a newer login cannot
-    // interleave between the bump and these deletes; a newer login that lands AFTER re-publishes
-    // its own caches (and bumps the epoch again).
+    // The in-memory clears run SYNCHRONOUSLY here (single-threaded) right after the bump, so a
+    // newer login cannot interleave between the bump and these deletes; a newer login that lands
+    // AFTER re-publishes its own caches (and bumps the epoch again).
     this.#clearScheduler(issuer.href);
     this.#sessions.delete(issuer.href);
     this.#settledSessions.delete(issuer.href);
+    this.#inflightRefreshGrants.delete(issuer.href);
     // Unpin only if `#issuer` still resolves to THIS issuer — never wipe a newer login's pin.
     // COMPARE-AND-SWAP BY PROMISE REFERENCE (the #123 roborev MEDIUM): a newer login can replace
     // `#issuer` WHILE we await the old promise below, so we capture the exact promise first and
@@ -1569,24 +1597,31 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
         this.#issuer = undefined;
       }
     }
-    // OWNERSHIP-SCOPED + ATOMIC persistence clear (the #123 whole-branch MEDIUM, round 4): a
+    // OWNERSHIP-SCOPED + ATOMIC persistence clear (the #123 whole-branch MEDIUM r4 + HIGH r5): a
     // fire-and-forget `forgetIssuer` (cancel/logout cleanup) can run LATE — AFTER the user retried
-    // the SAME issuer and a NEWER login persisted its credential. TWO independent guards make the
-    // clear race-safe:
+    // the SAME issuer and a NEWER login persisted its credential. THREE guards make it race-safe:
     //   1. EPOCH gate — skip entirely once a newer login bumped the epoch (it owns the slot).
-    //   2. ATOMIC `compareAndDelete(issuer, forgottenToken)` — even if a newer login persisted
-    //      BETWEEN the epoch check and the delete transaction, the store deletes ONLY when it still
-    //      holds OUR forgotten token; a newer (different) token is never wiped. This closes the
-    //      check-then-unconditional-`delete` window the round-4 review flagged.
-    // (When there was no token to forget — e.g. an issuer-first login never persisted — fall back
-    // to the plain `#clearPersisted` under the epoch gate; there is no rotating token to race.)
+    //   2. The token to delete is resolved AFTER the bump+epoch-gate: prefer the synchronously
+    //      captured in-memory `settledToken`; only when none was in memory do we read the persisted
+    //      record — and that read is now AFTER the bump, so a retry login committing during it
+    //      cannot retroactively widen what we delete (a stale epoch already short-circuits us).
+    //   3. ATOMIC `compareAndDelete(issuer, token)` — even if a newer login persisted BETWEEN the
+    //      epoch check and the delete transaction, the store deletes ONLY when it still holds OUR
+    //      token; a newer (different) token is never wiped.
     if (this.#epochOf(issuer.href) === forgottenEpoch) {
-      if (forgottenToken !== undefined) {
-        await this.#sessionStore
-          ?.compareAndDelete(issuer.href, forgottenToken)
-          .catch(() => false);
-      } else {
-        await this.#clearPersisted(issuer);
+      const forgottenToken =
+        settledToken ??
+        (await this.#sessionStore?.get(issuer.href).catch(() => undefined))?.refreshToken;
+      // Re-check the epoch after the (possible) async persisted read — a newer login may have
+      // bumped during it; if so, do NOT touch the durable slot (the newer login owns it).
+      if (this.#epochOf(issuer.href) === forgottenEpoch) {
+        if (forgottenToken !== undefined) {
+          await this.#sessionStore
+            ?.compareAndDelete(issuer.href, forgottenToken)
+            .catch(() => false);
+        } else {
+          await this.#clearPersisted(issuer);
+        }
       }
     }
   }

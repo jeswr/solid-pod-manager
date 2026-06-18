@@ -667,6 +667,100 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(base.peek(ISSUER_HREF)?.refreshToken).toBe(rotatedToken);
   });
 
+  it("HIGH: a STALE proactive refresh failing invalid_grant does NOT wipe a newer same-issuer login's session", async () => {
+    // ADVERSARIAL (the #123 whole-branch HIGH, round 5): A's proactive refresh is in flight; B's
+    // fresh login supersedes (bumps epoch + commits + persists). A's grant then FAILS invalid_grant
+    // (A's token was superseded/revoked). `#handleProactiveFailure`'s invalid_grant branch
+    // UNCONDITIONALLY cleared the scheduler + #sessions + #settledSessions + persistence — wiping
+    // B's session. The fix fences that destructive cleanup (stale ⇒ clear only the dead scheduler)
+    // and token-scopes the persistence delete, so B's session/credential survive.
+    vi.useFakeTimers();
+    const store = new StructuredCloneSessionStore();
+    const { provider, getCode } = makeProvider(store, { proactive: true });
+    await provider.login(ISSUER); // A settles + persists
+
+    // Park A's proactive refresh grant in flight.
+    const gate = makeRefreshGate(as.fetch);
+    vi.stubGlobal("fetch", gate.fetchImpl);
+    await pumpUntil(gate.parked);
+
+    // B logs in fresh (account switch) — bumps the epoch, commits + persists B's credential.
+    await provider.login(ISSUER, { expectedWebId: "https://pod.test/bob#me" });
+    const bToken = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(bToken).toBeDefined();
+
+    // Make A's parked grant FAIL invalid_grant when released (revoke all server-side refresh
+    // tokens — A's redemption now 400s). Then release it; A's failure handler runs STALE.
+    as.activeRefreshTokens.clear();
+    gate.releaseToken();
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+
+    // ── THE FENCE: A's stale invalid_grant cleanup did NOT wipe B — B's persisted credential
+    // survives and B's session is still reusable (no re-auth). (Pre-fix, the store would be empty
+    // and the upgrade would re-authenticate.)
+    expect(store.peek(ISSUER_HREF)?.refreshToken).toBe(bToken);
+    await provider.upgrade(new Request("https://pod.test/x"));
+    expect(getCode).toHaveBeenCalledTimes(2); // A's + B's logins only — B's session reused
+  });
+
+  it("HIGH: forgetIssuer bumps+clears BEFORE its async persisted read, so a retry login during that read is not wiped", async () => {
+    // ADVERSARIAL (the #123 whole-branch HIGH, round 5): when there is NO in-memory settled token,
+    // `forgetIssuer` must still bump + clear in-memory state SYNCHRONOUSLY before the async
+    // persisted-record read — otherwise a retry login committing during that await would be wiped
+    // by the resuming cleanup. We drive the no-in-memory-token case (a cold provider with only a
+    // persisted session) and gate the persisted `get()` so a retry login B commits while it is
+    // parked; B must survive.
+    let releaseGet: () => void = () => {};
+    const getGate = new Promise<void>((r) => {
+      releaseGet = r;
+    });
+    let getArmed = true;
+    const base = new StructuredCloneSessionStore();
+    const store = {
+      get: async (i: string) => {
+        if (getArmed) {
+          getArmed = false;
+          await getGate; // park the forget's persisted-record read
+        }
+        return base.get(i);
+      },
+      put: (s: Parameters<StructuredCloneSessionStore["put"]>[0]) => base.put(s),
+      delete: (i: string) => base.delete(i),
+      compareAndDelete: (i: string, t: string) => base.compareAndDelete(i, t),
+    };
+    // Seed a persisted session, then a COLD provider (no in-memory settled session ⇒ forgetIssuer
+    // takes the persisted-read fallback).
+    const seed = new WebIdDPoPTokenProvider(CALLBACK, vi.fn((u: URL) => as.authorize(u)), async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: base,
+    });
+    await seed.login(ISSUER);
+    const getCode = vi.fn((u: URL) => as.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: store as unknown as StructuredCloneSessionStore,
+    });
+
+    // forgetIssuer on the COLD provider: bumps+clears synchronously, then parks at the persisted get.
+    const forget = provider.forgetIssuer(ISSUER);
+    await Promise.resolve();
+
+    // A retry login B commits + persists WHILE the forget's persisted read is parked. B bumps the
+    // epoch (fresh auth — different expectedWebId), so the resuming forget's epoch gate fails.
+    await provider.login(ISSUER, { expectedWebId: "https://pod.test/dave#me" });
+    const bToken = base.peek(ISSUER_HREF)?.refreshToken;
+    expect(bToken).toBeDefined();
+
+    // Release the parked persisted read; the forget resumes — its epoch gate is now stale, so it
+    // must NOT delete B's credential.
+    releaseGet();
+    await forget;
+
+    expect(base.peek(ISSUER_HREF)?.refreshToken).toBe(bToken); // B survived
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

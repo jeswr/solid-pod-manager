@@ -420,6 +420,118 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(rotated).not.toBe(original); // the in-flight refresh's rotated token WAS committed
   });
 
+  it("HIGH: a NEW account's refresh does NOT join the OLD account's parked in-flight grant (no credential swap)", async () => {
+    // ADVERSARIAL (the #123 whole-branch HIGH, round 3): `#sharedRefresh` keyed by issuer ALONE
+    // would let a NEW account (after a fresh-auth account switch bumped the epoch) JOIN the OLD
+    // account's still-in-flight refresh grant and commit the OLD session under the NEW epoch — a
+    // credential SWAP. The identity-scoped join (same refresh token AND same epoch) prevents it:
+    // the new account starts its OWN grant. We observe "no join" by the new account's renewal
+    // issuing a SEPARATE refresh request rather than sharing the parked old one.
+    vi.useFakeTimers();
+    const store = new StructuredCloneSessionStore();
+    const { provider, getCode } = makeProvider(store, { proactive: true });
+
+    // A logs in (settled + a proactive scheduler armed for A's token).
+    await provider.login(ISSUER);
+    const aToken = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(getCode).toHaveBeenCalledTimes(1);
+
+    // Park A's proactive refresh grant mid-flight (it holds A's refresh token, captured at epoch1).
+    const gate = makeRefreshGate(as.fetch);
+    vi.stubGlobal("fetch", gate.fetchImpl);
+    await pumpUntil(gate.parked);
+    const refreshesWhileAParked = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+
+    // B logs in FRESH on the same issuer (account switch ⇒ epoch bump). B authenticates via the
+    // gated fetch (its discovery/auth-code pass the gate — only the FIRST refresh is held), so B
+    // gets its OWN settled session + its OWN (different) refresh token at the NEW epoch.
+    await provider.login(ISSUER, { expectedWebId: "https://pod.test/bob#me" });
+    const bToken = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(bToken).toBeDefined();
+    expect(bToken).not.toBe(aToken);
+
+    // Now force B's access token to expire and renew it WHILE A's grant is STILL parked. B's
+    // renewal must start its OWN grant (different token + different epoch) — NOT join A's parked
+    // one (which would swap B's session for A's). Its grant request is distinct.
+    vi.setSystemTime(Date.now() + 3601 * 1000);
+    const bUpgrade = provider.upgrade(new Request("https://pod.test/b-resource"));
+    // Let B's renewal reach the token endpoint (it is NOT held — the gate is single-shot, already
+    // consumed by A's parked grant).
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+    await bUpgrade;
+
+    const refreshesAfterB = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+    // B ran its OWN refresh grant — strictly MORE refresh requests than were outstanding when only
+    // A's was parked (a JOIN would have added zero). And B never re-authenticated (no popup swap).
+    expect(refreshesAfterB).toBeGreaterThan(refreshesWhileAParked);
+    expect(getCode).toHaveBeenCalledTimes(2); // A's + B's logins only — no spurious re-auth
+
+    gate.releaseToken(); // drain A's parked grant (its commit yields — stale epoch)
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("MEDIUM: login() does NOT re-pin a forgotten issuer when forgetIssuer races the commit", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM, round 3): a `forgetIssuer()` racing a default
+    // `provider.login()` bumps the epoch so the login's COMMIT yields (publishes nothing, deletes
+    // `#settledSessions`), yet the caller's `stillCurrent` may still read true. Gating the pin on
+    // the caller predicate ALONE would re-pin the forgotten issuer. Gating it on the settled cache
+    // actually owning the returned session means the pin is SKIPPED — a subsequent `upgrade()`
+    // must RE-RESOLVE the issuer (call getWebId), proving no stale pin survived.
+    //
+    // We force the race deterministically with a store whose `put` (the persist inside the
+    // commit) BLOCKS on a gate: the login parks mid-commit, `forgetIssuer` runs (bump + clear),
+    // then the gate releases so the commit completes — and must NOT pin.
+    let releasePut: () => void = () => {};
+    const putGate = new Promise<void>((r) => {
+      releasePut = r;
+    });
+    let putArmed = true;
+    const base = new StructuredCloneSessionStore();
+    const store = {
+      get: (i: string) => base.get(i),
+      put: async (s: Parameters<StructuredCloneSessionStore["put"]>[0]) => {
+        if (putArmed) {
+          putArmed = false;
+          await putGate; // park the login's commit at its persist step
+        }
+        return base.put(s);
+      },
+      delete: (i: string) => base.delete(i),
+      compareAndDelete: (i: string, t: string) => base.compareAndDelete(i, t),
+    };
+    const getWebId = vi.fn(async () => WEBID);
+    const getCode = vi.fn((u: URL) => as.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, getWebId, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: store as unknown as StructuredCloneSessionStore,
+    });
+
+    // Start a default login (no stillCurrent override ⇒ caller predicate stays true); it parks at
+    // its persist (commit) step.
+    const loginPromise = provider.login(ISSUER);
+    await Promise.resolve();
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+
+    // Logout races the in-flight commit: bumps the epoch + clears caches/persistence.
+    await provider.forgetIssuer(ISSUER);
+
+    // Release the parked commit; it re-checks the fence (now stale) and publishes NOTHING.
+    releasePut();
+    await loginPromise;
+
+    // ── THE FENCE: the issuer was NOT pinned (the commit yielded + `#settledSessions` was cleared
+    // by the forget). A fresh upgrade must RE-RESOLVE the issuer via getWebId — a surviving pin
+    // would skip that. (Pre-fix, the pin survived and getWebId would NOT be called.)
+    getWebId.mockClear();
+    await provider.upgrade(new Request("https://pod.test/x")).catch(() => {});
+    expect(getWebId).toHaveBeenCalled(); // re-resolved ⇒ no stale pin to a forgotten issuer
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

@@ -464,7 +464,7 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   readonly #commitChains = new Map<string, Promise<unknown>>();
   /**
    * In-flight PURE refresh-token GRANT single-flight per issuer (the #123 roborev MEDIUM +
-   * whole-branch MEDIUM): unlike `#sessions` (which also holds RESOLVED sessions AND code-flow
+   * whole-branch MEDIUM/HIGH): unlike `#sessions` (which also holds RESOLVED sessions AND code-flow
    * authentications, so it cannot tell a pending refresh grant from a settled session or a popup
    * flow), this holds ONLY a genuinely IN-FLIGHT bare `#refresh` grant promise, set synchronously
    * and cleared on settle. EVERY refresh-token-redeeming path (an explicit "Continue as" login, a
@@ -474,8 +474,18 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * session). It deliberately does NOT hold the `#begin`/commit work or any code-flow
    * authentication — only the pure grant — so joining it can never adopt another login's identity
    * (the earlier same-issuer wrong-identity HIGH); each joiner runs its OWN fenced commit.
+   *
+   * IDENTITY-SCOPED JOIN (the #123 whole-branch HIGH): the entry records the EXACT refresh TOKEN
+   * being redeemed AND the issuer EPOCH at which the grant started. A caller joins it ONLY when
+   * BOTH match its own (same token ⇒ same account/session, and same epoch ⇒ no supersession since).
+   * Keying by issuer alone would let a NEW account (after a fresh-auth account switch bumped the
+   * epoch) join the OLD account's still-in-flight grant and commit the OLD session under the new
+   * epoch — a credential SWAP. A mismatch ⇒ start a fresh, independent grant.
    */
-  readonly #inflightRefreshGrants = new Map<string, Promise<IssuerSession>>();
+  readonly #inflightRefreshGrants = new Map<
+    string,
+    { refreshToken: string; epoch: number; promise: Promise<IssuerSession> }
+  >();
   /**
    * PER-ISSUER EPOCH FENCE (the #123 whole-branch roborev HIGHs — proactive overwrite + late
    * forget resurrection). A monotonic generation counter per `issuer.href`, the SINGLE source of
@@ -648,9 +658,18 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       // forces fresh auth instead of returning the prior account's session (the #123 MEDIUM).
       { expectedWebId: options.expectedWebId },
     );
-    // Pin the provider-wide issuer for future lazy 401 upgrades — but ONLY if this login is
-    // still current. A superseded login leaves the newer actor's pin intact.
-    if (stillCurrent()) this.#issuer = Promise.resolve(issuer);
+    // Pin the provider-wide issuer for future lazy 401 upgrades — but ONLY if this login's
+    // session is STILL THE COMMITTED, OWNED one (the #123 whole-branch MEDIUM). Gating on the
+    // caller's `stillCurrent` ALONE is not enough: a `forgetIssuer()` (logout/cancel) racing a
+    // default `provider.login()` bumps the issuer epoch so the COMMIT yields (publishes nothing)
+    // and DELETES `#settledSessions`, yet the caller's `stillCurrent` may still read true — so the
+    // old code would re-pin a forgotten issuer whose session was never committed. Tying the pin to
+    // the settled cache actually owning THIS session means: if a forget (or a newer login)
+    // evicted/replaced it, `#settledSessions.get !== session` and we skip the pin, leaving the
+    // forgotten/newer state intact. (A reused fresh settled session naturally satisfies this.)
+    if (stillCurrent() && this.#settledSessions.get(issuer.href) === session) {
+      this.#issuer = Promise.resolve(issuer);
+    }
     return { webId: session.webId };
   }
 
@@ -1591,16 +1610,29 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     session: IssuerSession,
     refreshToken: string,
   ): Promise<IssuerSession> {
+    const epoch = this.#epochOf(issuer.href);
     const inflight = this.#inflightRefreshGrants.get(issuer.href);
-    if (inflight !== undefined) return inflight;
-    const grant = this.#refresh(issuer, session, refreshToken);
-    this.#inflightRefreshGrants.set(issuer.href, grant);
-    void grant.catch(() => undefined).finally(() => {
-      if (this.#inflightRefreshGrants.get(issuer.href) === grant) {
+    // IDENTITY-SCOPED JOIN (the #123 whole-branch HIGH): join an in-flight grant ONLY when it is
+    // redeeming the SAME refresh token (same account/session) AND was started at the SAME epoch
+    // (no supersession since). Otherwise a NEW account (post-switch, higher epoch) or a DIFFERENT
+    // token would join the wrong grant and commit the wrong session.
+    if (
+      inflight !== undefined &&
+      inflight.refreshToken === refreshToken &&
+      inflight.epoch === epoch
+    ) {
+      return inflight.promise;
+    }
+    const promise = this.#refresh(issuer, session, refreshToken);
+    const entry = { refreshToken, epoch, promise };
+    this.#inflightRefreshGrants.set(issuer.href, entry);
+    void promise.catch(() => undefined).finally(() => {
+      // Clear only if still the tail (a later mismatching grant may have replaced it).
+      if (this.#inflightRefreshGrants.get(issuer.href) === entry) {
         this.#inflightRefreshGrants.delete(issuer.href);
       }
     });
-    return grant;
+    return promise;
   }
 
   /**

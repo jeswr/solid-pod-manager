@@ -685,9 +685,16 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       // Only act while the provider's settled session for this issuer is STILL ours. A newer login
       // replaces `#settledSessions`, so a non-match means the newer login owns the slot — leave it.
       if (this.#settledSessions.get(issuer.href) !== committed) return;
+      // BUMP THE EPOCH FIRST (the #123 whole-branch round-11 MEDIUM): clearing the caches alone is
+      // not enough — a proactive/lazy refresh ALREADY in flight for THIS abandoned credential
+      // captured the still-current epoch, so its later commit would RE-COMMIT the discarded session.
+      // Bumping cancels that in-flight background work (its fenced commit now yields), exactly as a
+      // superseding login / `forgetIssuer` does. The bump precedes the synchronous clears.
+      this.#bumpEpoch(issuer.href);
       this.#clearScheduler(issuer.href);
       this.#sessions.delete(issuer.href);
       this.#settledSessions.delete(issuer.href);
+      this.#inflightRefreshGrants.delete(issuer.href);
       // Unpin only if `#issuer` still resolves to THIS issuer (compare-and-swap by promise ref).
       const pinPromise = this.#issuer;
       if (pinPromise !== undefined) {

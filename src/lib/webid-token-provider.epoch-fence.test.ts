@@ -963,6 +963,36 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     void newer;
   });
 
+  it("MEDIUM: discardIfSuperseded cancels an in-flight proactive refresh for the abandoned credential (no recommit)", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM, round 11): `discardIfSuperseded()` clearing the
+    // caches/persistence WITHOUT bumping the epoch would leave a proactive/lazy refresh ALREADY in
+    // flight for that abandoned credential with a still-current epoch — its later commit would
+    // RE-COMMIT the discarded session (resurrecting it). The fix bumps the epoch in
+    // discardIfSuperseded, so the in-flight refresh's commit yields. We park the proactive refresh,
+    // discard, then release — the discarded credential must NOT come back.
+    vi.useFakeTimers();
+    const store = new StructuredCloneSessionStore();
+    const { provider } = makeProvider(store, { proactive: true });
+    const a = await provider.login(ISSUER); // commits + arms a proactive scheduler
+
+    // Park the proactive refresh grant for THIS (about-to-be-abandoned) credential in flight.
+    const gate = makeRefreshGate(as.fetch);
+    vi.stubGlobal("fetch", gate.fetchImpl);
+    await pumpUntil(gate.parked);
+
+    // Discard the (now-abandoned) login while its proactive refresh is in flight. Bumps the epoch.
+    await a.discardIfSuperseded();
+    expect(store.peek(ISSUER_HREF)).toBeUndefined(); // discarded
+
+    // Release the parked proactive refresh; its commit must YIELD (stale epoch) — NOT re-commit the
+    // discarded session/credential.
+    gate.releaseToken();
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+
+    // ── THE FENCE: the in-flight proactive refresh did NOT resurrect the discarded credential.
+    expect(store.peek(ISSUER_HREF)).toBeUndefined();
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

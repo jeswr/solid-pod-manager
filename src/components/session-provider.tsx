@@ -661,8 +661,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         if (!stillCurrent(establishGeneration)) throw new LoginSupersededError();
 
         let statedWebId: string | undefined;
+        // Captured from `provider.login()`: an ownership-scoped discard of THIS login's own
+        // committed credential, invoked if a supersession aborts our publish (the #123 whole-branch
+        // round-9 MEDIUM). No-op if a newer same-issuer login already owns the slot.
+        let discardIfSuperseded: (() => Promise<void>) | undefined;
         try {
-          ({ webId: statedWebId } = await provider.login(new URL(issuer), {
+          ({ webId: statedWebId, discardIfSuperseded } = await provider.login(new URL(issuer), {
             silentFirst,
             // SUPERSESSION-SAFE PIN (the #123 roborev HIGH): gate the provider-wide issuer pin
             // on this login still being current, so a logout / newer login that won the race
@@ -775,7 +779,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         // REJECTS rather than resolving as authenticated (the roborev finding). The catch
         // below is fenced, so for a superseded throw it performs NO cleanup (the superseder
         // owns the boundary) and just rethrows.
-        if (!published) throw new LoginSupersededError();
+        if (!published) {
+          // ABANDONED-CREDENTIAL DISCARD (the #123 whole-branch round-9 MEDIUM): this losing login
+          // already COMMITTED + persisted its session inside `provider.login()` above, but never
+          // won the UI. Without this, that credential lingers (reusable by a later same-issuer /
+          // issuer-first login). `discardIfSuperseded` forgets it OWNERSHIP-SCOPED — a no-op if a
+          // newer same-issuer login already took the slot (so the newer credential is never wiped),
+          // and a different-issuer superseder leaves this issuer's slot solely ours to discard.
+          await discardIfSuperseded?.().catch(() => {});
+          throw new LoginSupersededError();
+        }
         // Published successfully → this login is no longer in-flight (compare-and-swap so a
         // newer login that overwrote the ref is not cleared).
         if (inFlightLoginRef.current?.generation === establishGeneration) {

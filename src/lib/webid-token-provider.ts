@@ -629,7 +629,7 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   async login(
     issuer: URL,
     options: LoginOptions = {},
-  ): Promise<{ webId: string | undefined }> {
+  ): Promise<{ webId: string | undefined; discardIfSuperseded: () => Promise<void> }> {
     const mode: AuthorizeMode =
       options.silentFirst === true ? "silent-first" : "interactive";
     const stillCurrent = options.stillCurrent ?? (() => true);
@@ -670,7 +670,43 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     if (stillCurrent() && this.#settledSessions.get(issuer.href) === session) {
       this.#issuer = Promise.resolve(issuer);
     }
-    return { webId: session.webId };
+    // OWNERSHIP-SCOPED DISCARD CAPABILITY (the #123 whole-branch round-9 MEDIUM): the caller's
+    // post-`login` profile read can be SUPERSEDED after this session committed but before the UI
+    // published — leaving this (losing) login's committed session + persisted credential abandoned
+    // yet reusable by a later same-issuer / issuer-first login. The caller invokes
+    // `discardIfSuperseded()` on that path to forget THIS login's own credential — and ONLY when
+    // the provider still OWNS exactly this session (settled cache + pin identity-match): if a NEWER
+    // same-issuer login already replaced the settled session / pin, the discard is a NO-OP, so it
+    // can never wipe the newer login's credential. The persistence delete is token-scoped
+    // (`compareAndDelete` on this session's refresh token), so a newer (different) token is never
+    // removed either. Capturing `session` (not re-reading) is what makes the identity check exact.
+    const committed = session;
+    const discardIfSuperseded = async (): Promise<void> => {
+      // Only act while the provider's settled session for this issuer is STILL ours. A newer login
+      // replaces `#settledSessions`, so a non-match means the newer login owns the slot — leave it.
+      if (this.#settledSessions.get(issuer.href) !== committed) return;
+      this.#clearScheduler(issuer.href);
+      this.#sessions.delete(issuer.href);
+      this.#settledSessions.delete(issuer.href);
+      // Unpin only if `#issuer` still resolves to THIS issuer (compare-and-swap by promise ref).
+      const pinPromise = this.#issuer;
+      if (pinPromise !== undefined) {
+        const pinned = await pinPromise.catch(() => undefined);
+        if (pinned?.href === issuer.href && this.#issuer === pinPromise) {
+          this.#issuer = undefined;
+        }
+      }
+      // Token-scoped persistence delete: remove ONLY our exact (now-abandoned) refresh token, never
+      // a newer login's. Re-check ownership after the awaited pin read (a newer login may have
+      // landed) — skip the delete if it no longer owns... (it cannot, since a newer login replaces
+      // `#settledSessions`, which we already confirmed is still ours; the CAD is the atomic guard).
+      if (committed.refreshToken !== undefined) {
+        await this.#sessionStore
+          ?.compareAndDelete(issuer.href, committed.refreshToken)
+          .catch(() => false);
+      }
+    };
+    return { webId: session.webId, discardIfSuperseded };
   }
 
   /**
@@ -1125,17 +1161,22 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     const scheduler = this.#schedulers.get(issuer.href);
     if (scheduler === undefined || this.#destroyed) return;
 
+    // STALE-CYCLE FENCE FIRST (the #123 whole-branch round-9 MEDIUM): if a `forgetIssuer` (logout)
+    // or a SUPERSEDING login bumped this issuer's epoch since this proactive cycle started, the
+    // ENTIRE issuer-wide state (scheduler, sessions, persistence) now belongs to the NEWER actor.
+    // Return WITHOUT touching ANY of it — not even `#clearScheduler` (schedulers are keyed by
+    // issuer and `#scheduleProactive` reuses the slot, so clearing it would kill the NEWER login's
+    // proactive scheduler) and not the transient-retry bookkeeping below (which would otherwise
+    // mutate the newer scheduler's retry state/timer). This dead cycle's own timer already fired,
+    // so there is nothing of OURS left to clean up. (Applies the fence before ALL destructive +
+    // retry handling, not just persistence/session cleanup.)
+    if (!fenced()) return;
+
     if (isInvalidGrant(error)) {
-      // FENCE-GATED DESTRUCTIVE CLEANUP (the #123 whole-branch round-5 HIGH): a STALE proactive
-      // failure — a `forgetIssuer` (logout) or a SUPERSEDING login already bumped this issuer's
-      // epoch and (re)committed — must NOT clear the NEWER session/credential. When the fence is
-      // stale, only the (in-memory) scheduler for this dead cycle is cleared; the newer login owns
-      // everything else. The dead refresh token WE redeemed is already invalid server-side, so
-      // there is nothing of ours to delete that the newer login hasn't already replaced.
-      if (!fenced()) {
-        this.#clearScheduler(issuer.href);
-        return;
-      }
+      // Still-current invalid_grant ⇒ this issuer's refresh token is genuinely dead: clear the
+      // scheduler + in-memory caches and token-scope the persistence delete (delete only the exact
+      // now-dead token WE redeemed — never a token a concurrent same-account refresh just rotated
+      // in; the still-current fence above already excludes a SUPERSEDING login).
       this.#clearScheduler(issuer.href);
       this.#settledSessions.delete(issuer.href);
       this.#sessions.delete(issuer.href);

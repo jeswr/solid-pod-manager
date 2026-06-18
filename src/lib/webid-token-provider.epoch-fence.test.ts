@@ -874,6 +874,95 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(getCode.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("MEDIUM: a STALE proactive invalid_grant failure does NOT clear the NEWER same-issuer login's proactive scheduler", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM, round 9): A's proactive refresh is in flight; B's
+    // fresh login supersedes (bumps epoch, commits, ARMS B's proactive scheduler). A's grant then
+    // fails invalid_grant and runs STALE. The old handler unconditionally `#clearScheduler`'d —
+    // killing B's proactive scheduler (keyed by issuer). The fix returns early when the fence is
+    // stale, touching no issuer-wide scheduler state. Observable: B's proactive refresh STILL fires
+    // on its own timer after A's stale failure.
+    vi.useFakeTimers();
+    const store = new StructuredCloneSessionStore();
+    const { provider, getCode } = makeProvider(store, { proactive: true });
+    await provider.login(ISSUER); // A settles + arms A's scheduler
+
+    // Park A's proactive refresh.
+    const gate = makeRefreshGate(as.fetch);
+    vi.stubGlobal("fetch", gate.fetchImpl);
+    await pumpUntil(gate.parked);
+
+    // B logs in fresh — bumps epoch, commits, arms B's proactive scheduler (replacing A's slot).
+    await provider.login(ISSUER, { expectedWebId: "https://pod.test/bob#me" });
+    const refreshesBeforeBStale = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+
+    void refreshesBeforeBStale;
+    const bToken = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(bToken).toBeDefined();
+
+    // A's parked grant now fails invalid_grant (revoke A's token server-side) and runs its STALE
+    // failure handler.
+    as.activeRefreshTokens.clear();
+    if (bToken) as.activeRefreshTokens.add(bToken); // keep B's token redeemable
+    gate.releaseToken();
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+
+    // ── THE FENCE: A's stale failure handler returned early WITHOUT touching B's issuer-wide state.
+    // B's IN-MEMORY session + scheduler + persisted credential are intact: an upgrade reuses B's
+    // session (no re-auth) AND B's proactive scheduler still fires. (Pre-fix, the stale handler's
+    // `#clearScheduler` + `#settledSessions.delete`/`#sessions.delete` wiped B's in-memory session,
+    // forcing the upgrade to re-authenticate, and killed B's scheduler.)
+    expect(store.peek(ISSUER_HREF)?.refreshToken).toBe(bToken); // B's credential intact
+    await provider.upgrade(new Request("https://pod.test/b-after"));
+    expect(getCode).toHaveBeenCalledTimes(2); // A's + B's logins only — B's session reused
+
+    // And B's proactive scheduler survived — advancing the clock fires B's proactive refresh.
+    const refreshesBeforeTick = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+    await vi.advanceTimersByTimeAsync(65_000);
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+    const refreshesAfter = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+    expect(refreshesAfter).toBeGreaterThan(refreshesBeforeTick); // B's proactive scheduler fired
+  });
+
+  it("MEDIUM: login().discardIfSuperseded forgets THIS login's abandoned credential but is a NO-OP once a newer login owns the slot", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM, round 9): a login commits + persists inside
+    // provider.login() but its UI publish is later superseded. `discardIfSuperseded()` must forget
+    // THIS login's own abandoned credential (so a later login can't reuse it) — yet be a NO-OP when
+    // a NEWER same-issuer login already replaced the settled slot (so it never wipes the winner).
+    const store = new StructuredCloneSessionStore();
+    const { provider, getCode } = makeProvider(store);
+
+    // (1) A login commits; nothing superseded it ⇒ discardIfSuperseded forgets ITS OWN credential.
+    const a = await provider.login(ISSUER);
+    expect(store.peek(ISSUER_HREF)).toBeDefined();
+    await a.discardIfSuperseded();
+    expect(store.peek(ISSUER_HREF)).toBeUndefined(); // abandoned credential discarded
+    // After discard, an upgrade must RE-AUTHENTICATE (the in-memory session + pin were cleared).
+    await provider.upgrade(new Request("https://pod.test/x"));
+    expect(getCode).toHaveBeenCalledTimes(2);
+
+    // (2) A NEWER login takes the slot ⇒ the OLD login's discard is a NO-OP (does not wipe it).
+    const older = await provider.login(ISSUER); // commits credential O
+    const oToken = store.peek(ISSUER_HREF)?.refreshToken;
+    const newer = await provider.login(ISSUER, { expectedWebId: "https://pod.test/zoe#me" }); // fresh ⇒ replaces slot
+    const nToken = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(nToken).toBeDefined();
+    expect(nToken).not.toBe(oToken);
+    const getCodeBeforeDiscard = getCode.mock.calls.length;
+    await older.discardIfSuperseded(); // OLD login's discard — must NOT touch the newer credential
+    expect(store.peek(ISSUER_HREF)?.refreshToken).toBe(nToken); // newer persisted credential survives
+    // AND newer's IN-MEMORY session survives: an upgrade reuses it (no re-auth). (Pre-fix — discard
+    // without the ownership guard — would have wiped newer's #settledSessions, forcing a re-auth.)
+    await provider.upgrade(new Request("https://pod.test/newer"));
+    expect(getCode.mock.calls.length).toBe(getCodeBeforeDiscard); // no re-auth — newer reused
+    void newer;
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

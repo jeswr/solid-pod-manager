@@ -1612,16 +1612,18 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       const forgottenToken =
         settledToken ??
         (await this.#sessionStore?.get(issuer.href).catch(() => undefined))?.refreshToken;
-      // Re-check the epoch after the (possible) async persisted read — a newer login may have
-      // bumped during it; if so, do NOT touch the durable slot (the newer login owns it).
-      if (this.#epochOf(issuer.href) === forgottenEpoch) {
-        if (forgottenToken !== undefined) {
-          await this.#sessionStore
-            ?.compareAndDelete(issuer.href, forgottenToken)
-            .catch(() => false);
-        } else {
-          await this.#clearPersisted(issuer);
-        }
+      // TOKEN-SCOPED DELETE ONLY (the #123 whole-branch round-6 MEDIUM): an UNSCOPED
+      // `#clearPersisted` — even epoch-gated — has a residual window where a retry login bumps the
+      // epoch + persists a new credential AFTER the epoch re-check but BEFORE the delete
+      // transaction, wiping the newer token. So we NEVER do an unscoped delete here. When
+      // `forgottenToken` is undefined there is no identifiable credential of ours to clear (an
+      // issuer-first login never persisted, or the durable slot is already empty), so we SKIP the
+      // delete entirely. When known, `compareAndDelete` is atomic and removes ONLY our exact token,
+      // never a newer (different) one. The re-checked epoch is the first guard either way.
+      if (forgottenToken !== undefined && this.#epochOf(issuer.href) === forgottenEpoch) {
+        await this.#sessionStore
+          ?.compareAndDelete(issuer.href, forgottenToken)
+          .catch(() => false);
       }
     }
   }

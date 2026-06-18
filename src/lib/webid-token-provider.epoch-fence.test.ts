@@ -761,6 +761,73 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(base.peek(ISSUER_HREF)?.refreshToken).toBe(bToken); // B survived
   });
 
+  it("MEDIUM: forgetIssuer with NO identifiable token does NOT unscoped-delete a retry login's freshly-persisted credential", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM, round 6): when `forgetIssuer` cannot identify a
+    // refresh token (no in-memory settled token AND no persisted record at read time), the old
+    // fallback did an UNSCOPED `#clearPersisted` — which, running after a retry login bumped the
+    // epoch and persisted a new credential, wiped it. The fix SKIPS the delete entirely when no
+    // token is identifiable (and only ever deletes token-scoped). We force the window: forgetIssuer
+    // on a provider with nothing persisted (its `get()` returns undefined, parked on a gate); a
+    // retry login persists while parked; release — the forget must not wipe the retry's credential.
+    // The buggy unconditional fallback would run a PLAIN `delete` (no token check). We model that
+    // exact residual window: forgottenToken resolves undefined (empty store at read), the epoch
+    // check passes (no retry bump yet), then the PLAIN delete transaction is reached — and at that
+    // instant a retry login persists B + bumps the epoch. A token-scoped CAD (or a skip) spares B;
+    // an unconditional `delete` wipes it. We gate the store's `delete` to inject the retry between
+    // "delete reached" and "delete committed". (`compareAndDelete` is NOT gated — the fix takes
+    // that path or skips, both safe.)
+    let releaseDelete: () => void = () => {};
+    const deleteGate = new Promise<void>((r) => {
+      releaseDelete = r;
+    });
+    let onDeleteReached: () => void = () => {};
+    const deleteReached = new Promise<void>((r) => {
+      onDeleteReached = r;
+    });
+    const base = new StructuredCloneSessionStore();
+    const store = {
+      get: (i: string) => base.get(i), // empty at the forget's read ⇒ forgottenToken undefined
+      put: (s: Parameters<StructuredCloneSessionStore["put"]>[0]) => base.put(s),
+      delete: async (i: string) => {
+        // The buggy path reaches here. Inject the retry login NOW (persists B), then proceed —
+        // a plain delete would wipe B; the fix never calls this with a foreign credential present.
+        onDeleteReached();
+        await deleteGate;
+        return base.delete(i);
+      },
+      compareAndDelete: (i: string, t: string) => base.compareAndDelete(i, t),
+    };
+    const getCode = vi.fn((u: URL) => as.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: store as unknown as StructuredCloneSessionStore,
+    });
+
+    // forgetIssuer with NOTHING in memory or persisted ⇒ settledToken undefined, get() undefined.
+    const forget = provider.forgetIssuer(ISSUER);
+
+    // If the (buggy) plain delete is reached, inject the retry login + release. With the FIX,
+    // `delete` is NEVER called (forgottenToken undefined ⇒ skip), so `deleteReached` never fires —
+    // we drive the retry via a short race instead.
+    let deleteWasCalled = false;
+    void deleteReached.then(async () => {
+      deleteWasCalled = true;
+      await provider.login(ISSUER, { expectedWebId: "https://pod.test/erin#me" });
+      releaseDelete();
+    });
+    await forget;
+
+    // With the fix, the unscoped delete was SKIPPED entirely (no token to scope to).
+    expect(deleteWasCalled).toBe(false);
+
+    // And a subsequent retry login persists + survives (sanity: the slot is usable, not wiped).
+    await provider.login(ISSUER, { expectedWebId: "https://pod.test/erin#me" });
+    const bToken = base.peek(ISSUER_HREF)?.refreshToken;
+    expect(bToken).toBeDefined();
+    expect(base.peek(ISSUER_HREF)?.refreshToken).toBe(bToken);
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

@@ -159,7 +159,7 @@ function needsInteraction(authorizationResponse: string): boolean {
  * structurally so this module needs no import from the protocol layer.
  */
 export interface RenewProbe {
-  canRenewWithoutInteraction(issuer: URL): boolean;
+  canRenewWithoutInteraction(issuer: URL, expectedWebId?: string): boolean;
 }
 
 /**
@@ -184,11 +184,16 @@ export function openPopupUnlessRenewable(
   controller: PopupLoginController,
   provider: RenewProbe | null | undefined,
   issuer: string | undefined,
+  expectedWebId?: string,
 ): void {
   if (provider != null && issuer !== undefined) {
     let renewable = false;
     try {
-      renewable = provider.canRenewWithoutInteraction(new URL(issuer));
+      // WEBID-AWARE (the #123 roborev MEDIUM): pass the known target WebID so the probe only
+      // says "no popup needed" when the cached session is for THAT WebID. A same-issuer switch
+      // to a different WebID needs a fresh interactive auth, so the popup MUST open here, inside
+      // the user activation — otherwise the interactive auth lands outside it (blocked popup).
+      renewable = provider.canRenewWithoutInteraction(new URL(issuer), expectedWebId);
     } catch {
       // Unparsable issuer: open the popup and let the login flow surface the
       // error (its failure path closes the dangling window).

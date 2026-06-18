@@ -75,6 +75,16 @@ export interface SessionStore {
   get(issuer: string): Promise<PersistedSession | undefined>;
   put(session: PersistedSession): Promise<void>;
   delete(issuer: string): Promise<void>;
+  /**
+   * ATOMIC compare-and-delete (the #123 roborev HIGH): delete the record for `issuer` ONLY if
+   * the stored record's `refreshToken` still equals `expectedRefreshToken`, in a SINGLE
+   * transaction. A plain `get()`-then-`delete()` races: a newer same-issuer login can persist
+   * its credential BETWEEN the read and the delete, and `delete(issuer)` (keyed by issuer only)
+   * would then wipe the NEWER credential. This single-transaction form makes the
+   * read-compare-delete indivisible, so a superseded restore/rollback can never delete a newer
+   * login's freshly-persisted token. Returns true iff it deleted.
+   */
+  compareAndDelete(issuer: string, expectedRefreshToken: string): Promise<boolean>;
 }
 
 const DB_NAME = "solid-pod-manager:sessions";
@@ -142,6 +152,34 @@ export class IndexedDbSessionStore implements SessionStore {
 
   async delete(issuer: string): Promise<void> {
     await this.#tx("readwrite", (store) => store.delete(issuer));
+  }
+
+  async compareAndDelete(issuer: string, expectedRefreshToken: string): Promise<boolean> {
+    // Single readwrite transaction: read the current record, and delete it ONLY if its
+    // refresh token still matches — so a newer same-issuer login persisting concurrently is
+    // never wiped. The get + delete share ONE transaction (atomic w.r.t. other transactions).
+    const db = await this.#open();
+    try {
+      return await new Promise<boolean>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        const getReq = store.get(issuer) as IDBRequest<PersistedSession | undefined>;
+        let deleted = false;
+        getReq.onsuccess = () => {
+          const current = getReq.result;
+          if (current?.refreshToken === expectedRefreshToken) {
+            store.delete(issuer);
+            deleted = true;
+          }
+        };
+        getReq.onerror = () => reject(getReq.error);
+        tx.oncomplete = () => resolve(deleted);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
   }
 }
 

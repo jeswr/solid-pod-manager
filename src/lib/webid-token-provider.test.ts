@@ -69,6 +69,181 @@ describe("WebIdDPoPTokenProvider refresh tokens", () => {
     expect(as.registrations).toHaveLength(0); // static client — no dynamic registration
   });
 
+  it("a login already superseded BEFORE authorize never drives the popup and commits nothing (the #123 stale-popup guard)", async () => {
+    // SECURITY (the #123 roborev HIGH): a login that is already superseded when it reaches the
+    // authorize step must NOT call getCode (drive the shared popup) and must commit nothing. The
+    // popup guard re-checks `stillCurrent` before every `#getCode` and aborts.
+    const asWithWebId = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", asWithWebId.fetch);
+    const ISSUER = new URL("https://as.test").href;
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((u: URL) => asWithWebId.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: store,
+    });
+    await expect(
+      provider.login(new URL("https://as.test"), { stillCurrent: () => false }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(getCode).not.toHaveBeenCalled(); // the shared popup was NEVER driven
+    expect(store.peek(ISSUER)).toBeUndefined(); // nothing committed/persisted
+
+    // Contrast: a NORMAL login commits — it pins (a later upgrade reuses the pin, no getWebId)
+    // AND persists the credential.
+    const store2 = new StructuredCloneSessionStore();
+    const getWebId2 = vi.fn(async () => WEBID);
+    const pinned = new WebIdDPoPTokenProvider(
+      CALLBACK,
+      vi.fn((u: URL) => asWithWebId.authorize(u)),
+      getWebId2,
+      { clientId: CLIENT_ID, profileFetch, sessionStore: store2 },
+    );
+    await pinned.login(new URL("https://as.test")); // default ⇒ commit + pin
+    expect(store2.peek(ISSUER)).toBeDefined(); // persisted (the committed contrast)
+    getWebId2.mockClear();
+    await pinned.upgrade(new Request("https://pod.test/private"));
+    expect(getWebId2).not.toHaveBeenCalled(); // pinned ⇒ no re-resolve
+  });
+
+  it("rolls back the commit when stillCurrent flips to false DURING the awaited persist (the #123 atomic commit)", async () => {
+    // SECURITY (the #123 roborev HIGH): a logout / cancel / newer login can advance the
+    // generation WHILE `#persist` is pending. The commit re-checks AFTER persist and rolls
+    // back — evicting the caches AND compare-and-deleting the just-written refresh token — so a
+    // credential persisted by a superseded login can never outlive it. We model "flips during
+    // persist" with a predicate that stays true through the pre-commit checks and turns false
+    // by the post-persist re-check; the persisted store must end EMPTY (rolled back).
+    const asWithWebId = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: WEBID,
+    });
+    vi.stubGlobal("fetch", asWithWebId.fetch);
+    const ISSUER = new URL("https://as.test").href;
+    const store = new StructuredCloneSessionStore();
+    const provider = new WebIdDPoPTokenProvider(
+      CALLBACK,
+      vi.fn((u: URL) => asWithWebId.authorize(u)),
+      async () => WEBID,
+      { clientId: CLIENT_ID, profileFetch, sessionStore: store },
+    );
+    // Flip exactly at the persist boundary: stays TRUE through the popup-guard + pre-commit
+    // checks (the store has not been written yet), and turns FALSE once `#persist` has written
+    // the record (store.put ran) — i.e. the post-persist re-check sees the supersession.
+    const stillCurrent = () => store.peek(ISSUER) === undefined;
+    const { webId } = await provider.login(new URL("https://as.test"), { stillCurrent });
+    expect(webId).toBe(WEBID); // authenticated…
+    // …but the commit was ROLLED BACK after persist: the store holds NO credential.
+    expect(store.peek(ISSUER)).toBeUndefined();
+    expect(store.deletes).toContain(ISSUER); // the just-written record was deleted on rollback
+  });
+
+  it("a second concurrent same-issuer login does NOT join the first's in-flight work (the #123 no-join)", async () => {
+    // SECURITY (the #123 roborev HIGH): an explicit `login()` must run its OWN authentication
+    // and never JOIN an EARLIER login's still-pending in-flight session for the same issuer —
+    // otherwise the newer login could adopt the older login's authenticated WebID and publish
+    // the WRONG identity (the same-issuer / issuer-only account-switch leak). We observe "no
+    // join" by each concurrent login invoking its OWN authorize (getCode) call: a JOIN would
+    // share one authorize; a no-join runs two.
+    const authorize = vi.fn((u: URL) => as.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, authorize, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+    });
+    const [a, b] = await Promise.all([
+      provider.login(new URL("https://as.test")),
+      provider.login(new URL("https://as.test")),
+    ]);
+    expect(a.webId).toBeUndefined(); // (this top-level AS states no webid claim — fine)
+    expect(b.webId).toBeUndefined();
+    // Two independent authentications, not one joined in-flight session.
+    expect(authorize).toHaveBeenCalledTimes(2);
+  });
+
+  it("a same-issuer login to a DIFFERENT known WebID does NOT reuse the prior account's settled session (the #123 account-switch)", async () => {
+    // SECURITY/UX (the #123 roborev MEDIUM): logged in as WebID A on issuer X, switching to
+    // WebID B on the SAME issuer must NOT return A's cached settled session (which would then
+    // trip the SessionProvider's mismatch check and log the user out) — `expectedWebId` forces a
+    // FRESH authentication for B.
+    const asA = await createFakeAuthorizationServer({
+      issueRefreshTokens: true,
+      scopesSupported: ["openid", "webid", "offline_access"],
+      grantTypesSupported: ["authorization_code", "refresh_token"],
+      webIdClaim: "https://pod.test/alice#me",
+    });
+    vi.stubGlobal("fetch", asA.fetch);
+    const authorize = vi.fn((u: URL) => asA.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, authorize, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+    });
+    // Settle a session as Alice.
+    const a = await provider.login(new URL("https://as.test"));
+    expect(a.webId).toBe("https://pod.test/alice#me");
+    expect(authorize).toHaveBeenCalledTimes(1);
+
+    // Switch to a DIFFERENT WebID (Bob) on the SAME issuer → must NOT reuse Alice's session; a
+    // fresh authorize runs. (The fake AS still states Alice, but the point is the REUSE was
+    // bypassed — a second authorize happened rather than returning the cached Alice session.)
+    await provider.login(new URL("https://as.test"), {
+      expectedWebId: "https://pod.test/bob#me",
+    });
+    expect(authorize).toHaveBeenCalledTimes(2); // fresh auth, NOT a reuse of Alice's session
+  });
+
+  it("a login DOES reuse a settled fresh session (the no-popup 'Continue as' path is preserved)", async () => {
+    // The no-join guard must NOT regress the legitimate reuse of an already-SETTLED session: a
+    // second login after the first SETTLED reuses it with NO new authorize (no popup).
+    const authorize = vi.fn((u: URL) => as.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, authorize, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+    });
+    await provider.login(new URL("https://as.test")); // first login settles a session
+    expect(authorize).toHaveBeenCalledTimes(1);
+    await provider.login(new URL("https://as.test")); // reuses the settled session
+    expect(authorize).toHaveBeenCalledTimes(1); // NO second authorize — reused, not re-run
+  });
+
+  it("two concurrent same-issuer logins on an EXPIRED settled session DEDUP the refresh (no double-redeem of a rotating token; the #123)", async () => {
+    // REGRESSION (the #123 roborev MEDIUM): the no-join guard must NOT make two concurrent
+    // same-issuer logins each redeem the SAME (rotating) refresh token in parallel — that trips
+    // invalid_grant / token-family reuse. A refresh renewal from a SETTLED session is the same
+    // identity, so concurrent renewals must DEDUP onto one refresh request.
+    const authorize = vi.fn((u: URL) => as.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, authorize, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+    });
+    await provider.login(new URL("https://as.test")); // settle a session (one authorize)
+    expect(authorize).toHaveBeenCalledTimes(1);
+    const refreshesBefore = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 3601 * 1000); // expire the settled access token
+
+    // Two concurrent logins for the SAME issuer: they must share ONE refresh redemption.
+    await Promise.all([
+      provider.login(new URL("https://as.test")),
+      provider.login(new URL("https://as.test")),
+    ]);
+    vi.useRealTimers();
+
+    const refreshesAfter = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+    expect(refreshesAfter - refreshesBefore).toBe(1); // exactly ONE redemption, not two
+    expect(authorize).toHaveBeenCalledTimes(1); // and no popup
+  });
+
   it("refreshes an expired access token without user interaction", async () => {
     const { provider, getCode } = makeProvider();
 
@@ -694,10 +869,80 @@ describe("persisted refresh-token session: restore without a window", () => {
     expect(store.deletes).toContain(ISSUER_HREF);
   });
 
+  it("a SUPERSEDED restore that FAILS does NOT delete the newer login's persisted credential (the #123 supersession-safe delete)", async () => {
+    // SECURITY (the #123 roborev finding): a stale boot restore for account A that fails
+    // (invalid_grant) must NOT clear the durable refresh token a NEWER same-issuer login (B)
+    // just persisted. With `stillCurrent: () => false` the failure path skips the delete
+    // entirely, so B's credential survives. A weakened guard (always delete) would wipe it.
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    await makeProviderWith(store, getCode as unknown as typeof noPopup).login(
+      new URL("https://as.test"),
+    );
+    const newerCredential = store.peek(ISSUER_HREF);
+    expect(newerCredential).toBeDefined();
+
+    as.activeRefreshTokens.clear(); // the STALE restore's grant will fail (invalid_grant)
+
+    const reloaded = makeProviderWith(store);
+    const restored = await reloaded.restoreIssuer(
+      new URL("https://as.test"),
+      () => false, // superseded by a newer login on the same issuer
+    );
+
+    expect(restored).toBeUndefined(); // nothing restored
+    // The newer login's persisted credential SURVIVES — the superseded restore did not clear it.
+    expect(store.peek(ISSUER_HREF)).toEqual(newerCredential);
+    expect(store.deletes).not.toContain(ISSUER_HREF);
+  });
+
   it("restoreIssuer is a no-op (undefined) when nothing was persisted", async () => {
     const store = new StructuredCloneSessionStore();
     const reloaded = makeProviderWith(store);
     expect(await reloaded.restoreIssuer(new URL("https://as.test"))).toBeUndefined();
+    expect(noPopup).not.toHaveBeenCalled();
+  });
+
+  it("restoreIssuer with stillCurrent=false commits NOTHING in-memory AND drops the consumed token (the #123 supersession-safe commit)", async () => {
+    // SECURITY (the #123 roborev HIGH + MEDIUM): a boot silent restore that RACES a newer login
+    // must NOT commit the OLD account's session into the provider-wide caches / pin / scheduler.
+    // AND — because the refresh grant inside `#restore` already CONSUMED + ROTATED the stored
+    // refresh token — the now-DEAD old token must not be LEFT in the store (a later restore with
+    // it would invalid_grant). So a superseded restore success: reports the WebID, commits
+    // nothing in-memory, and ATOMICALLY compare-and-deletes the consumed token.
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    await makeProviderWith(store, getCode as unknown as typeof noPopup).login(
+      new URL("https://as.test"),
+    );
+    expect(store.peek(ISSUER_HREF)).toBeDefined();
+
+    const reloaded = makeProviderWith(store);
+    const restored = await reloaded.restoreIssuer(
+      new URL("https://as.test"),
+      () => false, // superseded ⇒ commit NOTHING in-memory
+    );
+    // The session WAS rebuilt (the refresh grant ran, the webId is reported) — only the in-memory
+    // commit was skipped.
+    expect(restored).toEqual({ webId: WEBID });
+    expect(as.tokenRequests.at(-1)?.get("grant_type")).toBe("refresh_token");
+    // The CONSUMED old token was dropped (compare-and-delete), so no dead credential is retained.
+    expect(store.peek(ISSUER_HREF)).toBeUndefined();
+    expect(store.deletes).toContain(ISSUER_HREF);
+  });
+
+  it("restoreIssuer DEFAULTS to committing (stillCurrent omitted) — normal restore reuses the issuer", async () => {
+    // The default (always commit) preserves the normal restore behaviour: a later upgrade
+    // reuses the pinned issuer + cached session with no WebID re-resolution and no popup.
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    await makeProviderWith(store, getCode as unknown as typeof noPopup).login(
+      new URL("https://as.test"),
+    );
+    const reloaded = makeProviderWith(store);
+    expect(await reloaded.restoreIssuer(new URL("https://as.test"))).toEqual({ webId: WEBID });
+    const upgraded = await reloaded.upgrade(new Request("https://pod.test/private"));
+    expect(upgraded.headers.get("Authorization")).toMatch(/^DPoP at-\d+$/);
     expect(noPopup).not.toHaveBeenCalled();
   });
 
@@ -716,6 +961,28 @@ describe("persisted refresh-token session: restore without a window", () => {
     const reloaded = makeProviderWith(store);
     expect(await reloaded.restoreIssuer(new URL("https://as.test"))).toBeUndefined();
     expect(noPopup).not.toHaveBeenCalled();
+  });
+
+  it("forgetIssuer clears the IN-MEMORY session AND the pin AND persistence (the #123 full discard)", async () => {
+    // SECURITY (the #123 roborev HIGH): a cancelled / mismatched login that already committed
+    // must be FULLY discarded — not just persistence (`forgetPersisted`), which would leave the
+    // session in `#sessions`/`#settledSessions` + the `#issuer` pin for silent reuse by the next
+    // same-issuer login / upgrade. After `forgetIssuer`, an upgrade must RE-AUTHENTICATE (a new
+    // getCode), proving the in-memory session + pin were cleared, and the store is empty.
+    const store = new StructuredCloneSessionStore();
+    const getCode = vi.fn((url: URL) => as.authorize(url));
+    const provider = makeProviderWith(store, getCode as unknown as typeof noPopup);
+    await provider.login(new URL("https://as.test"));
+    expect(store.peek(ISSUER_HREF)).toBeDefined();
+    expect(getCode).toHaveBeenCalledTimes(1);
+
+    await provider.forgetIssuer(new URL("https://as.test"));
+    expect(store.peek(ISSUER_HREF)).toBeUndefined(); // persistence cleared…
+
+    // …and the in-memory session + pin are gone: an upgrade re-runs the full auth (a 2nd
+    // getCode), which it would NOT do if a settled session / pin had survived.
+    await provider.upgrade(new Request("https://pod.test/private"));
+    expect(getCode).toHaveBeenCalledTimes(2);
   });
 
   it("an issuer-first login with no webid claim is not persisted (nothing to restore by WebID)", async () => {

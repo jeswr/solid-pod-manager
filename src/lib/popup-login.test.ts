@@ -365,11 +365,39 @@ describe("openPopupUnlessRenewable (the click-handler front door)", () => {
     expect(win.opens).toEqual(["about:blank"]);
   });
 
-  it("hands the probe the parsed issuer URL", () => {
+  it("hands the probe the parsed issuer URL (and the expected WebID when given)", () => {
     const controller = makeController();
     const spy = vi.fn((issuer: URL) => issuer instanceof URL);
     openPopupUnlessRenewable(controller, { canRenewWithoutInteraction: spy }, "https://as.test");
-    expect(spy).toHaveBeenCalledWith(new URL("https://as.test"));
+    expect(spy).toHaveBeenCalledWith(new URL("https://as.test"), undefined);
+
+    // WEBID-AWARE (the #123): the optional expected WebID is forwarded to the probe.
+    const spy2 = vi.fn(() => false);
+    openPopupUnlessRenewable(
+      controller,
+      { canRenewWithoutInteraction: spy2 },
+      "https://as.test",
+      "https://pod.test/bob#me",
+    );
+    expect(spy2).toHaveBeenCalledWith(new URL("https://as.test"), "https://pod.test/bob#me");
+  });
+
+  it("opens the popup when the cached session is for a DIFFERENT WebID (same-issuer switch; the #123)", () => {
+    const controller = makeController();
+    // A WebID-aware probe: renewable for Alice, NOT for Bob on the same issuer.
+    const probeFor = (sessionWebId: string) => ({
+      canRenewWithoutInteraction: (_issuer: URL, expectedWebId?: string) =>
+        expectedWebId === undefined || expectedWebId === sessionWebId,
+    });
+    // Switching to Bob while a session for Alice is cached → not renewable → popup OPENS (inside
+    // the user activation), so the fresh interactive auth for Bob is not left unactivated.
+    openPopupUnlessRenewable(
+      controller,
+      probeFor("https://pod.test/alice#me"),
+      "https://as.test",
+      "https://pod.test/bob#me",
+    );
+    expect(win.opens).toEqual(["about:blank"]);
   });
 });
 

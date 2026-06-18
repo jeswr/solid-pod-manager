@@ -83,6 +83,23 @@ describe("structured-clone persistence (IndexedDB semantics)", () => {
     expect(await store.get(session.issuer)).toBeUndefined();
   });
 
+  it("compareAndDelete removes ONLY when the refresh token matches (the #123 atomic CAS)", async () => {
+    const store = new StructuredCloneSessionStore();
+    const session = await sampleSession(); // refreshToken "rt-persisted-1"
+    await store.put(session);
+
+    // MISMATCH (a newer login replaced the record) → no delete, the record SURVIVES.
+    expect(await store.compareAndDelete(session.issuer, "rt-some-older-token")).toBe(false);
+    expect(await store.get(session.issuer)).toBeDefined();
+
+    // MATCH → deletes.
+    expect(await store.compareAndDelete(session.issuer, "rt-persisted-1")).toBe(true);
+    expect(await store.get(session.issuer)).toBeUndefined();
+
+    // Absent record → false (nothing to delete).
+    expect(await store.compareAndDelete(session.issuer, "rt-persisted-1")).toBe(false);
+  });
+
   it("the access token is not part of the persisted shape", async () => {
     const session = await sampleSession();
     // Type-level + structural guarantee: PersistedSession has no accessToken.

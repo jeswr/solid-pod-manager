@@ -254,6 +254,22 @@ export interface LoginOptions {
    * session is likely and silent success means zero typing.
    */
   silentFirst?: boolean;
+  /**
+   * The caller's "is THIS login still current?" generation re-check (the #123 fence),
+   * evaluated AFTER the session settles to gate the provider-wide `#issuer` pin. Returns
+   * false when a logout / a newer login superseded this login mid-flow, so the pin is
+   * skipped and the newer actor's pin stands. Omitted → always pin (normal behaviour).
+   */
+  stillCurrent?: () => boolean;
+  /**
+   * The WebID the caller is logging in AS, when known up front (the #123 roborev MEDIUM). A
+   * settled same-issuer session is REUSED (the no-popup path) ONLY when its `webId` matches this
+   * — so a SAME-ISSUER ACCOUNT SWITCH (logged in as A, switching to B on the same issuer) does
+   * NOT return A's cached session and then trip the caller's mismatch check; instead it forces a
+   * FRESH interactive authentication for B. Omitted → reuse any settled session for the issuer
+   * (the issuer-only login path, where no specific WebID was requested).
+   */
+  expectedWebId?: string;
 }
 
 /** Refresh this much before the reported expiry to absorb clock skew. */
@@ -437,6 +453,24 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * read on the auth path itself; `#sessions` stays the single-flight truth.
    */
   readonly #settledSessions = new Map<string, IssuerSession>();
+  /**
+   * Per-issuer COMMIT SERIALISATION (the #123 roborev MEDIUM): a chain of the in-flight
+   * `#commitSession` promise per `issuer.href`, so two concurrent same-issuer establishes never
+   * INTERLEAVE their durable `put`/`compareAndDelete` — an older superseded establish's stale
+   * `put` can't land AFTER a newer login's `put` and overwrite the winning token (which the
+   * older's compare-and-delete would then remove, leaving no credential). Commits for the same
+   * issuer run strictly one-after-another; different issuers stay concurrent.
+   */
+  readonly #commitChains = new Map<string, Promise<unknown>>();
+  /**
+   * In-flight LOGIN-path refresh single-flight per issuer (the #123 roborev MEDIUM): unlike
+   * `#sessions` (which also holds RESOLVED sessions, so it cannot tell pending from settled), this
+   * holds ONLY a genuinely IN-FLIGHT login refresh promise, set synchronously and cleared on
+   * settle. A concurrent same-issuer login JOINS it rather than redeeming the rotating refresh
+   * token a second time (which would invalid_grant). Login-only: the lazy upgrade/proactive paths
+   * keep their own `#sessions` single-flight.
+   */
+  readonly #inflightLoginRefreshes = new Map<string, Promise<IssuerSession>>();
   /** Whether proactive background refresh is enabled (opt-in). */
   readonly #proactiveRefresh: boolean;
   /** Page-lifecycle surface (visibility/focus) for proactive scheduling. */
@@ -532,15 +566,46 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * INTERACTIVE-FIRST by default (app-specific divergence from the upstream
    * silent-first pattern; see the module docs): the silent `prompt=none`
    * attempt is skipped unless {@link LoginOptions.silentFirst} asks for it.
+   *
+   * SUPERSESSION-SAFE PIN (the #123 roborev HIGH): pinning `#issuer` is the provider-WIDE
+   * mutation `upgrade()` reads to choose whose session to attach. `options.stillCurrent`
+   * (the caller's generation re-check) is evaluated AFTER the session settles and gates the
+   * pin: a login superseded mid-flow (a logout / a NEWER login won the race) leaves the
+   * newer actor's pin intact rather than re-pinning to this abandoned login. The pin is
+   * folded to AFTER `#getSession` (it scopes only FUTURE `upgrade()` calls, not the current
+   * flow, which is passed `issuer` explicitly), so deferring it changes no in-flow behaviour.
+   * Default (always pin) preserves the normal login behaviour. (The issuer-keyed session
+   * cache + persistence are committed by `#getSession`/`#begin` keyed by `issuer.href`; a
+   * same-issuer racing login's own commit overwrites them last-writer, and the SessionProvider
+   * adds a fail-closed WebID-mismatch check so a joined stale session can never publish.)
    */
   async login(
     issuer: URL,
     options: LoginOptions = {},
   ): Promise<{ webId: string | undefined }> {
-    this.#issuer = Promise.resolve(issuer);
     const mode: AuthorizeMode =
       options.silentFirst === true ? "silent-first" : "interactive";
-    const session = await this.#getSession(issuer, this.#authSignal, mode);
+    const stillCurrent = options.stillCurrent ?? (() => true);
+    // The FENCED COMMIT (the #123 roborev HIGH): pass the freshness predicate into
+    // `#getSession`/`#begin` so a superseded login commits NOTHING provider-wide (no
+    // settled-session cache, no persist, no scheduler) — symmetric with `restoreIssuer`. The
+    // `forLogin` flag makes `#getSession` reuse only a fully-SETTLED fresh session (the
+    // no-popup "Continue as" path) and NEVER JOIN another login's still-PENDING in-flight work
+    // (the #123 same-issuer wrong-identity join — an explicit login establishes its OWN
+    // identity, so it must not adopt an earlier, possibly-superseded login's in-flight WebID).
+    const session = await this.#getSession(
+      issuer,
+      this.#authSignal,
+      mode,
+      stillCurrent,
+      // The `forLogin` reuse policy: reuse a settled session only when it matches the requested
+      // WebID (or none was requested). A SAME-ISSUER ACCOUNT SWITCH to a known different WebID
+      // forces fresh auth instead of returning the prior account's session (the #123 MEDIUM).
+      { expectedWebId: options.expectedWebId },
+    );
+    // Pin the provider-wide issuer for future lazy 401 upgrades — but ONLY if this login is
+    // still current. A superseded login leaves the newer actor's pin intact.
+    if (stillCurrent()) this.#issuer = Promise.resolve(issuer);
     return { webId: session.webId };
   }
 
@@ -562,9 +627,16 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * APP-SPECIFIC (candidate for upstream alongside the PR #11/#12 session
    * cache): upstream's DPoPTokenProvider exposes no popup-avoidance probe.
    */
-  canRenewWithoutInteraction(issuer: URL): boolean {
+  canRenewWithoutInteraction(issuer: URL, expectedWebId?: string): boolean {
     const session = this.#settledSessions.get(issuer.href);
     if (session === undefined) return false;
+    // WEBID-AWARE (the #123 roborev MEDIUM): when a specific WebID is requested (a same-issuer
+    // account switch), the cached session is renewable WITHOUT a popup ONLY if it is for THAT
+    // WebID. A cached session for a DIFFERENT WebID on the same issuer will NOT be reused by
+    // `login(expectedWebId)` (it forces fresh interactive auth), so the popup-avoidance probe
+    // must report false here — otherwise the click handler skips opening the popup and the
+    // interactive auth lands outside the user activation (the blocked-popup path).
+    if (expectedWebId !== undefined && session.webId !== expectedWebId) return false;
     return !hasExpired(session) || session.refreshToken !== undefined;
   }
 
@@ -630,10 +702,87 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     issuer: URL,
     signal: AbortSignal,
     mode: AuthorizeMode = "silent-first",
+    stillCurrent: () => boolean = () => true,
+    forLogin: false | { expectedWebId?: string } = false,
   ): Promise<IssuerSession> {
+    // NO-JOIN for an explicit login (the #123 roborev HIGH): an explicit `login()` may REUSE a
+    // fully-SETTLED fresh session (the no-popup "Continue as" path), but must NEVER JOIN a
+    // still-PENDING in-flight entry left by an EARLIER login for the same issuer — that would
+    // let this (newer) login adopt the earlier login's authenticated WebID and publish the
+    // WRONG identity on a same-issuer / issuer-only account switch. So a login reads the
+    // SETTLED snapshot only; a non-login caller (lazy 401 upgrade / proactive refresh) keeps
+    // the original join-the-in-flight-work behaviour for dedup.
+    if (forLogin) {
+      const expectedWebId = forLogin.expectedWebId;
+      const cachedSettled = this.#settledSessions.get(issuer.href);
+      // SAME-ISSUER ACCOUNT-SWITCH GUARD (the #123 roborev MEDIUM): only treat a settled session
+      // as reusable when it matches the requested WebID (or none was requested). Switching to a
+      // DIFFERENT known WebID on the same issuer must NOT reuse / renew the prior account's
+      // session — it forces a FRESH interactive authentication for the requested identity.
+      const settled =
+        cachedSettled !== undefined &&
+        (expectedWebId === undefined || cachedSettled.webId === expectedWebId)
+          ? cachedSettled
+          : undefined;
+      if (settled !== undefined && !hasExpired(settled)) {
+        // A settled, still-fresh session ⇒ reuse it (the no-popup "Continue as" path).
+        return settled;
+      }
+      if (settled !== undefined && settled.refreshToken !== undefined) {
+        // Settled but expired, WITH a refresh token ⇒ try the refresh grant (still no popup).
+        // Two-part design (the #123 roborev MEDIUM):
+        //   1. DEDUP only the PURE `#refresh` GRANT per issuer — concurrent same-issuer logins
+        //      must NOT each redeem the ROTATING refresh token (that trips invalid_grant). The
+        //      in-flight map holds the bare grant promise (NO `#begin`, NO commit, NO fence).
+        //   2. EACH login then runs its OWN fenced `#commitSession` against the shared grant
+        //      result with ITS OWN `stillCurrent` — so a login that is STILL current commits +
+        //      publishes for itself, regardless of whether a SIBLING (e.g. the one that started
+        //      the grant) was superseded. Reusing one login's fence for all joiners would let a
+        //      superseded starter's fence skip the commit while a still-current joiner returns
+        //      logged-in with NOTHING committed (the finding). We deliberately do NOT expose the
+        //      grant via `#begin`'s `#sessions` single-flight (a code-flow path could be joined
+        //      by a lazy upgrade — the earlier HIGH); the dedup is this dedicated grant map.
+        const inflight = this.#inflightLoginRefreshes.get(issuer.href);
+        let grant = inflight;
+        if (grant === undefined) {
+          grant = this.#refresh(issuer, settled, settled.refreshToken);
+          this.#inflightLoginRefreshes.set(issuer.href, grant);
+          // Clear the in-flight entry when the grant settles (compare-and-swap on the tail).
+          void grant.catch(() => undefined).finally(() => {
+            if (this.#inflightLoginRefreshes.get(issuer.href) === grant) {
+              this.#inflightLoginRefreshes.delete(issuer.href);
+            }
+          });
+        }
+        try {
+          const granted = await grant;
+          // THIS login's OWN fenced commit against the shared grant result (publish-last,
+          // atomic, per-issuer-serialised — `#commitSession`). A superseded login commits
+          // nothing; a still-current one commits + publishes for itself.
+          await this.#commitSession(issuer, granted, stillCurrent, { pin: false });
+          return granted;
+        } catch {
+          // The refresh grant was rejected (expiry / revocation / rotation reuse). DROP the dead
+          // token IN PLACE on the settled snapshot so the synchronous probe
+          // (`canRenewWithoutInteraction`) stops promising a popup-free renewal on the next click
+          // (matching `#renew`'s behaviour). Then fall through to a FRESH interactive
+          // authentication, which must NOT be exposed (next block).
+          settled.refreshToken = undefined;
+        }
+      }
+      // No reusable settled session — OR the refresh grant just failed — ⇒ authenticate FRESH
+      // for THIS login (the code flow / popup), never adopting an earlier login's in-flight
+      // identity. `exposeInFlight: false` keeps this fresh login's establishment work OUT of the
+      // shared `#sessions` map until the commit fence passes, so no concurrent upgrade joins (and
+      // uses) a not-yet-final, possibly-superseded or DIFFERENT-account session (the #123 roborev
+      // HIGH — premature in-flight join). `stillCurrent` is threaded into `#authenticate` so a
+      // superseded login never drives the shared popup (the #123 stale-login popup guard).
+      return this.#begin(issuer, this.#authenticate(issuer, signal, mode, stillCurrent), stillCurrent, false);
+    }
+
     const cached = this.#sessions.get(issuer.href);
     if (cached === undefined) {
-      return this.#begin(issuer, this.#authenticate(issuer, signal, mode));
+      return this.#begin(issuer, this.#authenticate(issuer, signal, mode, stillCurrent), stillCurrent);
     }
 
     const session = await cached;
@@ -642,33 +791,62 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     // Renew, unless a concurrent caller already replaced the expired session.
     if (this.#sessions.get(issuer.href) === cached) {
       this.#sessions.delete(issuer.href);
-      return this.#begin(issuer, this.#renew(issuer, session, signal, mode));
+      return this.#begin(issuer, this.#renew(issuer, session, signal, mode, stillCurrent), stillCurrent);
     }
-    return this.#getSession(issuer, signal, mode);
+    return this.#getSession(issuer, signal, mode, stillCurrent, forLogin);
   }
 
-  /** Cache the in-flight work; evict on failure so the next request can retry. */
-  async #begin(issuer: URL, work: Promise<IssuerSession>): Promise<IssuerSession> {
-    this.#sessions.set(issuer.href, work);
+  /**
+   * Cache the in-flight work; evict on failure so the next request can retry.
+   *
+   * FENCED COMMIT (the #123 roborev HIGH): `stillCurrent` (default always-true for the lazy
+   * upgrade / proactive-refresh callers that MAINTAIN an established session) is re-checked
+   * AFTER the work resolves and gates the provider-wide COMMIT — the settled-session cache,
+   * the durable persist, and the proactive scheduler. A LOGIN superseded mid-flow (a logout /
+   * a newer same-issuer login won the race) passes a predicate that returns false, so the
+   * stale login commits NOTHING provider-wide: it returns the session to its caller (which
+   * will itself bail at the SessionProvider fence) but never overwrites/resurrects the caches
+   * or the persisted credential. The in-flight `#sessions` entry it set is rolled back
+   * (compare-and-delete) so a concurrent same-issuer reader cannot join this abandoned work.
+   */
+  async #begin(
+    issuer: URL,
+    work: Promise<IssuerSession>,
+    stillCurrent: () => boolean = () => true,
+    exposeInFlight = true,
+  ): Promise<IssuerSession> {
+    // `exposeInFlight` (default true) publishes the in-flight `work` into `#sessions` so a
+    // CONCURRENT lazy upgrade / proactive refresh DEDUPS onto it (the established single-flight
+    // contract). The LOGIN establishment paths pass false (the #123 roborev HIGH): an explicit
+    // login's not-yet-final session must NOT be joinable by a concurrent upgrade before the
+    // post-persist commit fence, or that upgrade could USE a session about to be rolled back as
+    // superseded. With false, only the COMMITTED session is published (post-fence, by
+    // `#commitSession`), never the raw in-flight work.
+    if (exposeInFlight) this.#sessions.set(issuer.href, work);
     try {
       const session = await work;
-      // Synchronous snapshot for canRenewWithoutInteraction(). The SAME object
-      // is stored, so in-place staleness marks (invalidate()'s expiresAt = 0,
-      // #renew dropping a rejected refresh token) are visible to the probe.
-      this.#settledSessions.set(issuer.href, session);
-      // Persist the DPoP-bound refresh credential so a future page load can be
-      // restored via the refresh grant — no popup (see session-persistence.ts).
-      // Awaited so a session is durable before the caller proceeds (the store's
-      // own errors are swallowed inside #persist — a storage failure degrades to
-      // in-memory-only, it never breaks a live login).
-      await this.#persist(issuer, session);
-      // Keep the cached session continuously fresh (opt-in). Every settled
-      // session — first login, lazy renew, refresh-grant restore, AND a
-      // proactive refresh's own result — reschedules from its (rotated) token.
-      this.#scheduleProactive(issuer, session);
+      // SUPERSEDED before commit: do not commit provider-wide. Roll back our in-flight entry
+      // (only if it is still ours — never clobber a newer login's) and return uncommitted.
+      if (!stillCurrent()) {
+        if (exposeInFlight && this.#sessions.get(issuer.href) === work) {
+          this.#sessions.delete(issuer.href);
+        }
+        return session;
+      }
+      // Commit ATOMICALLY w.r.t. supersession (the #123 roborev HIGH): persist FIRST, re-check
+      // `stillCurrent` AFTER persist, and publish the reusable caches LAST (only when still
+      // current) — so a superseded login never exposes/persists a credential that outlives it.
+      // `#begin` never pins `#issuer` (login() pins separately, gated on its own freshness).
+      const committed = await this.#commitSession(issuer, session, stillCurrent, { pin: false });
+      // If the commit did NOT publish (superseded post-persist) AND we exposed an in-flight
+      // entry, evict it so no concurrent reader joins this abandoned session (compare-and-swap:
+      // never clobber a newer login that already replaced the slot).
+      if (!committed && exposeInFlight && this.#sessions.get(issuer.href) === work) {
+        this.#sessions.delete(issuer.href);
+      }
       return session;
     } catch (e) {
-      if (this.#sessions.get(issuer.href) === work) {
+      if (exposeInFlight && this.#sessions.get(issuer.href) === work) {
         this.#sessions.delete(issuer.href);
       }
       throw e;
@@ -992,6 +1170,17 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * Pins the provider's issuer on success, exactly like {@link login}, so a
    * later 401 reuses the restored session without prompting for a WebID.
    *
+   * SUPERSESSION-SAFE PIN (the #123 roborev HIGH): pinning `#issuer` is a
+   * provider-WIDE mutation — `upgrade()` reads it to pick whose session to attach.
+   * On a boot silent restore that RACES a newer interactive login (account switch),
+   * a late-resolving restore could re-pin the provider to the OLD account AFTER the
+   * new login pinned the new one, so the next `upgrade()` would attach the OLD
+   * session. The caller therefore passes `shouldPin` — a generation re-check
+   * evaluated AT the pin point: when it returns false (the restore was superseded),
+   * the rebuilt session is still cached (harmless — keyed by issuer href) but the
+   * provider-wide `#issuer` pin is SKIPPED, so the newer login's pin stands. Default
+   * (always pin) preserves the normal restore/login behaviour.
+   *
    * APP-SPECIFIC divergence (strong upstream candidate — see the module docs):
    * upstream reactive-authentication's DPoPTokenProvider holds its refresh token
    * in memory only, so a reload re-runs the authorization-code flow (the
@@ -999,7 +1188,10 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * token + non-extractable key and restoring via the refresh grant removes that
    * flash. Equivalent library change described in the task report.
    */
-  async restoreIssuer(issuer: URL): Promise<{ webId: string } | undefined> {
+  async restoreIssuer(
+    issuer: URL,
+    stillCurrent: () => boolean = () => true,
+  ): Promise<{ webId: string } | undefined> {
     if (this.#sessionStore === undefined) return undefined;
 
     let stored: PersistedSession | undefined;
@@ -1010,20 +1202,124 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     }
     if (stored === undefined) return undefined;
 
+    // Run the refresh grant WITHOUT committing to the provider-wide caches yet — the commit
+    // is fenced below so a SUPERSEDED boot restore (a newer login won the race, possibly on
+    // the SAME issuer) can never replace the issuer-keyed session/settled caches, re-pin
+    // `#issuer`, re-persist, or re-schedule on behalf of the stale account. Just running
+    // `#restore` mutates nothing provider-wide (it only builds a fresh session object).
+    //
+    // TRADEOFF vs the old `#begin` path: `#begin` registered the in-flight restore in
+    // `#sessions` so a concurrent same-issuer `upgrade()` would JOIN it (dedup). We
+    // deliberately do NOT register in-flight here — a concurrent `upgrade()` runs its own
+    // auth — because registering shared in-flight work for a possibly-superseded restore is
+    // itself the cross-account-join leak this fence closes. During a boot silent restore that
+    // is the safe direction (correctness over one deduped refresh).
+    let session: IssuerSession;
     try {
-      const session = await this.#begin(
-        issuer,
-        this.#restore(issuer, stored),
-      );
-      this.#issuer = Promise.resolve(issuer); // pin, like login()
-      return session.webId === undefined ? undefined : { webId: session.webId };
+      session = await this.#restore(issuer, stored);
     } catch {
-      // The refresh token was expired/revoked (token endpoint invalid_grant) or
-      // the restore otherwise failed: clear the dead entry and report "nothing
-      // restored" so the caller stays silent (no popup on restore).
-      await this.#clearPersisted(issuer);
+      // The refresh token was expired/revoked (token endpoint invalid_grant) or the restore
+      // otherwise failed: clear the DEAD entry and report "nothing restored" (no popup).
+      //
+      // SUPERSESSION-SAFE DELETE (the #123 roborev HIGH): a stale boot restore that FAILS must
+      // NOT delete a NEWER same-issuer login's freshly-persisted credential. Delete ONLY when
+      // this restore is still current, and use the ATOMIC `compareAndDelete` (one transaction) so
+      // the read-compare-delete is indivisible — a newer login persisting BETWEEN a plain get and
+      // delete can never be wiped. The scheduler is cleared separately (it is in-memory).
+      if (stillCurrent()) {
+        this.#clearScheduler(issuer.href);
+        await this.#sessionStore
+          ?.compareAndDelete(issuer.href, stored.refreshToken)
+          .catch(() => false);
+      }
       return undefined;
     }
+
+    // FENCE (the #123 roborev HIGH): commit the restored session to the provider-wide state
+    // ONLY if this restore is still current. A superseded restore returns the WebID (so the
+    // boot path knows what WOULD have restored) but commits NOTHING in-memory — the newer login
+    // owns the issuer-keyed caches, the `#issuer` pin, and the refresh scheduler.
+    if (!stillCurrent()) {
+      // The refresh grant ALREADY CONSUMED + ROTATED the stored refresh token (#restore ran),
+      // so the OLD `stored.refreshToken` left in the store is now DEAD — a later restore with it
+      // would invalid_grant (the #123 roborev MEDIUM). ATOMICALLY compare-and-delete it (so a
+      // newer same-issuer login that re-persisted a fresh token in the meantime is never wiped).
+      // We do NOT write the rotated token (the newer login owns the durable slot); dropping the
+      // dead one is the fail-closed choice (the user re-authenticates with one click).
+      await this.#sessionStore
+        ?.compareAndDelete(issuer.href, stored.refreshToken)
+        .catch(() => false);
+      return session.webId === undefined ? undefined : { webId: session.webId };
+    }
+    // ATOMIC-W.R.T.-SUPERSESSION commit (shared with `#begin`): installs caches + (optionally)
+    // the pin, awaits persist, then re-checks `stillCurrent` AFTER the awaited persist and rolls
+    // the whole commit back (compare-and-swap) if a logout / newer login won during persist.
+    await this.#commitSession(issuer, session, stillCurrent, { pin: true });
+    return session.webId === undefined ? undefined : { webId: session.webId };
+  }
+
+  /**
+   * Commit a freshly-established/restored session to the provider-wide state ATOMICALLY w.r.t.
+   * supersession (the #123 roborev HIGH). PUBLISH-LAST: the durable persist runs FIRST, THEN
+   * `stillCurrent()` is re-checked, and ONLY THEN are the reusable provider-wide caches
+   * (`#sessions`/`#settledSessions`), the `#issuer` pin, and the proactive scheduler installed.
+   * Nothing reusable is exposed before the post-persist fence, so a newer same-issuer login (via
+   * `#getSession(..., forLogin)` / `canRenewWithoutInteraction`) can NEVER observe and reuse a
+   * not-yet-final stale session (closes the premature-publication leak). On a post-persist
+   * supersession it commits NOTHING in-memory and compare-and-deletes the just-persisted refresh
+   * token INDEPENDENTLY of any in-memory ownership (so a stale persist finishing last cannot
+   * leave its token behind). Shared by `#begin` (login/renew) and `restoreIssuer`.
+   */
+  async #commitSession(
+    issuer: URL,
+    session: IssuerSession,
+    stillCurrent: () => boolean,
+    opts: { pin: boolean },
+  ): Promise<boolean> {
+    // SERIALISE per-issuer commits (the #123 roborev MEDIUM): chain onto any in-flight commit
+    // for this issuer so two concurrent same-issuer establishes never interleave their durable
+    // put/compare-and-delete. Different issuers run concurrently (the chain is per-issuer.href).
+    const prior = this.#commitChains.get(issuer.href) ?? Promise.resolve();
+    const run = prior
+      .catch(() => undefined) // a prior commit's failure must not block the next
+      .then(() => this.#commitSessionInner(issuer, session, stillCurrent, opts));
+    this.#commitChains.set(issuer.href, run);
+    try {
+      return await run;
+    } finally {
+      // Clear the chain entry once it is the tail (compare-and-swap), so the map doesn't grow.
+      if (this.#commitChains.get(issuer.href) === run) {
+        this.#commitChains.delete(issuer.href);
+      }
+    }
+  }
+
+  async #commitSessionInner(
+    issuer: URL,
+    session: IssuerSession,
+    stillCurrent: () => boolean,
+    opts: { pin: boolean },
+  ): Promise<boolean> {
+    // PERSIST FIRST (before exposing anything reusable). The store's own errors are swallowed
+    // inside #persist (a storage failure degrades to in-memory-only).
+    await this.#persist(issuer, session);
+    if (!stillCurrent()) {
+      // SUPERSEDED during persist — publish NOTHING in-memory. ATOMIC compare-and-delete the
+      // just-persisted token by refresh-token equality (one transaction), INDEPENDENT of any
+      // in-memory cache ownership — so a stale persist that finished last cannot leave its
+      // credential behind, and a newer login persisting concurrently is never wiped (the #123
+      // roborev HIGH — the non-atomic get-then-delete race).
+      await this.#sessionStore
+        ?.compareAndDelete(issuer.href, session.refreshToken ?? "")
+        .catch(() => false);
+      return false; // not committed — the caller evicts any in-flight cache entry it set.
+    }
+    // STILL CURRENT after persist → publish the reusable caches, the pin, and the scheduler.
+    this.#sessions.set(issuer.href, Promise.resolve(session));
+    this.#settledSessions.set(issuer.href, session);
+    if (opts.pin) this.#issuer = Promise.resolve(issuer);
+    this.#scheduleProactive(issuer, session);
+    return true;
   }
 
   /**
@@ -1078,6 +1374,36 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   }
 
   /**
+   * FULLY discard an issuer's session — the IN-MEMORY caches (`#sessions` / `#settledSessions`),
+   * the `#issuer` pin (only if it still points at this issuer), the proactive scheduler, AND the
+   * durable persisted credential. Use this (not the persistence-only {@link forgetPersisted})
+   * when a committed login must be DISCARDED so it can NEVER be reused from memory by the next
+   * same-issuer login / `upgrade()` — i.e. a CANCELLED login (the user backed out) or a
+   * still-current login that FAILED a fail-closed identity check after `provider.login()` already
+   * committed the session (the #123 roborev HIGH). `#getSession(..., forLogin)` reads
+   * `#settledSessions` and `upgrade()` reads `#issuer`, so leaving either behind would let a
+   * cancelled/abandoned credential be silently reused.
+   */
+  async forgetIssuer(issuer: URL): Promise<void> {
+    this.#clearScheduler(issuer.href);
+    this.#sessions.delete(issuer.href);
+    this.#settledSessions.delete(issuer.href);
+    // Unpin only if `#issuer` still resolves to THIS issuer — never wipe a newer login's pin.
+    // COMPARE-AND-SWAP BY PROMISE REFERENCE (the #123 roborev MEDIUM): a newer login can replace
+    // `#issuer` WHILE we await the old promise below, so we capture the exact promise first and
+    // unpin only if `#issuer` is STILL that same promise after the await — otherwise the newer
+    // login's pin stands.
+    const pinPromise = this.#issuer;
+    if (pinPromise !== undefined) {
+      const pinned = await pinPromise.catch(() => undefined);
+      if (pinned?.href === issuer.href && this.#issuer === pinPromise) {
+        this.#issuer = undefined;
+      }
+    }
+    await this.#clearPersisted(issuer);
+  }
+
+  /**
    * Prefer a transparent refresh-token grant; fall back to a new
    * authorization-code flow when there is no refresh token or the grant fails
    * (refresh-token expiry, revocation, rotation-reuse detection, …).
@@ -1087,9 +1413,12 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     expired: IssuerSession,
     signal: AbortSignal,
     mode: AuthorizeMode = "silent-first",
+    stillCurrent: () => boolean = () => true,
   ): Promise<IssuerSession> {
     if (expired.refreshToken === undefined) {
-      return this.#authenticate(issuer, signal, mode);
+      // `stillCurrent` threaded so a superseded login's code-flow fallback never drives the
+      // shared popup (the #123 roborev HIGH).
+      return this.#authenticate(issuer, signal, mode, stillCurrent);
     }
     try {
       return await this.#refresh(issuer, expired, expired.refreshToken);
@@ -1101,7 +1430,7 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       // while the IdP cookie lives (prompt=none first); an explicit login
       // goes interactive at once.
       expired.refreshToken = undefined;
-      return this.#authenticate(issuer, signal, mode);
+      return this.#authenticate(issuer, signal, mode, stillCurrent);
     }
   }
 
@@ -1167,6 +1496,7 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     issuer: URL,
     signal: AbortSignal,
     mode: AuthorizeMode = "silent-first",
+    stillCurrent: () => boolean = () => true,
   ): Promise<IssuerSession> {
     const http = this.#httpOptions(issuer, signal);
 
@@ -1251,9 +1581,21 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
 
     // Run the interactive (no-`prompt=none`) authorization once, reusing the
     // same popup window. Shared by the two silent-fallthrough paths below.
+    // STALE-LOGIN POPUP GUARD (the #123 roborev HIGH): `#getCode` drives the SHARED popup. A
+    // login superseded / cancelled while this auth was in flight (discovery / client resolution
+    // above) must NOT navigate or cancel the popup that now belongs to a NEWER login. Re-check
+    // `stillCurrent` immediately before EVERY `#getCode` and reject if stale, so the stale login
+    // never touches the shared window.
+    const assertCurrent = (): void => {
+      if (!stillCurrent()) {
+        throw new DOMException("Login superseded", "AbortError");
+      }
+    };
+
     const interactiveRetry = async (): Promise<URLSearchParams> => {
       const retryUrl = buildAuthorizationUrl(false);
       if (usePkce) retryUrl.searchParams.set("code_challenge", codeChallenge);
+      assertCurrent();
       const retryResponse = await this.#getCode(retryUrl, signal);
       return oauth.validateAuthResponse(
         authorizationServer,
@@ -1264,6 +1606,7 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     };
 
     let authorizationCodeParams: URLSearchParams;
+    assertCurrent();
     const authorizationCodeResponse = await this.#getCode(authorizationUrl, signal);
 
     // Non-compliant servers (NSS — solidweb.org, datapod.igrant.io; Trinpod)

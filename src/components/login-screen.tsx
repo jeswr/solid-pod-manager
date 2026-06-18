@@ -12,7 +12,11 @@ import {
   Lock,
   ShieldCheck,
 } from "lucide-react";
-import { NoWebIdFromProviderError, useSession } from "@/components/session-provider";
+import {
+  LoginSupersededError,
+  NoWebIdFromProviderError,
+  useSession,
+} from "@/components/session-provider";
 import { Brand } from "@/components/brand";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -98,6 +102,11 @@ export function LoginScreen() {
 
   /** Shared failure handling for every login path. */
   function fail(e: unknown) {
+    if (e instanceof LoginSupersededError) {
+      // BENIGN (the #123 fence): the login was superseded by a newer login / a logout / a
+      // cancel — not a failure. The superseding actor owns the UI; show NO error.
+      return;
+    }
     if (e instanceof AmbiguousIssuerError) {
       // Several issuers on the profile: never pick silently — let the user.
       setIssuerChoices(e.issuers);

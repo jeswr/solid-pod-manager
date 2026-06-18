@@ -42,6 +42,18 @@ export class StructuredCloneSessionStore implements SessionStore {
     this.deletes.push(issuer);
   }
 
+  async compareAndDelete(issuer: string, expectedRefreshToken: string): Promise<boolean> {
+    // Synchronous read-compare-delete (the Map is single-threaded here, so it is atomic w.r.t.
+    // the test's awaits — faithful to the real store's single-transaction guarantee).
+    const current = this.#map.get(issuer);
+    if (current?.refreshToken === expectedRefreshToken) {
+      this.#map.delete(issuer);
+      this.deletes.push(issuer);
+      return true;
+    }
+    return false;
+  }
+
   /** Test helper: the raw stored value (already a structured clone). */
   peek(issuer: string): PersistedSession | undefined {
     return this.#map.get(issuer);

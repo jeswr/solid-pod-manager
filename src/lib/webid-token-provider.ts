@@ -623,15 +623,14 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     const mode: AuthorizeMode =
       options.silentFirst === true ? "silent-first" : "interactive";
     const stillCurrent = options.stillCurrent ?? (() => true);
-    // SUPERSEDE BACKGROUND WORK (the #123 whole-branch HIGH #1): an explicit user-initiated login
-    // is a NEW actor for this issuer — BUMP the issuer epoch up front so any OLD account's
-    // in-flight proactive/lazy refresh (which captured the PRIOR epoch) becomes stale and its
-    // commit yields, and so it cannot finish AFTER this login and OVERWRITE the caches/persistence
-    // with the superseded credential. This login then runs `#getSession`/`#begin` AFTER the bump,
-    // so it captures the NEW epoch and commits for itself. (Bumping on a same-account no-popup
-    // reuse is harmless: the reused settled session is untouched and the next proactive cycle
-    // re-arms from it.)
-    this.#bumpEpoch(issuer.href);
+    // NOTE (the #123 whole-branch MEDIUM): the issuer-epoch bump that supersedes background work
+    // is NOT done here. Bumping unconditionally on EVERY `login()` would make a SAME-ACCOUNT
+    // "Continue as" (which reuses a settled session or renews via the shared refresh grant)
+    // invalidate a concurrent SAME-ACCOUNT proactive/lazy refresh that already consumed+rotated
+    // the refresh token — yielding that refresh's commit and leaving the consumed (dead) token in
+    // memory/persistence (the next refresh then invalid_grants). The bump is instead done ONLY on
+    // the genuine-supersession path inside `#getSession`: a FRESH authentication (account switch /
+    // new identity / no reusable session), which is the only case that must invalidate older work.
     // The FENCED COMMIT (the #123 roborev HIGH): pass the freshness predicate into
     // `#getSession`/`#begin` so a superseded login commits NOTHING provider-wide (no
     // settled-session cache, no persist, no scheduler) — symmetric with `restoreIssuer`. The
@@ -812,6 +811,16 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
           settled.refreshToken = undefined;
         }
       }
+      // SUPERSEDE BACKGROUND WORK (the #123 whole-branch HIGH #1, scoped per the whole-branch
+      // MEDIUM): a FRESH authentication is the genuine supersession point — a new identity / an
+      // account switch / no reusable session for the requested WebID. BUMP the issuer epoch HERE
+      // (NOT unconditionally in `login()`), so an OLD account's in-flight proactive/lazy refresh
+      // (which captured the PRIOR epoch) becomes stale and its commit yields — it cannot finish
+      // AFTER this fresh login and overwrite the caches/persistence. This bump is BEFORE `#begin`
+      // captures the epoch, so the fresh login itself commits at the NEW epoch. A SAME-ACCOUNT
+      // "Continue as" never reaches here (it returned a reused settled session / committed via the
+      // shared refresh grant above), so a same-account in-flight refresh is NOT invalidated.
+      this.#bumpEpoch(issuer.href);
       // No reusable settled session — OR the refresh grant just failed — ⇒ authenticate FRESH
       // for THIS login (the code flow / popup), never adopting an earlier login's in-flight
       // identity. `exposeInFlight: false` keeps this fresh login's establishment work OUT of the

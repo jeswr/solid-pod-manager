@@ -382,6 +382,44 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(getCode).toHaveBeenCalledTimes(2); // A's login + B's login — NO 3rd re-auth
   });
 
+  it("MEDIUM: a SAME-ACCOUNT 'Continue as' does NOT invalidate an in-flight same-account proactive refresh", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM): an unconditional epoch bump on EVERY login()
+    // would make a same-account "Continue as" (which only REUSES the settled session) yield a
+    // concurrent same-account proactive refresh that already consumed+rotated the refresh token —
+    // leaving the dead (consumed) token in memory/persistence so the NEXT refresh invalid_grants.
+    // The fix bumps the epoch ONLY on a FRESH authentication (supersession), not on same-account
+    // reuse, so the in-flight proactive refresh commits its rotated token normally.
+    vi.useFakeTimers();
+    const store = new StructuredCloneSessionStore();
+    const { provider, getCode } = makeProvider(store, { proactive: true });
+    await provider.login(ISSUER);
+    const original = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(getCode).toHaveBeenCalledTimes(1);
+
+    // Park the proactive refresh grant mid-flight (it has consumed+rotated the token server-side).
+    const gate = makeRefreshGate(as.fetch);
+    vi.stubGlobal("fetch", gate.fetchImpl);
+    await pumpUntil(gate.parked);
+
+    // A SAME-ACCOUNT "Continue as" click lands while the refresh is parked. The settled session is
+    // still fresh, so this returns the reused session with NO authorize and (crucially) NO epoch
+    // bump — it must not invalidate the in-flight refresh.
+    await provider.login(ISSUER); // same account, no expectedWebId ⇒ reuse, no supersession
+    expect(getCode).toHaveBeenCalledTimes(1); // no popup — pure reuse
+
+    // Release the parked proactive refresh; its commit must SUCCEED (epoch unchanged) and persist
+    // the ROTATED token.
+    gate.releaseToken();
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+
+    // ── THE FENCE (correctly NOT triggered): the same-account refresh committed — the persisted
+    // token is the ROTATED one, NOT the stale consumed `original`. (Pre-fix, the bump would have
+    // made the refresh yield, leaving `original` — a now-dead token — in the store.)
+    const rotated = store.peek(ISSUER_HREF)?.refreshToken;
+    expect(rotated).toBeDefined();
+    expect(rotated).not.toBe(original); // the in-flight refresh's rotated token WAS committed
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

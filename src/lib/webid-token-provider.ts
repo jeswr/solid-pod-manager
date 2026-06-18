@@ -918,10 +918,18 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     // in-flight COMMIT from publishing, but a NON-login joiner that already `await`ed the raw
     // `cached` promise would otherwise USE the OLD session token even after a `forgetIssuer`
     // (logout) or a fresh same-issuer login deleted/replaced `#sessions` while it was pending. So
-    // after the await, FAIL CLOSED unless the slot is STILL the promise we joined AND the epoch is
-    // unchanged: if either moved, this joined session is no longer the issuer's current credential
-    // — RE-RESOLVE from scratch (`#getSession`) rather than return a superseded/forgotten token.
+    // after the await, react when the slot moved OR the epoch advanced:
     if (this.#sessions.get(issuer.href) !== cached || this.#epochOf(issuer.href) !== joinedEpoch) {
+      // FORGOTTEN vs SUPERSEDED (the #123 whole-branch round-12 HIGH): distinguish the two cases
+      // the move can mean. If `#sessions` now holds SOME current/in-flight entry for the issuer, a
+      // NEWER login took the slot — RE-RESOLVE to use/establish that current session. But if the
+      // slot is EMPTY (a `forgetIssuer`/logout cleared it and nothing is establishing), the user
+      // signed out of this issuer — FAIL CLOSED (reject) rather than re-resolving, which would
+      // start a FRESH silent/interactive auth and re-create provider state + persistence for an
+      // issuer the user just logged out of. The 401 then propagates as an auth failure (correct).
+      if (this.#sessions.get(issuer.href) === undefined) {
+        throw new DOMException("Session forgotten during upgrade", "AbortError");
+      }
       return this.#getSession(issuer, signal, mode, stillCurrent, forLogin);
     }
     if (!hasExpired(session)) return session;

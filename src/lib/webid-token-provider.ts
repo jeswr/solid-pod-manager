@@ -1300,7 +1300,15 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     stillCurrent: () => boolean,
     opts: { pin: boolean },
   ): Promise<boolean> {
-    // PERSIST FIRST (before exposing anything reusable). The store's own errors are swallowed
+    // PRE-PERSIST FENCE (the #123 roborev HIGH): by the time this runs it has WAITED on the
+    // per-issuer commit chain, so a NEWER same-issuer commit may already have landed. If we are
+    // no longer current, return WITHOUT persisting at all — never write our (now stale) token
+    // over the newer credential. (Our refresh grant did consume+rotate the prior stored token,
+    // but the newer login re-persisted its own; the fail-closed choice is to leave the newer
+    // credential untouched rather than risk clobbering it. The token WE consumed is dead and
+    // already replaced by the newer login's record, so there is nothing of ours to clean up.)
+    if (!stillCurrent()) return false;
+    // PERSIST (before exposing anything reusable in memory). The store's own errors are swallowed
     // inside #persist (a storage failure degrades to in-memory-only).
     await this.#persist(issuer, session);
     if (!stillCurrent()) {

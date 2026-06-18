@@ -532,6 +532,141 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(getWebId).toHaveBeenCalled(); // re-resolved ⇒ no stale pin to a forgotten issuer
   });
 
+  it("HIGH: a concurrent upgrade() does NOT join the OLD account's stale #sessions entry while a fresh same-issuer login is establishing", async () => {
+    // ADVERSARIAL (the #123 whole-branch HIGH, round 4): A's proactive refresh is IN FLIGHT (its
+    // promise sits in `#sessions`); a fresh same-issuer login for B bumps the epoch and starts
+    // establishing (not yet committed). In THAT window a concurrent NON-login `upgrade()` would —
+    // without the eviction — JOIN A's stale `#sessions` promise and attach A's superseded token.
+    // The fix EVICTS A's `#sessions`/`#settledSessions` entry synchronously at B's bump, so the
+    // concurrent upgrade cannot read stale in-flight work and instead establishes fresh. We force
+    // the window deterministically: A's proactive grant is parked, AND B's login token grant is
+    // parked, so the upgrade provably runs while B is still establishing.
+    vi.useFakeTimers();
+    const store = new StructuredCloneSessionStore();
+    const { provider } = makeProvider(store, { proactive: true });
+    await provider.login(ISSUER); // A settles
+    await provider.upgrade(new Request("https://pod.test/a")); // settle A's session in #sessions
+
+    // A two-phase gate: phase 1 parks A's proactive REFRESH grant; phase 2 parks B's login
+    // AUTHORIZATION-CODE token grant. Both held simultaneously creates the in-flight window.
+    const real = as.fetch;
+    let releaseA: () => void = () => {};
+    const aGate = new Promise<void>((r) => (releaseA = r));
+    let signalAParked: () => void = () => {};
+    const aParked = new Promise<void>((r) => (signalAParked = r));
+    let releaseB: () => void = () => {};
+    const bGate = new Promise<void>((r) => (releaseB = r));
+    let signalBParked: () => void = () => {};
+    const bParked = new Promise<void>((r) => (signalBParked = r));
+    vi.stubGlobal("fetch", (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      const grant = await peekGrantType(input, init);
+      if (url.endsWith("/token") && grant === "refresh_token") {
+        signalAParked();
+        await aGate; // hold A's proactive refresh
+      } else if (url.endsWith("/token") && grant === "authorization_code") {
+        signalBParked();
+        await bGate; // hold B's login token exchange (B is mid-establishment)
+      }
+      return real(input, init);
+    }) as typeof fetch);
+
+    await pumpUntil(aParked); // A's proactive refresh is in `#sessions`
+    // Start B's fresh login (account switch); it bumps the epoch + evicts A's stale entries, then
+    // parks at its authorization-code token grant (still establishing, NOT committed).
+    const bLogin = provider.login(ISSUER, { expectedWebId: "https://pod.test/bob#me" });
+    await pumpUntil(bParked);
+
+    // CONCURRENT non-login upgrade() in the in-flight window. BEHAVIORAL DISCRIMINATOR: with the
+    // eviction, A's `#sessions` entry is GONE, so the upgrade CANNOT join A's parked refresh — it
+    // takes the fresh-auth path and parks on B's AUTHORIZATION-CODE gate, so releasing ONLY A's
+    // refresh gate must NOT resolve it. WITHOUT the eviction, the upgrade JOINS A's parked refresh
+    // and resolves as soon as A's gate releases (the bug). So "still pending after releaseA()" is
+    // exactly the fix.
+    let upgradeDone = false;
+    const upgrade = provider
+      .upgrade(new Request("https://pod.test/c"))
+      .then(() => {
+        upgradeDone = true;
+      })
+      .catch(() => {
+        upgradeDone = true;
+      });
+    await Promise.resolve();
+    for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(0);
+
+    // Release ONLY A's parked refresh. If the upgrade had JOINED A (the bug), it resolves now.
+    releaseA();
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+    expect(upgradeDone).toBe(false); // did NOT join A's refresh — it is establishing fresh
+
+    // Release B's auth-code gate: B's login AND the fresh upgrade (both on the auth-code path) drain.
+    releaseB();
+    await bLogin;
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
+    await upgrade;
+    expect(upgradeDone).toBe(true);
+  });
+
+  it("MEDIUM: forgetIssuer's atomic compareAndDelete does NOT wipe a same-account ROTATED token persisted concurrently", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM, round 4): `forgetIssuer` checks the epoch then
+    // deletes persistence. A same-account proactive refresh can persist a ROTATED token (SAME
+    // epoch — no supersession) between the check and the delete. An unconditional `delete` would
+    // wipe that newer rotated credential. The atomic `compareAndDelete(issuer, forgottenToken)`
+    // deletes ONLY if persistence still holds the ORIGINAL forgotten token, so the rotated one
+    // survives. We force the ordering with a store whose `delete`/`compareAndDelete` park on a
+    // gate; while parked, a rotated token is persisted; then the gate releases.
+    let releaseDel: () => void = () => {};
+    const delGate = new Promise<void>((r) => {
+      releaseDel = r;
+    });
+    let delArmed = true;
+    const base = new StructuredCloneSessionStore();
+    let rotatedToken: string | undefined;
+    const store = {
+      get: (i: string) => base.get(i),
+      put: (s: Parameters<StructuredCloneSessionStore["put"]>[0]) => base.put(s),
+      delete: async (i: string) => {
+        if (delArmed) {
+          delArmed = false;
+          await delGate;
+        }
+        return base.delete(i);
+      },
+      compareAndDelete: async (i: string, t: string) => {
+        if (delArmed) {
+          delArmed = false;
+          // While the forget's delete is parked, simulate a same-account proactive refresh
+          // persisting a ROTATED token (same epoch — no supersession).
+          const cur = await base.get(i);
+          if (cur !== undefined) {
+            rotatedToken = `${cur.refreshToken}-rotated`;
+            await base.put({ ...cur, refreshToken: rotatedToken });
+          }
+          await delGate;
+        }
+        return base.compareAndDelete(i, t);
+      },
+    };
+    const getCode = vi.fn((u: URL) => as.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: store as unknown as StructuredCloneSessionStore,
+    });
+    await provider.login(ISSUER);
+
+    const forget = provider.forgetIssuer(ISSUER); // captures the original token, parks at CAD
+    await Promise.resolve();
+    releaseDel();
+    await forget;
+
+    // ── THE FENCE: the atomic CAD (original token) did NOT match the ROTATED token, so the
+    // rotated same-account credential SURVIVES. (An unconditional delete would have wiped it.)
+    expect(rotatedToken).toBeDefined();
+    expect(base.peek(ISSUER_HREF)?.refreshToken).toBe(rotatedToken);
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

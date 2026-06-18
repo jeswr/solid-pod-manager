@@ -471,6 +471,38 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * keep their own `#sessions` single-flight.
    */
   readonly #inflightLoginRefreshes = new Map<string, Promise<IssuerSession>>();
+  /**
+   * PER-ISSUER EPOCH FENCE (the #123 whole-branch roborev HIGHs — proactive overwrite + late
+   * forget resurrection). A monotonic generation counter per `issuer.href`, the SINGLE source of
+   * truth a background/proactive/lazy commit consults before it may publish or persist for an
+   * issuer. It is:
+   *
+   *  - CAPTURED at the start of every commit-producing path (explicit/fresh login establish,
+   *    proactive `#fireProactive`, lazy renew/refresh, restore) via {@link #fenceFor};
+   *  - RE-CHECKED before each `#sessions` / `#settledSessions` / `#issuer` / persist WRITE — a
+   *    captured epoch that no longer equals the current one ⇒ the path YIELDS without writing
+   *    (it is folded into the `stillCurrent` predicate, so `#commitSessionInner`'s existing
+   *    pre-persist + post-persist + publish re-checks all honour it for free);
+   *  - BUMPED, BEFORE any state is cleared, by {@link forgetIssuer} (logout / cancel) and by a
+   *    SUPERSEDING fresh login (a same-issuer account switch), via {@link #bumpEpoch}.
+   *
+   * The two HIGHs this closes:
+   *   1. A same-issuer account switch: an OLD account's in-flight proactive refresh (which still
+   *      reads `#settledSessions`/`#sessions`, kept OUT of the in-flight join for the fresh login
+   *      via `exposeInFlight: false`) can no longer finish AFTER the new login commits and
+   *      OVERWRITE the caches/persistence with the old credential — the fresh login bumps the
+   *      epoch at the start of its establishment, so the older refresh's captured epoch is stale
+   *      and its commit yields.
+   *   2. A `forgetIssuer()` (logout/cancel) bumps the epoch BEFORE clearing state, so a pending
+   *      `#commitSession` (default always-current predicate) / proactive / lazy refresh that
+   *      finishes AFTER the forget sees a stale epoch and publishes/persists NOTHING — it can no
+   *      longer RESURRECT the just-forgotten issuer.
+   *
+   * Integrated with (not duplicating) the existing `stillCurrent`/`establishStillCurrent`
+   * fencing: a caller's own `stillCurrent` (generation+WebID) is ANDed with the epoch check, so
+   * a path is "still current" only when BOTH hold.
+   */
+  readonly #issuerEpoch = new Map<string, number>();
   /** Whether proactive background refresh is enabled (opt-in). */
   readonly #proactiveRefresh: boolean;
   /** Page-lifecycle surface (visibility/focus) for proactive scheduling. */
@@ -586,6 +618,15 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     const mode: AuthorizeMode =
       options.silentFirst === true ? "silent-first" : "interactive";
     const stillCurrent = options.stillCurrent ?? (() => true);
+    // SUPERSEDE BACKGROUND WORK (the #123 whole-branch HIGH #1): an explicit user-initiated login
+    // is a NEW actor for this issuer — BUMP the issuer epoch up front so any OLD account's
+    // in-flight proactive/lazy refresh (which captured the PRIOR epoch) becomes stale and its
+    // commit yields, and so it cannot finish AFTER this login and OVERWRITE the caches/persistence
+    // with the superseded credential. This login then runs `#getSession`/`#begin` AFTER the bump,
+    // so it captures the NEW epoch and commits for itself. (Bumping on a same-account no-popup
+    // reuse is harmless: the reused settled session is untouched and the next proactive cycle
+    // re-arms from it.)
+    this.#bumpEpoch(issuer.href);
     // The FENCED COMMIT (the #123 roborev HIGH): pass the freshness predicate into
     // `#getSession`/`#begin` so a superseded login commits NOTHING provider-wide (no
     // settled-session cache, no persist, no scheduler) — symmetric with `restoreIssuer`. The
@@ -754,12 +795,16 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
             }
           });
         }
+        // EPOCH FENCE (the #123 whole-branch HIGHs): capture the issuer epoch before awaiting the
+        // shared grant, so a `forgetIssuer`/superseding-login bump that lands while we wait makes
+        // this login's own commit yield (no resurrection of a forgotten / superseded issuer).
+        const fenced = this.#fenceFor(issuer.href, stillCurrent);
         try {
           const granted = await grant;
           // THIS login's OWN fenced commit against the shared grant result (publish-last,
-          // atomic, per-issuer-serialised — `#commitSession`). A superseded login commits
-          // nothing; a still-current one commits + publishes for itself.
-          await this.#commitSession(issuer, granted, stillCurrent, { pin: false });
+          // atomic, per-issuer-serialised — `#commitSession`). A superseded/cancelled login
+          // commits nothing; a still-current one commits + publishes for itself.
+          await this.#commitSession(issuer, granted, fenced, { pin: false });
           return granted;
         } catch {
           // The refresh grant was rejected (expiry / revocation / rotation reuse). DROP the dead
@@ -822,25 +867,32 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     // post-persist commit fence, or that upgrade could USE a session about to be rolled back as
     // superseded. With false, only the COMMITTED session is published (post-fence, by
     // `#commitSession`), never the raw in-flight work.
+    // EPOCH FENCE (the #123 whole-branch HIGHs): capture the issuer epoch NOW (before awaiting
+    // `work`) and AND it into the freshness predicate, so a `forgetIssuer`/superseding-login bump
+    // that lands while this work is in flight makes EVERY downstream write (the roll-back checks
+    // below + `#commitSession`) yield. Unifies the supersession `stillCurrent` with the
+    // issuer-epoch cancellation in one predicate.
+    const fenced = this.#fenceFor(issuer.href, stillCurrent);
     if (exposeInFlight) this.#sessions.set(issuer.href, work);
     try {
       const session = await work;
-      // SUPERSEDED before commit: do not commit provider-wide. Roll back our in-flight entry
-      // (only if it is still ours — never clobber a newer login's) and return uncommitted.
-      if (!stillCurrent()) {
+      // SUPERSEDED-OR-CANCELLED before commit: do not commit provider-wide. Roll back our
+      // in-flight entry (only if it is still ours — never clobber a newer login's) and return
+      // uncommitted.
+      if (!fenced()) {
         if (exposeInFlight && this.#sessions.get(issuer.href) === work) {
           this.#sessions.delete(issuer.href);
         }
         return session;
       }
       // Commit ATOMICALLY w.r.t. supersession (the #123 roborev HIGH): persist FIRST, re-check
-      // `stillCurrent` AFTER persist, and publish the reusable caches LAST (only when still
+      // the fence AFTER persist, and publish the reusable caches LAST (only when still
       // current) — so a superseded login never exposes/persists a credential that outlives it.
       // `#begin` never pins `#issuer` (login() pins separately, gated on its own freshness).
-      const committed = await this.#commitSession(issuer, session, stillCurrent, { pin: false });
-      // If the commit did NOT publish (superseded post-persist) AND we exposed an in-flight
-      // entry, evict it so no concurrent reader joins this abandoned session (compare-and-swap:
-      // never clobber a newer login that already replaced the slot).
+      const committed = await this.#commitSession(issuer, session, fenced, { pin: false });
+      // If the commit did NOT publish (superseded/cancelled post-persist) AND we exposed an
+      // in-flight entry, evict it so no concurrent reader joins this abandoned session
+      // (compare-and-swap: never clobber a newer login that already replaced the slot).
       if (!committed && exposeInFlight && this.#sessions.get(issuer.href) === work) {
         this.#sessions.delete(issuer.href);
       }
@@ -948,6 +1000,13 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       scheduler.timer = undefined;
       return;
     }
+    // EPOCH FENCE (the #123 whole-branch HIGH #1): capture the issuer epoch at the START of the
+    // proactive cycle — before reading `#settledSessions` / joining in-flight work / the grant —
+    // and thread it into `#begin` so the proactive COMMIT yields if a `forgetIssuer` (logout) or a
+    // SUPERSEDING login bumped the epoch in the meantime. Without this, an OLD account's proactive
+    // refresh (which `#begin` would otherwise re-capture the epoch for AFTER the bump) could finish
+    // AFTER the new login committed and OVERWRITE the caches/persistence with the old credential.
+    const fenced = this.#fenceFor(issuer.href);
 
     // The session we mean to refresh — the last settled one, captured up front
     // so we can tell a steady-state cache hit (refresh it) from a NEWER renewal
@@ -977,10 +1036,13 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     try {
       // Publish our refresh-token grant into the single-flight cache so a
       // concurrent upgrade() shares it; #begin reschedules + re-persists the
-      // rotated token on success.
+      // rotated token on success. The `fenced` predicate (captured at this cycle's
+      // START) gates the commit, so a login/logout that bumped the epoch mid-cycle
+      // makes this proactive commit yield rather than overwrite/resurrect.
       await this.#begin(
         issuer,
         this.#refresh(issuer, current, current.refreshToken),
+        fenced,
       );
       // #begin's success path already rescheduled via #scheduleProactive.
     } catch (e) {
@@ -1194,6 +1256,13 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
   ): Promise<{ webId: string } | undefined> {
     if (this.#sessionStore === undefined) return undefined;
 
+    // EPOCH FENCE (the #123 whole-branch HIGHs): capture the issuer epoch at the START of the
+    // restore (before the store read + the refresh grant), and AND it into `stillCurrent` for
+    // every downstream commit/delete. A `forgetIssuer` (logout) OR a superseding login bumps the
+    // epoch, so a late-finishing boot restore can neither resurrect a forgotten issuer nor
+    // overwrite a newer login's credential.
+    const fenced = this.#fenceFor(issuer.href, stillCurrent);
+
     let stored: PersistedSession | undefined;
     try {
       stored = await this.#sessionStore.get(issuer.href);
@@ -1223,10 +1292,11 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       //
       // SUPERSESSION-SAFE DELETE (the #123 roborev HIGH): a stale boot restore that FAILS must
       // NOT delete a NEWER same-issuer login's freshly-persisted credential. Delete ONLY when
-      // this restore is still current, and use the ATOMIC `compareAndDelete` (one transaction) so
-      // the read-compare-delete is indivisible — a newer login persisting BETWEEN a plain get and
-      // delete can never be wiped. The scheduler is cleared separately (it is in-memory).
-      if (stillCurrent()) {
+      // this restore is still current AND not epoch-cancelled, and use the ATOMIC
+      // `compareAndDelete` (one transaction) so the read-compare-delete is indivisible — a newer
+      // login persisting BETWEEN a plain get and delete can never be wiped. The scheduler is
+      // cleared separately (it is in-memory).
+      if (fenced()) {
         this.#clearScheduler(issuer.href);
         await this.#sessionStore
           ?.compareAndDelete(issuer.href, stored.refreshToken)
@@ -1236,10 +1306,11 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     }
 
     // FENCE (the #123 roborev HIGH): commit the restored session to the provider-wide state
-    // ONLY if this restore is still current. A superseded restore returns the WebID (so the
-    // boot path knows what WOULD have restored) but commits NOTHING in-memory — the newer login
-    // owns the issuer-keyed caches, the `#issuer` pin, and the refresh scheduler.
-    if (!stillCurrent()) {
+    // ONLY if this restore is still current AND not epoch-cancelled. A superseded/cancelled
+    // restore returns the WebID (so the boot path knows what WOULD have restored) but commits
+    // NOTHING in-memory — the newer login owns the issuer-keyed caches, the `#issuer` pin, and
+    // the refresh scheduler.
+    if (!fenced()) {
       // The refresh grant ALREADY CONSUMED + ROTATED the stored refresh token (#restore ran),
       // so the OLD `stored.refreshToken` left in the store is now DEAD — a later restore with it
       // would invalid_grant (the #123 roborev MEDIUM). ATOMICALLY compare-and-delete it (so a
@@ -1252,10 +1323,41 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       return session.webId === undefined ? undefined : { webId: session.webId };
     }
     // ATOMIC-W.R.T.-SUPERSESSION commit (shared with `#begin`): installs caches + (optionally)
-    // the pin, awaits persist, then re-checks `stillCurrent` AFTER the awaited persist and rolls
+    // the pin, awaits persist, then re-checks the fence AFTER the awaited persist and rolls
     // the whole commit back (compare-and-swap) if a logout / newer login won during persist.
-    await this.#commitSession(issuer, session, stillCurrent, { pin: true });
+    await this.#commitSession(issuer, session, fenced, { pin: true });
     return session.webId === undefined ? undefined : { webId: session.webId };
+  }
+
+  /** The current epoch for an issuer (0 when none has been recorded). */
+  #epochOf(href: string): number {
+    return this.#issuerEpoch.get(href) ?? 0;
+  }
+
+  /**
+   * BUMP an issuer's epoch — the cancellation primitive. Every commit-producing path that was
+   * already in flight captured the PRIOR epoch (via {@link #fenceFor}); bumping makes ALL of them
+   * stale at their next fence re-check, so none can publish/persist for this issuer after the
+   * bump. Called by {@link forgetIssuer} (logout/cancel) and by a SUPERSEDING fresh login, in both
+   * cases BEFORE the new actor captures its own (now-newer) epoch. Returns the new epoch.
+   */
+  #bumpEpoch(href: string): number {
+    const next = this.#epochOf(href) + 1;
+    this.#issuerEpoch.set(href, next);
+    return next;
+  }
+
+  /**
+   * Build the COMBINED freshness predicate for a commit-producing path: capture the issuer's
+   * CURRENT epoch now, and return a predicate that is true only when BOTH the caller's own
+   * `stillCurrent` (the generation+WebID fence) holds AND the epoch has not since been bumped
+   * (by a `forgetIssuer` or a superseding login). Threaded into `#commitSession`/`#commitSessionInner`
+   * and the in-flight roll-back checks, so every `#sessions`/`#settledSessions`/`#issuer`/persist
+   * write is gated on it — a single fence unifying supersession AND issuer-epoch cancellation.
+   */
+  #fenceFor(href: string, stillCurrent: () => boolean = () => true): () => boolean {
+    const captured = this.#epochOf(href);
+    return () => stillCurrent() && this.#epochOf(href) === captured;
   }
 
   /**
@@ -1393,6 +1495,13 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    * cancelled/abandoned credential be silently reused.
    */
   async forgetIssuer(issuer: URL): Promise<void> {
+    // EPOCH CANCELLATION (the #123 whole-branch HIGH #2): BUMP the issuer epoch BEFORE clearing
+    // any state, so an in-flight `#commitSession` / proactive / lazy refresh that finishes AFTER
+    // this forget (a pending commit carries the default always-current predicate) sees a stale
+    // captured epoch and publishes/persists NOTHING — it can no longer RESURRECT the issuer we are
+    // about to forget. The bump must precede the clears: a path that re-checks its fence between
+    // the bump and the clears already sees the new epoch and yields.
+    this.#bumpEpoch(issuer.href);
     this.#clearScheduler(issuer.href);
     this.#sessions.delete(issuer.href);
     this.#settledSessions.delete(issuer.href);

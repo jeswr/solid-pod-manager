@@ -921,6 +921,46 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     [completeLogin, getController],
   );
 
+  // SHARED FULL LOGGED-OUT CLEANUP (the #123 whole-branch round-8 MEDIUM): clear ALL prior-account
+  // state so "logged out" truly means logged out — the in-memory UI (webId/profile/active), the
+  // read cache, the credential boundary, the durable restore pointer (`ACTIVE_WEBID_KEY`), and the
+  // provider sessions for the active + any in-flight-login + any boot-restore issuer. Used by BOTH
+  // `logout()` and `cancelLogin()` (its logged-out branch), so a cancelled account-switch can no
+  // longer leave the prior account's durable pointer / in-memory issuer live while the UI says
+  // logged out (which would let a reload silently restore the backed-out prior account). Callers
+  // bump the establish generation THEMSELVES first (so a racing login/restore is superseded).
+  const clearToLoggedOut = useCallback(() => {
+    readCache.clearAll();
+    allowedOriginsRef.current = new Set<string>();
+    issuerOriginRef.current = new Set<string>();
+    setWebId(undefined);
+    setProfile(undefined);
+    setActive(undefined);
+    setStatus("logged-out");
+    pendingWebIdRef.current = undefined;
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(ACTIVE_WEBID_KEY);
+    }
+    closeCredentialBoundary();
+    const inFlight = inFlightLoginRef.current;
+    inFlightLoginRef.current = undefined;
+    const restoring = restoringIssuerRef.current;
+    restoringIssuerRef.current = undefined;
+    const issuer = activeIssuerRef.current;
+    activeIssuerRef.current = undefined;
+    // FULLY discard each issuer's session: `forgetIssuer` clears the provider IN-MEMORY caches +
+    // pin + scheduler + persisted credential (ownership-scoped — it skips the durable delete when a
+    // newer same-issuer login owns the slot). Fire-and-forget; no unscoped `sessionStore.delete`.
+    const targets = new Set(
+      [issuer, inFlight?.issuer, restoring].filter(Boolean) as string[],
+    );
+    for (const target of targets) {
+      void providerReadyRef.current
+        ?.then((p) => p?.forgetIssuer(new URL(target)))
+        .catch(() => {});
+    }
+  }, [closeCredentialBoundary]);
+
   const cancelLogin = useCallback(() => {
     // NO-OP WHEN NOTHING TO CANCEL (the #123 roborev MEDIUM): only act when there is an actual
     // cancellable login — a blocked-popup affordance, an in-flight establish (`inFlightLoginRef`),
@@ -947,35 +987,20 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setBlockedPopup(null);
     getController().cancel();
     if (cancellingInFlight) {
-      // Forget any credential the in-flight login already PERSISTED before the cancel landed
-      // (the #123 roborev finding): `provider.login()` commits + persists the refresh token
-      // once it authenticates — if the user cancels DURING the later profile read, that durable
-      // credential would otherwise outlive the cancelled login and silently restore the
-      // backed-out account on the next load. Use the GENERATION-SCOPED `inFlightLoginRef`, NOT
-      // `activeIssuerRef`: on an ACCOUNT SWITCH `activeIssuerRef` still points at the PREVIOUS
-      // logged-in account until the new login lands, so forgetting it would wrongly delete the
-      // previous account's credential. `inFlightLoginRef` is set only once THIS login passed its
-      // post-`provider.login` fence (a credential may now exist for ITS issuer). Best-effort,
-      // fire-and-forget, symmetric with logout.
-      const inFlightIssuer = inFlightLoginRef.current?.issuer;
-      inFlightLoginRef.current = undefined;
-      if (inFlightIssuer) {
-        // FULLY discard (the #123 roborev HIGH): `forgetIssuer` clears the in-memory caches
-        // (`#sessions`/`#settledSessions`) + the `#issuer` pin + the scheduler + the persisted
-        // credential — not just persistence — so a login the user CANCELLED after it committed
-        // can never be reused from memory by the next same-issuer login / upgrade.
-        // `forgetIssuer` clears persistence ownership-scoped (it skips the durable delete when a
-        // newer same-issuer login owns the slot — the #123 whole-branch MEDIUM), so the prior
-        // unscoped `sessionStore.delete(inFlightIssuer)` (which could wipe a newer login's
-        // freshly persisted credential on an immediate retry) is removed.
-        void providerReadyRef.current
-          ?.then((p) => p?.forgetIssuer(new URL(inFlightIssuer)))
-          .catch(() => {});
-      }
-      closeCredentialBoundary();
-      setStatus("logged-out");
+      // FULL LOGGED-OUT CLEANUP (the #123 whole-branch round-8 MEDIUM): route the cancel through
+      // the SAME cleanup as `logout()`. Previously this branch only `forgetIssuer`'d the in-flight
+      // login's issuer + set `logged-out`, leaving the PRIOR account's UI state (webId/profile/
+      // active), durable restore pointer (`ACTIVE_WEBID_KEY`), read cache, and `activeIssuerRef`
+      // INTACT — so on an account-switch cancel (before `inFlightLoginRef` was set) the UI said
+      // logged out while a reload could SILENTLY RESTORE the backed-out prior account and consumers
+      // could still see stale account data. Fail closed: a cancel that reports logged-out clears
+      // everything (the prior account's durable pointer + in-memory issuer included). The
+      // generation bump above already superseded the in-flight login; `clearToLoggedOut` discards
+      // the active + in-flight + boot-restore issuers (ownership-scoped, so a concurrent newer
+      // login's slot is untouched).
+      clearToLoggedOut();
     }
-  }, [getController, closeCredentialBoundary]);
+  }, [getController, clearToLoggedOut]);
 
   const logout = useCallback(() => {
     // FENCE: advance the establish generation FIRST, so any in-flight login / silent
@@ -983,55 +1008,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // bumped counter and bail (it must not re-open the boundary or re-publish a logged-in
     // UI after the user signed out — the #123 roborev HIGH). See `establish-fence.ts`.
     establishGenerationRef.current += 1;
-    // Drop every cached read model so a logged-out (or next) user is never
-    // shown the previous account's data from the SWR read cache. The cache is
-    // a render-speed optimization only; clearing it here is the security
-    // boundary for the read snapshots (writes already re-read fresh).
-    readCache.clearAll();
-    // Close the credential boundary: a logged-out session must attach the token to
-    // NOTHING. The provider's `matches` also guards, but clearing here is the explicit
-    // boundary — the proactive-auth fetch reads this set fresh on its next request.
-    allowedOriginsRef.current = new Set<string>();
-    issuerOriginRef.current = new Set<string>();
-    setWebId(undefined);
-    setProfile(undefined);
-    setActive(undefined);
-    setStatus("logged-out");
-    pendingWebIdRef.current = undefined;
-    if (typeof localStorage !== "undefined") {
-      localStorage.removeItem(ACTIVE_WEBID_KEY);
-    }
-    // Also drop any IN-FLIGHT login's record AND any in-flight BOOT-RESTORE issuer — a logout
-    // supersedes both (the generation bump above makes them bail), and their issuers must be
-    // fully discarded too. The boot restore (the #123 roborev HIGH) has neither `activeIssuerRef`
-    // nor `inFlightLoginRef` set while its refresh grant is in flight, so without
-    // `restoringIssuerRef` an explicit logout could leave its durable credential behind.
-    const inFlight = inFlightLoginRef.current;
-    inFlightLoginRef.current = undefined;
-    const restoring = restoringIssuerRef.current;
-    restoringIssuerRef.current = undefined;
-    // FULLY discard each issuer's session on sign-out (the #123 roborev HIGH): `forgetIssuer`
-    // clears the provider's IN-MEMORY caches (`#sessions`/`#settledSessions`) + the `#issuer`
-    // pin + the scheduler + the persisted credential — not just persistence (`forgetPersisted`),
-    // which would leave the session in memory for a same-issuer login to silently reuse after an
-    // explicit logout. The credential must not outlive an explicit sign-out in ANY form.
-    // Fire-and-forget. The standalone `sessionStore.delete(target)` "defence in depth" is REMOVED
-    // (the #123 whole-branch MEDIUM): it was an UNSCOPED delete that, running late, could wipe a
-    // newer same-issuer login's freshly persisted credential when the user signs out and
-    // immediately signs back in on the same issuer. `forgetIssuer` now clears persistence
-    // OWNERSHIP-SCOPED (it bumps the issuer epoch and skips the durable delete if a newer login
-    // has since taken the slot), which is the correct, race-safe discard.
-    const issuer = activeIssuerRef.current;
-    activeIssuerRef.current = undefined;
-    const targets = new Set(
-      [issuer, inFlight?.issuer, restoring].filter(Boolean) as string[],
-    );
-    for (const target of targets) {
-      void providerReadyRef.current
-        ?.then((p) => p?.forgetIssuer(new URL(target)))
-        .catch(() => {});
-    }
-  }, []);
+    // Then the full logged-out cleanup (shared with `cancelLogin` — the #123 whole-branch round-8
+    // MEDIUM): clears the read cache, the credential boundary, the in-memory UI, the durable
+    // restore pointer, and fully discards the active + in-flight + boot-restore issuers'
+    // sessions (ownership-scoped `forgetIssuer`; no unscoped `sessionStore.delete`).
+    clearToLoggedOut();
+  }, [clearToLoggedOut]);
 
   const setActiveStorage = useCallback((storage: string) => setActive(storage), []);
 

@@ -862,12 +862,25 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       return this.#begin(issuer, this.#authenticate(issuer, signal, mode, stillCurrent), stillCurrent, false);
     }
 
+    // Capture the issuer epoch alongside the in-flight promise we are about to join, so a stale
+    // JOINER can be detected after the await (the #123 whole-branch round-7 HIGH).
+    const joinedEpoch = this.#epochOf(issuer.href);
     const cached = this.#sessions.get(issuer.href);
     if (cached === undefined) {
       return this.#begin(issuer, this.#authenticate(issuer, signal, mode, stillCurrent), stillCurrent);
     }
 
     const session = await cached;
+    // STALE-JOINER FENCE (the #123 whole-branch round-7 HIGH): the epoch fence stops a stale
+    // in-flight COMMIT from publishing, but a NON-login joiner that already `await`ed the raw
+    // `cached` promise would otherwise USE the OLD session token even after a `forgetIssuer`
+    // (logout) or a fresh same-issuer login deleted/replaced `#sessions` while it was pending. So
+    // after the await, FAIL CLOSED unless the slot is STILL the promise we joined AND the epoch is
+    // unchanged: if either moved, this joined session is no longer the issuer's current credential
+    // — RE-RESOLVE from scratch (`#getSession`) rather than return a superseded/forgotten token.
+    if (this.#sessions.get(issuer.href) !== cached || this.#epochOf(issuer.href) !== joinedEpoch) {
+      return this.#getSession(issuer, signal, mode, stillCurrent, forLogin);
+    }
     if (!hasExpired(session)) return session;
 
     // Renew, unless a concurrent caller already replaced the expired session.

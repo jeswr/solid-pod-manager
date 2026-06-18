@@ -828,6 +828,52 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(base.peek(ISSUER_HREF)?.refreshToken).toBe(bToken);
   });
 
+  it("HIGH: a NON-login joiner of an in-flight #sessions promise re-resolves (does NOT return a session forgotten while it was pending)", async () => {
+    // ADVERSARIAL (the #123 whole-branch HIGH, round 7): a non-login `upgrade()` joins the
+    // in-flight `#sessions` promise (a renewal). While it is PENDING, `forgetIssuer()` (logout)
+    // deletes/replaces `#sessions`. The epoch fence stops the stale COMMIT, but the joiner already
+    // awaited the raw promise — so without a post-await stale-joiner check it would USE the
+    // forgotten session's token. The fix re-checks (slot still ours AND epoch unchanged) after the
+    // await and RE-RESOLVES instead. We observe the fix by the upgrade re-authenticating (a new
+    // getCode) rather than attaching the forgotten token.
+    const store = new StructuredCloneSessionStore();
+    const { provider, getCode } = makeProvider(store);
+    // First upgrade settles a session.
+    await provider.upgrade(new Request("https://pod.test/a"));
+    expect(getCode).toHaveBeenCalledTimes(1);
+
+    // Force the session expired so the next upgrade triggers a RENEWAL (a refresh grant) that we
+    // can park in `#sessions`.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 3601 * 1000);
+    const gate = makeRefreshGate(as.fetch);
+    vi.stubGlobal("fetch", gate.fetchImpl);
+
+    // Upgrade B DRIVES the renewal (refresh grant) which parks at the gate; its `#begin` publishes
+    // the in-flight promise into `#sessions`.
+    const upgradeB = provider.upgrade(new Request("https://pod.test/b"));
+    await pumpUntil(gate.parked); // the renewal grant is in flight, in `#sessions`
+    // Upgrade C JOINS B's in-flight `#sessions` promise (reads it and awaits the raw work) — C is
+    // the stale-joiner the fix must protect.
+    const upgradeC = provider.upgrade(new Request("https://pod.test/c"));
+    await Promise.resolve();
+    for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(0);
+
+    // Logout WHILE the renewal is pending: forgetIssuer deletes `#sessions` + bumps the epoch.
+    await provider.forgetIssuer(ISSUER);
+
+    // Release the parked renewal; its commit yields (stale epoch). The JOINER (C), after its await,
+    // sees `#sessions` no longer holds the promise / the epoch moved → RE-RESOLVES (a fresh auth ⇒
+    // another getCode), rather than returning the forgotten token.
+    gate.releaseToken();
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await Promise.allSettled([upgradeB, upgradeC]);
+
+    // At least one re-authentication happened (the joiner re-resolved after the forget) — never a
+    // silent reuse of the forgotten session.
+    expect(getCode.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

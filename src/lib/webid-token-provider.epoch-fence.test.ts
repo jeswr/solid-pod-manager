@@ -281,6 +281,107 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(getCode).toHaveBeenCalledTimes(1); // the ONE re-auth (restore never reused/popped)
   });
 
+  it("MEDIUM: a 'Continue as' login that races an in-flight LAZY refresh shares ONE grant (no double-redeem of the rotating token)", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM): a settled session's access token expires; a
+    // lazy `upgrade()`→renew and an explicit "Continue as" `login()` fire concurrently. Both want
+    // to redeem the SAME rotating refresh token. WITHOUT a shared single-flight across the login
+    // and lazy paths, they redeem it TWICE — and RFC 9700 rotation makes the second redemption
+    // fail `invalid_grant`, losing the renewable session. WITH `#sharedRefresh`, exactly ONE
+    // refresh grant hits the AS.
+    const store = new StructuredCloneSessionStore();
+    const { provider, getCode } = makeProvider(store);
+    await provider.login(ISSUER); // settle a session (one authorize)
+    expect(getCode).toHaveBeenCalledTimes(1);
+    const refreshesBefore = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 3601 * 1000); // expire the settled access token
+
+    // Fire a LAZY upgrade and an explicit "Continue as" login CONCURRENTLY for the same issuer.
+    // Both must dedup onto ONE refresh redemption (the shared pure-grant single-flight) — the
+    // second redemption would otherwise invalid_grant on the rotated token.
+    const [upgraded] = await Promise.all([
+      provider.upgrade(new Request("https://pod.test/x")),
+      provider.login(ISSUER), // "Continue as" — reuses the settled (now expired) session's token
+    ]);
+    vi.useRealTimers();
+
+    const refreshesAfter = as.tokenRequests.filter(
+      (r) => r.get("grant_type") === "refresh_token",
+    ).length;
+    expect(refreshesAfter - refreshesBefore).toBe(1); // exactly ONE redemption across BOTH paths
+    expect(getCode).toHaveBeenCalledTimes(1); // and no popup — the shared grant succeeded
+    expect(upgraded.headers.get("Authorization")).toMatch(/^DPoP at-\d+$/);
+  });
+
+  it("MEDIUM: a LATE forgetIssuer does NOT wipe a newer same-issuer login's freshly-persisted credential", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM): a cancel/logout cleanup fires `forgetIssuer(X)`
+    // fire-and-forget; the user immediately retries the SAME issuer and a NEWER login persists its
+    // credential. The orphaned `forgetIssuer`'s durable delete then executes LATE — AFTER the new
+    // login persisted. WITHOUT ownership-scoping, that late delete clears persistence
+    // UNCONDITIONALLY and WIPES the newer login's token. WITH the epoch-scoped clear,
+    // `forgetIssuer` captured the epoch it bumped to; the newer login bumped the epoch AGAIN
+    // (taking ownership), so the late clear sees a newer epoch and SKIPS the durable delete.
+    //
+    // The race is forced DETERMINISTIC by a store whose delete/compareAndDelete BLOCK on a gate:
+    // `forgetIssuer` reaches its persistence clear and parks; the retry login B then fully
+    // persists; only THEN is the gate released so the (now-late) clear runs against B's credential.
+    let releaseClear: () => void = () => {};
+    const clearGate = new Promise<void>((r) => {
+      releaseClear = r;
+    });
+    let gateArmed = true;
+    const base = new StructuredCloneSessionStore();
+    // A delegating wrapper whose delete/compareAndDelete park on a gate the first time, so the
+    // late forget clear can be held until AFTER B persists (deterministic race ordering).
+    const store = {
+      get: (i: string) => base.get(i),
+      put: (s: Parameters<StructuredCloneSessionStore["put"]>[0]) => base.put(s),
+      delete: async (i: string) => {
+        if (gateArmed) {
+          gateArmed = false;
+          await clearGate;
+        }
+        return base.delete(i);
+      },
+      compareAndDelete: async (i: string, t: string) => {
+        if (gateArmed) {
+          gateArmed = false;
+          await clearGate;
+        }
+        return base.compareAndDelete(i, t);
+      },
+    };
+    const { provider, getCode } = makeProvider(store as unknown as StructuredCloneSessionStore);
+
+    // Login A (the session about to be "cancelled").
+    await provider.login(ISSUER);
+    expect(getCode).toHaveBeenCalledTimes(1);
+
+    // Fire-and-forget the cleanup for A's issuer; it bumps the epoch and parks at the gated clear.
+    const forget = provider.forgetIssuer(ISSUER);
+    await Promise.resolve(); // let forget reach (and park at) its persistence clear
+
+    // The user retries the SAME issuer; B authenticates FRESH (expectedWebId differs from A's
+    // claim), bumps the epoch AGAIN (taking ownership), and persists its credential.
+    await provider.login(ISSUER, { expectedWebId: "https://pod.test/carol#me" });
+    const bToken = base.peek(ISSUER_HREF)?.refreshToken;
+    expect(bToken).toBeDefined(); // B persisted
+
+    // NOW release the late forget clear — it runs against B's freshly-persisted credential.
+    releaseClear();
+    await forget;
+
+    // ── THE FENCE: B's credential SURVIVES the late forget (it was NOT wiped), and B's session is
+    // reusable without a 3rd authorize. (Pre-fix — unconditional clear — the store would be empty
+    // here and the upgrade would re-authenticate, a 3rd getCode.)
+    expect(base.peek(ISSUER_HREF)?.refreshToken).toBe(bToken);
+    await provider.upgrade(new Request("https://pod.test/x"));
+    expect(getCode).toHaveBeenCalledTimes(2); // A's login + B's login — NO 3rd re-auth
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

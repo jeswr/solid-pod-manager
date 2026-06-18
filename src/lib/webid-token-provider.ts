@@ -463,14 +463,19 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    */
   readonly #commitChains = new Map<string, Promise<unknown>>();
   /**
-   * In-flight LOGIN-path refresh single-flight per issuer (the #123 roborev MEDIUM): unlike
-   * `#sessions` (which also holds RESOLVED sessions, so it cannot tell pending from settled), this
-   * holds ONLY a genuinely IN-FLIGHT login refresh promise, set synchronously and cleared on
-   * settle. A concurrent same-issuer login JOINS it rather than redeeming the rotating refresh
-   * token a second time (which would invalid_grant). Login-only: the lazy upgrade/proactive paths
-   * keep their own `#sessions` single-flight.
+   * In-flight PURE refresh-token GRANT single-flight per issuer (the #123 roborev MEDIUM +
+   * whole-branch MEDIUM): unlike `#sessions` (which also holds RESOLVED sessions AND code-flow
+   * authentications, so it cannot tell a pending refresh grant from a settled session or a popup
+   * flow), this holds ONLY a genuinely IN-FLIGHT bare `#refresh` grant promise, set synchronously
+   * and cleared on settle. EVERY refresh-token-redeeming path (an explicit "Continue as" login, a
+   * lazy `upgrade()`→`#renew`, a proactive `#fireProactive`) routes through {@link #sharedRefresh}
+   * so they SHARE one grant rather than each redeeming the ROTATING refresh token a second time
+   * (RFC 9700 rotation ⇒ a double-redemption trips `invalid_grant` and loses the renewable
+   * session). It deliberately does NOT hold the `#begin`/commit work or any code-flow
+   * authentication — only the pure grant — so joining it can never adopt another login's identity
+   * (the earlier same-issuer wrong-identity HIGH); each joiner runs its OWN fenced commit.
    */
-  readonly #inflightLoginRefreshes = new Map<string, Promise<IssuerSession>>();
+  readonly #inflightRefreshGrants = new Map<string, Promise<IssuerSession>>();
   /**
    * PER-ISSUER EPOCH FENCE (the #123 whole-branch roborev HIGHs — proactive overwrite + late
    * forget resurrection). A monotonic generation counter per `issuer.href`, the SINGLE source of
@@ -771,30 +776,22 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       }
       if (settled !== undefined && settled.refreshToken !== undefined) {
         // Settled but expired, WITH a refresh token ⇒ try the refresh grant (still no popup).
-        // Two-part design (the #123 roborev MEDIUM):
-        //   1. DEDUP only the PURE `#refresh` GRANT per issuer — concurrent same-issuer logins
-        //      must NOT each redeem the ROTATING refresh token (that trips invalid_grant). The
-        //      in-flight map holds the bare grant promise (NO `#begin`, NO commit, NO fence).
+        // Two-part design (the #123 roborev MEDIUM + whole-branch MEDIUM):
+        //   1. DEDUP the PURE `#refresh` GRANT per issuer ACROSS ALL refresh paths via
+        //      `#sharedRefresh` — concurrent same-issuer logins AND a lazy `upgrade()`→`#renew` /
+        //      proactive `#fireProactive` running at the same time must NOT each redeem the
+        //      ROTATING refresh token (RFC 9700 rotation ⇒ the second redemption trips
+        //      invalid_grant and loses the renewable session — the whole-branch MEDIUM). The
+        //      shared map holds only the bare grant promise (NO `#begin`, NO commit, NO code flow).
         //   2. EACH login then runs its OWN fenced `#commitSession` against the shared grant
         //      result with ITS OWN `stillCurrent` — so a login that is STILL current commits +
         //      publishes for itself, regardless of whether a SIBLING (e.g. the one that started
         //      the grant) was superseded. Reusing one login's fence for all joiners would let a
         //      superseded starter's fence skip the commit while a still-current joiner returns
-        //      logged-in with NOTHING committed (the finding). We deliberately do NOT expose the
-        //      grant via `#begin`'s `#sessions` single-flight (a code-flow path could be joined
-        //      by a lazy upgrade — the earlier HIGH); the dedup is this dedicated grant map.
-        const inflight = this.#inflightLoginRefreshes.get(issuer.href);
-        let grant = inflight;
-        if (grant === undefined) {
-          grant = this.#refresh(issuer, settled, settled.refreshToken);
-          this.#inflightLoginRefreshes.set(issuer.href, grant);
-          // Clear the in-flight entry when the grant settles (compare-and-swap on the tail).
-          void grant.catch(() => undefined).finally(() => {
-            if (this.#inflightLoginRefreshes.get(issuer.href) === grant) {
-              this.#inflightLoginRefreshes.delete(issuer.href);
-            }
-          });
-        }
+        //      logged-in with NOTHING committed (the finding). The shared grant deliberately is
+        //      NOT the `#sessions` single-flight (a code-flow auth lives there and a joiner could
+        //      adopt its identity — the earlier HIGH); it is the dedicated pure-grant map.
+        const grant = this.#sharedRefresh(issuer, settled, settled.refreshToken);
         // EPOCH FENCE (the #123 whole-branch HIGHs): capture the issuer epoch before awaiting the
         // shared grant, so a `forgetIssuer`/superseding-login bump that lands while we wait makes
         // this login's own commit yield (no resurrection of a forgotten / superseded issuer).
@@ -1038,10 +1035,13 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       // concurrent upgrade() shares it; #begin reschedules + re-persists the
       // rotated token on success. The `fenced` predicate (captured at this cycle's
       // START) gates the commit, so a login/logout that bumped the epoch mid-cycle
-      // makes this proactive commit yield rather than overwrite/resurrect.
+      // makes this proactive commit yield rather than overwrite/resurrect. The grant
+      // itself goes through `#sharedRefresh` so a concurrent "Continue as" login /
+      // lazy renew joins it rather than double-redeeming the rotating token (the
+      // #123 whole-branch MEDIUM).
       await this.#begin(
         issuer,
-        this.#refresh(issuer, current, current.refreshToken),
+        this.#sharedRefresh(issuer, current, current.refreshToken),
         fenced,
       );
       // #begin's success path already rescheduled via #scheduleProactive.
@@ -1500,8 +1500,12 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     // this forget (a pending commit carries the default always-current predicate) sees a stale
     // captured epoch and publishes/persists NOTHING — it can no longer RESURRECT the issuer we are
     // about to forget. The bump must precede the clears: a path that re-checks its fence between
-    // the bump and the clears already sees the new epoch and yields.
-    this.#bumpEpoch(issuer.href);
+    // the bump and the clears already sees the new epoch and yields. CAPTURE the post-bump epoch
+    // so the async persistence clear below can be ownership-scoped (the #123 whole-branch MEDIUM).
+    const forgottenEpoch = this.#bumpEpoch(issuer.href);
+    // The in-memory clears run SYNCHRONOUSLY here (single-threaded), so a newer login cannot
+    // interleave between the bump and these deletes; a newer login that lands AFTER re-publishes
+    // its own caches (and bumps the epoch again).
     this.#clearScheduler(issuer.href);
     this.#sessions.delete(issuer.href);
     this.#settledSessions.delete(issuer.href);
@@ -1517,7 +1521,16 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
         this.#issuer = undefined;
       }
     }
-    await this.#clearPersisted(issuer);
+    // OWNERSHIP-SCOPED persistence clear (the #123 whole-branch MEDIUM): a fire-and-forget
+    // `forgetIssuer` (cancel/logout cleanup) can run LATE — AFTER the user retried the SAME issuer
+    // and a NEWER login persisted its credential. Clearing persistence unconditionally here would
+    // then WIPE the newer login's freshly-persisted token. So clear ONLY when no newer login has
+    // taken ownership since our bump — i.e. the epoch is still the one we bumped to. A newer login
+    // bumps the epoch again (in `login()`), so `#epochOf !== forgottenEpoch` means it now owns the
+    // durable slot and we must NOT touch it.
+    if (this.#epochOf(issuer.href) === forgottenEpoch) {
+      await this.#clearPersisted(issuer);
+    }
   }
 
   /**
@@ -1538,7 +1551,10 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       return this.#authenticate(issuer, signal, mode, stillCurrent);
     }
     try {
-      return await this.#refresh(issuer, expired, expired.refreshToken);
+      // SHARED grant (the #123 whole-branch MEDIUM): redeem the rotating refresh token through
+      // the per-issuer single-flight so a concurrent "Continue as" login / proactive refresh
+      // joins this one grant instead of double-redeeming the token (→ invalid_grant).
+      return await this.#sharedRefresh(issuer, expired, expired.refreshToken);
     } catch {
       // The grant was rejected (refresh-token expiry, revocation, rotation
       // reuse, …): drop the dead token IN PLACE so the synchronous probe
@@ -1549,6 +1565,33 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       expired.refreshToken = undefined;
       return this.#authenticate(issuer, signal, mode, stillCurrent);
     }
+  }
+
+  /**
+   * SHARED refresh-token grant single-flight (the #123 whole-branch MEDIUM): all three
+   * refresh-redeeming paths — login "Continue as", lazy `#renew`, proactive `#fireProactive` —
+   * call this so a concurrent set of them REDEEMS THE ROTATING TOKEN EXACTLY ONCE per issuer.
+   * Without it, a "Continue as" click landing while a lazy/proactive refresh is already in flight
+   * would redeem the same `refresh_token` a second time, and RFC 9700 rotation makes the second
+   * redemption fail `invalid_grant` (losing the renewable session). Holds ONLY the bare grant
+   * promise (no commit, no code-flow), so a joiner can never adopt another path's identity; each
+   * joiner commits for itself under its own fence. Cleared on settle (compare-and-swap on the tail).
+   */
+  #sharedRefresh(
+    issuer: URL,
+    session: IssuerSession,
+    refreshToken: string,
+  ): Promise<IssuerSession> {
+    const inflight = this.#inflightRefreshGrants.get(issuer.href);
+    if (inflight !== undefined) return inflight;
+    const grant = this.#refresh(issuer, session, refreshToken);
+    this.#inflightRefreshGrants.set(issuer.href, grant);
+    void grant.catch(() => undefined).finally(() => {
+      if (this.#inflightRefreshGrants.get(issuer.href) === grant) {
+        this.#inflightRefreshGrants.delete(issuer.href);
+      }
+    });
+    return grant;
   }
 
   /**

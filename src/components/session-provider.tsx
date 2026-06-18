@@ -163,9 +163,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // restoring issuer's durable credential — otherwise an explicit logout could leave a
   // restorable credential behind. Set before `restoreIssuer`; cleared when restore settles.
   const restoringIssuerRef = useRef<string | undefined>(undefined);
-  // The durable refresh-token-session store (IndexedDB, origin-scoped). Created
-  // once on the client; shared by the provider (persist/restore) and logout.
-  const sessionStoreRef = useRef<SessionStore | null>(null);
   // The one popup controller — created lazily on the client, shared between
   // the click handlers (synchronous open) and the token provider (getCode).
   const controllerRef = useRef<PopupLoginController>(null);
@@ -333,7 +330,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       const sessionStore: SessionStore | undefined = indexedDbAvailable()
         ? new IndexedDbSessionStore()
         : undefined;
-      sessionStoreRef.current = sessionStore ?? null;
 
       const provider = new WebIdDPoPTokenProvider(
         callbackUri,
@@ -816,10 +812,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           // only the boundary would leave that session in the provider's memory caches + the
           // persisted store for silent reuse by the next same-issuer login / upgrade. Discard it
           // in full (memory + pin + scheduler + persistence). Idempotent + fire-and-forget.
+          // `forgetIssuer` ALREADY clears persistence (ownership-scoped: it skips the durable
+          // delete if a newer same-issuer login has taken the slot — the #123 whole-branch
+          // MEDIUM). The previous standalone `sessionStore.delete(issuer)` here was both redundant
+          // AND an UNSCOPED fire-and-forget delete that could wipe a newer login's freshly
+          // persisted credential on an immediate same-issuer retry; it is removed.
           void providerReadyRef.current
             ?.then((p) => p?.forgetIssuer(new URL(issuer)))
             .catch(() => {});
-          void sessionStoreRef.current?.delete(issuer).catch(() => {});
         }
         throw e;
       }
@@ -964,10 +964,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         // (`#sessions`/`#settledSessions`) + the `#issuer` pin + the scheduler + the persisted
         // credential — not just persistence — so a login the user CANCELLED after it committed
         // can never be reused from memory by the next same-issuer login / upgrade.
+        // `forgetIssuer` clears persistence ownership-scoped (it skips the durable delete when a
+        // newer same-issuer login owns the slot — the #123 whole-branch MEDIUM), so the prior
+        // unscoped `sessionStore.delete(inFlightIssuer)` (which could wipe a newer login's
+        // freshly persisted credential on an immediate retry) is removed.
         void providerReadyRef.current
           ?.then((p) => p?.forgetIssuer(new URL(inFlightIssuer)))
           .catch(() => {});
-        void sessionStoreRef.current?.delete(inFlightIssuer).catch(() => {});
       }
       closeCredentialBoundary();
       setStatus("logged-out");
@@ -1012,7 +1015,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // pin + the scheduler + the persisted credential — not just persistence (`forgetPersisted`),
     // which would leave the session in memory for a same-issuer login to silently reuse after an
     // explicit logout. The credential must not outlive an explicit sign-out in ANY form.
-    // Fire-and-forget; also clears the store directly as defence in depth.
+    // Fire-and-forget. The standalone `sessionStore.delete(target)` "defence in depth" is REMOVED
+    // (the #123 whole-branch MEDIUM): it was an UNSCOPED delete that, running late, could wipe a
+    // newer same-issuer login's freshly persisted credential when the user signs out and
+    // immediately signs back in on the same issuer. `forgetIssuer` now clears persistence
+    // OWNERSHIP-SCOPED (it bumps the issuer epoch and skips the durable delete if a newer login
+    // has since taken the slot), which is the correct, race-safe discard.
     const issuer = activeIssuerRef.current;
     activeIssuerRef.current = undefined;
     const targets = new Set(
@@ -1022,7 +1030,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       void providerReadyRef.current
         ?.then((p) => p?.forgetIssuer(new URL(target)))
         .catch(() => {});
-      void sessionStoreRef.current?.delete(target).catch(() => {});
     }
   }, []);
 

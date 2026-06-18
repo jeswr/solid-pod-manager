@@ -25,6 +25,7 @@ import {
   listFolder,
   uploadFileName,
   extensionChain,
+  isAuxiliaryResource,
 } from "./files.js";
 import { ResourceWriteError, ResourceDeleteError, ItemReadError } from "./errors.js";
 
@@ -481,6 +482,61 @@ describe("listFolder", () => {
     expect(urls).toContain("https://alice.example/docs/ok.ttl");
     expect(urls).not.toContain("https://evil.example/steal.ttl");
     expect(urls).not.toContain("https://alice.example/other/sibling.ttl");
+  });
+});
+
+describe("isAuxiliaryResource", () => {
+  it("matches dedicated sidecar auxiliaries (.acl/.meta/.acr)", () => {
+    expect(isAuxiliaryResource("https://alice.example/docs/.acl")).toBe(true);
+    expect(isAuxiliaryResource("https://alice.example/docs/.meta")).toBe(true);
+    expect(isAuxiliaryResource("https://alice.example/docs/.acr")).toBe(true);
+  });
+
+  it("matches per-resource auxiliaries (<resource>.acl/.meta)", () => {
+    expect(isAuxiliaryResource("https://alice.example/docs/photo.png.acl")).toBe(true);
+    expect(isAuxiliaryResource("https://alice.example/docs/notes.ttl.meta")).toBe(true);
+  });
+
+  it("matches a container's own auxiliary regardless of trailing slash", () => {
+    // The aux URL itself has no trailing slash, but be robust either way.
+    expect(isAuxiliaryResource("https://alice.example/docs/.acl/")).toBe(true);
+  });
+
+  it("does NOT match primary content", () => {
+    expect(isAuxiliaryResource("https://alice.example/docs/photo.png")).toBe(false);
+    expect(isAuxiliaryResource("https://alice.example/docs/notes.ttl")).toBe(false);
+    expect(isAuxiliaryResource("https://alice.example/docs/sub/")).toBe(false);
+    // A file that merely CONTAINS "acl" in its base, but not as the extension.
+    expect(isAuxiliaryResource("https://alice.example/docs/aclanthology.pdf")).toBe(false);
+    expect(isAuxiliaryResource("https://alice.example/docs/metadata.json")).toBe(false);
+  });
+});
+
+describe("listFolder auxiliary filtering (#11)", () => {
+  const ttl = `
+    @prefix ldp: <http://www.w3.org/ns/ldp#> .
+    <https://alice.example/docs/> a ldp:Container ;
+      ldp:contains <https://alice.example/docs/notes.ttl>,
+                   <https://alice.example/docs/.acl>,
+                   <https://alice.example/docs/notes.ttl.meta> .
+  `;
+  const fetchImpl: typeof fetch = async () =>
+    new Response(ttl, { status: 200, headers: { "content-type": "text/turtle" } });
+
+  it("hides auxiliary resources by default", async () => {
+    const items = await listFolder("https://alice.example/docs/", fetchImpl);
+    const urls = items.map((i) => i.url);
+    expect(urls).toContain("https://alice.example/docs/notes.ttl");
+    expect(urls).not.toContain("https://alice.example/docs/.acl");
+    expect(urls).not.toContain("https://alice.example/docs/notes.ttl.meta");
+  });
+
+  it("re-includes auxiliaries when includeAuxiliary is true (Advanced options)", async () => {
+    const items = await listFolder("https://alice.example/docs/", fetchImpl, true);
+    const urls = items.map((i) => i.url);
+    expect(urls).toContain("https://alice.example/docs/notes.ttl");
+    expect(urls).toContain("https://alice.example/docs/.acl");
+    expect(urls).toContain("https://alice.example/docs/notes.ttl.meta");
   });
 });
 

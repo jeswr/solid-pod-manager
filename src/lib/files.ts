@@ -208,19 +208,55 @@ export function isDirectChild(url: string, container: string): boolean {
 }
 
 /**
+ * True iff `url` addresses an AUXILIARY resource — a `.acl`/`.meta` (or `.acr`
+ * for ACP) sidecar, or a `*.meta`/`*.acl`/`*.acr` describedBy/link auxiliary on
+ * a resource — rather than primary user content. These exist to govern/describe
+ * other resources (WAC ACLs, resource metadata) and clutter a normal file
+ * listing; the browser hides them by default and reveals them under "Advanced
+ * options" (bug #11). Pure — matches on the URL tail, the convention every Solid
+ * server (CSS / prod-solid-server / ESS) follows for these auxiliaries.
+ *
+ * Matches both the dedicated sidecar names (`.acl`, `.meta`, `.acr`) AND the
+ * `<resource>.acl` / `<resource>.meta` / `<resource>.acr` per-resource forms.
+ * Strips any trailing slash first so a container's own `.acl` is caught too.
+ */
+export function isAuxiliaryResource(url: string): boolean {
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    path = url;
+  }
+  // The last path segment (a container's name keeps no trailing-slash here).
+  const tail = path.replace(/\/+$/, "").split("/").pop() ?? "";
+  return /(?:^|\.)(?:acl|meta|acr)$/i.test(tail);
+}
+
+/**
  * List a container's direct children. Wraps `pod-data.listContainer`
  * (QLever-backed; folders-first, name-sorted) AND filters out any member that
  * is not a direct, same-origin descendant of the listed container — a hostile
  * `ldp:contains` pointing at an external/foreign URL must never become a clickable
  * row whose actions fire the DPoP-authenticated fetch (SEC-1). A 404/403 surfaces
  * as the underlying `RdfFetchError` for the caller to branch on.
+ *
+ * `includeAuxiliary` (default `false`) controls whether auxiliary resources
+ * (`.acl`/`.meta`/`.acr`) are returned: the files browser lists primary content
+ * only by default and re-includes auxiliaries when the user turns on "Advanced
+ * options" (bug #11). Other callers (e.g. pod-search) get the default-filtered
+ * primary listing, which is what they want too.
  */
 export async function listFolder(
   container: string,
   fetchImpl?: typeof fetch,
+  includeAuxiliary = false,
 ): Promise<PodItem[]> {
   const items = await listContainer(container, fetchImpl);
-  return items.filter((item) => isDirectChild(item.url, container));
+  return items.filter(
+    (item) =>
+      isDirectChild(item.url, container) &&
+      (includeAuxiliary || !isAuxiliaryResource(item.url)),
+  );
 }
 
 /**

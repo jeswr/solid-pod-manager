@@ -25,6 +25,7 @@ import {
   Trash2,
   ExternalLink,
   Loader2,
+  Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { PodItem } from "@/lib/files";
@@ -38,6 +39,7 @@ import {
   childResourceUrl,
 } from "@/lib/files";
 import { ResourceDeleteError } from "@/lib/errors";
+import { SharingPanel } from "@/components/sharing-panel";
 import { chooseViewer, viewerKindLabel } from "@/lib/viewers";
 import { formatBytes, formatModified } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -124,6 +126,7 @@ function RowActions({
   const [renaming, setRenaming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [sharing, setSharing] = useState(false);
 
   async function download() {
     setDownloading(true);
@@ -183,6 +186,14 @@ function RowActions({
               Rename
             </DropdownMenuItem>
           )}
+          {/* Sharing reuses the existing per-resource SharingPanel (the same one
+              wired into the my-data item view). Opening it from a dropdown item
+              would nest a SheetTrigger inside the DropdownMenu (fragile), so the
+              panel is driven by `sharing` state and rendered below the menu. */}
+          <DropdownMenuItem onClick={() => setSharing(true)}>
+            <Users className="size-4" aria-hidden="true" />
+            Sharing
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"
@@ -193,6 +204,14 @@ function RowActions({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {/* Controlled Sharing sheet for this row's resource (or container). */}
+      <SharingPanel
+        resourceUrl={item.url}
+        open={sharing}
+        onOpenChange={setSharing}
+        hideTrigger
+      />
 
       <RenameDialog
         open={renaming}

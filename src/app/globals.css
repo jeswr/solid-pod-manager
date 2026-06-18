@@ -159,6 +159,19 @@
     @apply font-sans;
     /* 16px base; reading-heavy surfaces opt into 17–18px via utilities. */
     font-size: 100%;
+    /*
+     * Clear the sticky 64px (h-16) app-shell top bar (app-shell.tsx) when the
+     * browser scrolls something into view — a deep-link / `?q=` result / focused
+     * field would otherwise land UNDER the translucent header (bug #8). The page
+     * body is the scroll root here (the <main> has no own overflow), so the
+     * scroll-padding belongs on the scrolling element: `html`.
+     *
+     * CROSS-APP: every suite app mounts the same sticky h-16 header, so the
+     * durable home for this is the shared @jeswr/app-shell global stylesheet —
+     * see the extraction follow-up in the fix report. Set in PM here so PM is
+     * fixed now without waiting on that package edit.
+     */
+    scroll-padding-top: 4rem;
   }
   /* Type rhythm: headings tight, distinct weight steps (squint test passes). */
   h1, h2, h3, h4 {

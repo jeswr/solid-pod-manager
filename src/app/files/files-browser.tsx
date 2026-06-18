@@ -18,13 +18,21 @@
 import { Suspense, useCallback, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ChevronRight, FolderOpen, FilePlus, Loader2, UploadCloud } from "lucide-react";
+import {
+  ChevronRight,
+  FolderOpen,
+  FilePlus,
+  Loader2,
+  Settings2,
+  UploadCloud,
+} from "lucide-react";
 import { toast } from "sonner";
 import { RdfFetchError } from "@jeswr/fetch-rdf";
 import { asContainerUrl, breadcrumbs, type Crumb } from "@/lib/files";
 import { useFilesScope, useFolder } from "@/components/use-files";
 import { FileRow } from "@/components/file-row";
 import { FileToolbar, uploadMany } from "@/components/file-actions";
+import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorState } from "@/components/states";
 import { ItemRowSkeleton } from "@/components/item-row";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -68,7 +76,10 @@ function FilesScreen() {
 }
 
 function FolderContents({ current, root }: { current: string; root: string }) {
-  const { data, loading, error, reload } = useFolder(current);
+  // Bug #11: auxiliary resources (.acl/.meta/.acr) are hidden from the listing
+  // by default and revealed under "Advanced options".
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const { data, loading, error, reload } = useFolder(current, showAdvanced);
   const crumbs = breadcrumbs(current, root);
   const [dragging, setDragging] = useState(false);
   const [dropUploading, setDropUploading] = useState(false);
@@ -115,7 +126,19 @@ function FolderContents({ current, root }: { current: string; root: string }) {
             </p>
           </div>
         </div>
-        <FileToolbar container={current} onChange={reload} />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant={showAdvanced ? "secondary" : "outline"}
+            size="sm"
+            aria-pressed={showAdvanced}
+            onClick={() => setShowAdvanced((v) => !v)}
+            title="Show or hide system files like .acl and .meta"
+          >
+            <Settings2 className="size-4" aria-hidden="true" />
+            Advanced options
+          </Button>
+          <FileToolbar container={current} onChange={reload} />
+        </div>
       </header>
 
       {/* The listing is a drop target for upload. */}

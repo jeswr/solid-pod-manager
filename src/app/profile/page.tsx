@@ -10,13 +10,14 @@
  * identity claim, not a user-editable profile field — we show it but never
  * write it.
  */
-import { useEffect, useMemo, useState } from "react";
-import { Globe, IdCard, Loader2, Save, UserRound } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Globe, IdCard, Loader2, Save, Upload, UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { useEditableProfile, saveProfile } from "@/components/use-profile-edit";
 import { ErrorState } from "@/components/states";
 import { ResourceWriteError } from "@/lib/errors";
+import { uploadProfilePhoto } from "@/lib/profile-photo";
 import type { EditableProfile } from "@/lib/profile-edit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,12 +34,14 @@ function initials(name: string): string {
 }
 
 export default function ProfilePage() {
-  const { webId } = useSession();
+  const { webId, activeStorage } = useSession();
   const { data, loading, error, reload } = useEditableProfile();
 
   const [form, setForm] = useState<EditableProfile>({ name: "" });
   const [etag, setEtag] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (data) {
@@ -49,6 +52,68 @@ export default function ProfilePage() {
 
   const set = <K extends keyof EditableProfile>(key: K, value: string) =>
     setForm((f) => ({ ...f, [key]: value }));
+
+  /**
+   * Upload a chosen local image as the avatar (bugs #12/#13): store it in the
+   * pod, grant public read, set `form.photo` to the pod URL, and persist with
+   * the SAME conditional `saveProfile` flow the form uses — so the picture is
+   * live immediately, not just staged in the input. The URL field stays as an
+   * alternate way to point at an externally-hosted image.
+   */
+  async function onPickPhoto(file: File | undefined) {
+    if (!file) return;
+    if (!webId || !activeStorage) {
+      toast.error("Your pod isn't ready yet. Try again in a moment.");
+      return;
+    }
+    setUploadingPhoto(true);
+    try {
+      const { url, publicReadStatus, cleanupStaleVariants } =
+        await uploadProfilePhoto(activeStorage, webId, file);
+      // Persist the new photo against the current ETag, then keep both the form
+      // and the ETag in step with what we just wrote (so a follow-up Save isn't
+      // a stale 412).
+      const next: EditableProfile = { ...form, photo: url };
+      const { etag: nextEtag } = await saveProfile({ webId, edit: next, etag });
+      setForm(next);
+      setEtag(nextEtag);
+      // ONLY now that the profile points at the new avatar, remove any stale
+      // variants of a different type (so a failed save above never left
+      // vcard:hasPhoto pointing at a deleted URL — roborev). Best-effort.
+      await cleanupStaleVariants();
+      if (publicReadStatus === "granted") {
+        toast.success("Profile picture updated", {
+          description: "It's saved in your pod and visible to others.",
+        });
+      } else {
+        // Honest per-reason copy: the bytes uploaded and the URL is saved, but
+        // the public-read grant didn't take (an ACP pod, or a permission issue),
+        // so others may not see it yet (roborev — never silently drop this).
+        toast.success("Profile picture uploaded", {
+          description:
+            publicReadStatus === "unsupported"
+              ? "It's saved in your pod, but this pod manages sharing differently — set it to public in your pod's sharing settings so others can see it."
+              : "It's saved in your pod, but couldn't be made public yet — others may not see it.",
+        });
+      }
+    } catch (err) {
+      if (err instanceof ResourceWriteError && err.status === 412) {
+        toast.error("Your profile changed elsewhere. Reloading the latest…");
+        reload();
+      } else if (err instanceof ResourceWriteError && err.status === 403) {
+        toast.error("You don't have permission to upload here.");
+      } else {
+        toast.error(
+          err instanceof Error && err.message
+            ? err.message
+            : "Couldn't upload your picture. Please try again.",
+        );
+      }
+    } finally {
+      setUploadingPhoto(false);
+      if (photoInputRef.current) photoInputRef.current.value = "";
+    }
+  }
 
   const previewName = form.name.trim() || webId || "You";
   const photoValid = useMemo(() => isHttpUrl(form.photo), [form.photo]);
@@ -158,15 +223,50 @@ export default function ProfilePage() {
               </Field>
             </div>
 
-            <Field id="p-photo" label="Photo address" hint="a link to your picture">
-              <Input
-                id="p-photo"
-                type="url"
-                inputMode="url"
-                value={form.photo ?? ""}
-                onChange={(e) => set("photo", e.target.value)}
-                placeholder="https://…/me.jpg"
-              />
+            <Field id="p-photo" label="Profile picture">
+              <div className="flex flex-col gap-2">
+                {/* Upload a local image straight into the pod (bugs #12/#13). The
+                    actual <input> is visually hidden; the button is the single
+                    focus-reachable control that opens the native picker. */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={uploadingPhoto}
+                    onClick={() => photoInputRef.current?.click()}
+                  >
+                    {uploadingPhoto ? (
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Upload className="size-4" aria-hidden="true" />
+                    )}
+                    {form.photo ? "Change picture" : "Upload a picture"}
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    PNG, JPEG, GIF, WebP or SVG — saved in your pod.
+                  </span>
+                  <input
+                    ref={photoInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="sr-only"
+                    aria-hidden="true"
+                    tabIndex={-1}
+                    onChange={(e) => void onPickPhoto(e.target.files?.[0])}
+                  />
+                </div>
+                {/* Alternate: point at an externally-hosted image by URL. */}
+                <Input
+                  id="p-photo"
+                  type="url"
+                  inputMode="url"
+                  value={form.photo ?? ""}
+                  onChange={(e) => set("photo", e.target.value)}
+                  placeholder="…or paste an image address: https://…/me.jpg"
+                  aria-label="Photo address"
+                />
+              </div>
             </Field>
 
             <Field id="p-home" label="Homepage">

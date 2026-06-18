@@ -16,7 +16,7 @@
  * triples); errors surface as honest, plain-language toasts and the model is
  * re-read so the panel always reflects the server (fail-closed).
  */
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import Link from "next/link";
 import {
   Check,
@@ -68,26 +68,53 @@ import { useResourceSharing } from "@/components/use-resource-sharing";
 
 const LEVELS: AccessLevel[] = ["view", "edit", "owner", "add"];
 
-/** The Share button + the Sheet it opens, attachable to any resource row. */
+/**
+ * The Share button + the Sheet it opens, attachable to any resource row.
+ *
+ * Open state is uncontrolled by default (renders its own "Share" trigger). For
+ * callers that already own a trigger elsewhere — e.g. a "Sharing" item in the
+ * files-browser 3-dots menu (bug #11), where nesting a SheetTrigger inside the
+ * DropdownMenu is fragile — pass a controlled `open`/`onOpenChange` and set
+ * `hideTrigger` so no second trigger button renders.
+ */
 export function SharingPanel({
   resourceUrl,
   trigger,
+  open: controlledOpen,
+  onOpenChange,
+  hideTrigger,
 }: {
   resourceUrl: string;
   /** Optional custom trigger; defaults to an outline "Share" button. */
   trigger?: React.ReactNode;
+  /** Controlled open state (with {@link onOpenChange}). Uncontrolled if unset. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  /** Render no built-in trigger (use with a controlled `open` from elsewhere). */
+  hideTrigger?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const isControlled = controlledOpen !== undefined;
+  const open = isControlled ? controlledOpen : uncontrolledOpen;
+  const setOpen = useCallback(
+    (next: boolean) => {
+      if (!isControlled) setUncontrolledOpen(next);
+      onOpenChange?.(next);
+    },
+    [isControlled, onOpenChange],
+  );
   return (
     <Sheet open={open} onOpenChange={setOpen}>
-      <SheetTrigger asChild>
-        {trigger ?? (
-          <Button variant="outline">
-            <Users className="size-4" aria-hidden="true" />
-            Share
-          </Button>
-        )}
-      </SheetTrigger>
+      {hideTrigger ? null : (
+        <SheetTrigger asChild>
+          {trigger ?? (
+            <Button variant="outline">
+              <Users className="size-4" aria-hidden="true" />
+              Share
+            </Button>
+          )}
+        </SheetTrigger>
+      )}
       <SheetContent side="right" className="flex w-full flex-col gap-0 p-0 sm:max-w-md">
         <SheetHeader className="border-b border-border p-6">
           <SheetTitle className="truncate">Share “{nameFromUrl(resourceUrl)}”</SheetTitle>

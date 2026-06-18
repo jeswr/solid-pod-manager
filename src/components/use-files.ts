@@ -41,9 +41,13 @@ export function useFilesScope(): {
  * Production paths pass NO `fetch` to the data layer — the auth-patched global
  * runs (AGENTS.md §Reading data). Re-lists whenever the container or session
  * changes.
+ *
+ * `showAdvanced` (bug #11) re-includes auxiliary resources (`.acl`/`.meta`/
+ * `.acr`) which are hidden from the listing by default; toggling it re-lists.
  */
 export function useFolder(
   container: string | undefined,
+  showAdvanced = false,
 ): AsyncState<PodItem[]> & { reload: () => void } {
   const { status } = useSession();
   const [state, setState] = useState<AsyncState<PodItem[]>>({ loading: true });
@@ -57,7 +61,7 @@ export function useFolder(
     }
     let cancelled = false;
     setState({ loading: true });
-    listFolder(container)
+    listFolder(container, undefined, showAdvanced)
       .then((items) => {
         if (!cancelled) setState({ loading: false, data: items });
       })
@@ -72,7 +76,7 @@ export function useFolder(
     return () => {
       cancelled = true;
     };
-  }, [container, status, nonce]);
+  }, [container, status, nonce, showAdvanced]);
 
   // Live-refresh the listing when the container changes on the server.
   useResourceNotifications(

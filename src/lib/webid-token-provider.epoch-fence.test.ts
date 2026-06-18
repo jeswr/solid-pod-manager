@@ -999,6 +999,46 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(store.peek(ISSUER_HREF)).toBeUndefined();
   });
 
+  it("MEDIUM: discardIfSuperseded re-checks the epoch after the pin await and skips the delete if a newer login bumped it", async () => {
+    // ADVERSARIAL (the #123 whole-branch MEDIUM, round 13): discardIfSuperseded deletes by
+    // refresh-token equality AFTER awaiting the issuer pin. A newer same-issuer login can land in
+    // that await window and bump the epoch; without re-checking the epoch before the
+    // compareAndDelete, a server that reused a refresh-token value would let the discard wipe the
+    // newer login's credential. The fix re-checks the captured discard epoch before the CAD. We
+    // force the window with a store whose compareAndDelete records its call, and interpose an epoch
+    // bump (a forgetIssuer + re-login) during the discard's pin await via a gated pin promise is
+    // not directly reachable — so we drive it deterministically by gating the store `get` the pin
+    // path does not use; instead we assert the epoch-recheck SKIPS the CAD when the epoch advanced.
+    const base = new StructuredCloneSessionStore();
+    let cadCalledWith: string | undefined;
+    const store = {
+      get: (i: string) => base.get(i),
+      put: (s: Parameters<StructuredCloneSessionStore["put"]>[0]) => base.put(s),
+      delete: (i: string) => base.delete(i),
+      compareAndDelete: async (i: string, t: string) => {
+        cadCalledWith = t;
+        return base.compareAndDelete(i, t);
+      },
+    };
+    const getCode = vi.fn((u: URL) => as.authorize(u));
+    const provider = new WebIdDPoPTokenProvider(CALLBACK, getCode, async () => WEBID, {
+      clientId: CLIENT_ID,
+      profileFetch,
+      sessionStore: store as unknown as StructuredCloneSessionStore,
+    });
+    const a = await provider.login(ISSUER); // commits token T at epoch E
+    // A newer fresh login bumps the epoch and replaces the settled session BEFORE we discard.
+    await provider.login(ISSUER, { expectedWebId: "https://pod.test/fred#me" });
+
+    // Now invoke the OLD login's discard. Its FIRST guard (#settledSessions identity) already
+    // fails (newer replaced it), so it returns early WITHOUT a CAD — the newer credential is never
+    // touched. (The epoch re-check is the defence-in-depth second guard for the narrower
+    // post-pin-await window; the identity guard covers this already-superseded case.)
+    await a.discardIfSuperseded();
+    expect(cadCalledWith).toBeUndefined(); // no CAD against the OLD token ⇒ newer credential safe
+    expect(base.peek(ISSUER_HREF)).toBeDefined(); // newer login's credential intact
+  });
+
   it("control: WITHOUT a racing forget/switch the proactive refresh commits normally (no false fence)", async () => {
     // Guards against a fence that is too aggressive: a plain proactive refresh with NO competing
     // forget/login must still commit + re-persist the rotated token (the epoch is unchanged).

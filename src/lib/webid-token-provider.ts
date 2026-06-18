@@ -689,8 +689,9 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
       // not enough — a proactive/lazy refresh ALREADY in flight for THIS abandoned credential
       // captured the still-current epoch, so its later commit would RE-COMMIT the discarded session.
       // Bumping cancels that in-flight background work (its fenced commit now yields), exactly as a
-      // superseding login / `forgetIssuer` does. The bump precedes the synchronous clears.
-      this.#bumpEpoch(issuer.href);
+      // superseding login / `forgetIssuer` does. The bump precedes the synchronous clears. CAPTURE
+      // the post-bump epoch so the persistence delete below can be epoch-re-checked after its await.
+      const discardEpoch = this.#bumpEpoch(issuer.href);
       this.#clearScheduler(issuer.href);
       this.#sessions.delete(issuer.href);
       this.#settledSessions.delete(issuer.href);
@@ -703,11 +704,13 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
           this.#issuer = undefined;
         }
       }
-      // Token-scoped persistence delete: remove ONLY our exact (now-abandoned) refresh token, never
-      // a newer login's. Re-check ownership after the awaited pin read (a newer login may have
-      // landed) — skip the delete if it no longer owns... (it cannot, since a newer login replaces
-      // `#settledSessions`, which we already confirmed is still ours; the CAD is the atomic guard).
-      if (committed.refreshToken !== undefined) {
+      // Token-scoped persistence delete: remove ONLY our exact (now-abandoned) refresh token. TWO
+      // guards (the #123 whole-branch round-13 MEDIUM): (1) RE-CHECK THE EPOCH after the awaited
+      // pin read — a NEWER same-issuer login can land in that window and bump again; if it did, it
+      // owns the durable slot, so SKIP (a `compareAndDelete` could otherwise wipe the newer
+      // credential should the server ever reuse a refresh-token value). (2) `compareAndDelete` is
+      // itself atomic on the token. Only when the epoch is STILL ours do we delete our own token.
+      if (committed.refreshToken !== undefined && this.#epochOf(issuer.href) === discardEpoch) {
         await this.#sessionStore
           ?.compareAndDelete(issuer.href, committed.refreshToken)
           .catch(() => false);

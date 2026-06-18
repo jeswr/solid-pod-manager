@@ -648,6 +648,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // re-check `stillCurrent` after each and bail WITHOUT re-arming/publishing/closing the
       // popup, so a superseded login never resurrects a logged-out credential, republishes a
       // stale identity, clobbers the newer login's boundary, or closes its popup.
+      // Captured from `provider.login()` (below): the ownership-scoped discard of THIS login's own
+      // committed credential. Hoisted to the establish scope so BOTH the `!published` path and the
+      // OUTER catch (a `fetchProfile` rejection) can invoke it on supersession (the #123
+      // whole-branch round-9/round-10 MEDIUM/HIGH). No-op if a newer same-issuer login owns the slot.
+      let discardIfSuperseded: (() => Promise<void>) | undefined;
       try {
         const provider = await providerReadyRef.current;
         if (!provider) throw new Error("Auth is not initialised yet");
@@ -661,10 +666,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         if (!stillCurrent(establishGeneration)) throw new LoginSupersededError();
 
         let statedWebId: string | undefined;
-        // Captured from `provider.login()`: an ownership-scoped discard of THIS login's own
-        // committed credential, invoked if a supersession aborts our publish (the #123 whole-branch
-        // round-9 MEDIUM). No-op if a newer same-issuer login already owns the slot.
-        let discardIfSuperseded: (() => Promise<void>) | undefined;
         try {
           ({ webId: statedWebId, discardIfSuperseded } = await provider.login(new URL(issuer), {
             silentFirst,
@@ -833,6 +834,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           void providerReadyRef.current
             ?.then((p) => p?.forgetIssuer(new URL(issuer)))
             .catch(() => {});
+        } else {
+          // SUPERSEDED failure (the #123 whole-branch round-10 HIGH): the `stillCurrent` block
+          // above is skipped (the superseding actor owns the shared boundary/UI/popup), but this
+          // losing login may STILL have committed + persisted a session inside `provider.login()`
+          // before its `fetchProfile` REJECTED — leaving that credential abandoned-yet-reusable.
+          // Best-effort the OWNERSHIP-SCOPED `discardIfSuperseded` (a no-op if a newer same-issuer
+          // login already owns the slot, so it never wipes the winner). This is the failure-path
+          // twin of the `!published` discard, covering "committed → superseded → profile read
+          // threw". `forgetIssuer` is NOT used here (its unconditional in-memory clears would wipe
+          // a newer same-issuer login); `discardIfSuperseded` is identity-scoped.
+          await discardIfSuperseded?.().catch(() => {});
         }
         throw e;
       }

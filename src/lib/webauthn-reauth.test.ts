@@ -1,7 +1,7 @@
 // AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate; see docs/MODEL-PROVENANCE.md
 // vitest — node env, no DOM, no network. Exercises the per-device passkey memory
 // and the WebAuthnConfig builder (the opt-in switch for redirect-free re-auth).
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { WebAuthnTokenProvider } from "@jeswr/solid-webauthn-client";
 import type { KeyValueStorage } from "./login-ux.js";
 import {
@@ -27,6 +27,10 @@ class MemoryStorage implements KeyValueStorage {
   }
   poison(key: string): void {
     this.#map.set(key, "{not json");
+  }
+  /** Store an ARBITRARY raw value (valid JSON of the wrong shape, etc.). */
+  setRaw(key: string, value: string): void {
+    this.#map.set(key, value);
   }
 }
 
@@ -98,6 +102,58 @@ describe("PasskeyRegistry", () => {
     storage.poison("solid-pod-manager:passkey-issuers");
     expect(registry.list()).toEqual([]);
     expect(registry.hasFor(WEBID)).toBe(false);
+  });
+
+  // SHAPE VALIDATION (roborev Finding 5): valid JSON of the WRONG shape (an old
+  // schema, a scalar, a non-array, a missing/invalid `issuer`, a non-array
+  // `resourceHosts`) must NEVER escape `list()` and throw later in
+  // `.some()/.find()/issuerHost()/new Set()` on the login-restore path.
+  const STORE_KEY = "solid-pod-manager:passkey-issuers";
+  it("returns [] for a non-array JSON value (a scalar / an object)", () => {
+    storage.setRaw(STORE_KEY, JSON.stringify("just a string"));
+    expect(registry.list()).toEqual([]);
+    storage.setRaw(STORE_KEY, JSON.stringify(42));
+    expect(registry.list()).toEqual([]);
+    storage.setRaw(STORE_KEY, JSON.stringify({ webId: WEBID }));
+    expect(registry.list()).toEqual([]);
+    storage.setRaw(STORE_KEY, JSON.stringify(null));
+    expect(registry.list()).toEqual([]);
+  });
+
+  it("filters out malformed entries (old schema, missing/invalid issuer, bad resourceHosts)", () => {
+    storage.setRaw(
+      STORE_KEY,
+      JSON.stringify([
+        reg(), // well-formed — kept
+        { webId: WEBID }, // OLD schema: no issuer / resourceHosts — dropped
+        { webId: WEBID, issuer: "not a url", resourceHosts: [] }, // unparsable issuer — dropped
+        { webId: 123, issuer: ISSUER, resourceHosts: [] }, // non-string webId — dropped
+        { webId: "https://x.example/#me", issuer: ISSUER, resourceHosts: "nope" }, // non-array hosts — dropped
+        { webId: "https://y.example/#me", issuer: ISSUER, resourceHosts: [1, 2] }, // non-string hosts — dropped
+        "scalar", // not an object — dropped
+        null, // not an object — dropped
+      ]),
+    );
+    const list = registry.list();
+    expect(list).toHaveLength(1);
+    expect(list[0].webId).toBe(WEBID);
+  });
+
+  it("hasFor / buildWebAuthnConfig do NOT throw on a malformed store (login-path safety)", () => {
+    // The exact downstream calls that would have thrown: hasFor → .some(),
+    // buildWebAuthnConfig → issuerHost(new URL) + new Set(resourceHosts).
+    storage.setRaw(
+      STORE_KEY,
+      JSON.stringify([
+        { webId: WEBID, issuer: "::::not-a-url", resourceHosts: 5 }, // both fields bad
+        { issuer: ISSUER }, // missing webId + resourceHosts
+      ]),
+    );
+    expect(() => registry.hasFor(WEBID)).not.toThrow();
+    expect(registry.hasFor(WEBID)).toBe(false);
+    expect(() => buildWebAuthnConfig(registry.list(), CLIENT_ID)).not.toThrow();
+    // Nothing well-formed survived → no config (caller skips the provider).
+    expect(buildWebAuthnConfig(registry.list(), CLIENT_ID)).toBeUndefined();
   });
 
   it("remember returns false (not throw) when storage is unavailable", () => {
@@ -270,6 +326,101 @@ describe("WebIdBoundWebAuthnProvider", () => {
     const out = await p.upgrade(new Request(`${STORAGE}x`));
     expect(out.headers.get("x-fallback")).toBe("1");
     expect(calls).toHaveLength(1);
+  });
+
+  it("forwards forceRefresh to the fallback on a wrong-account delegation (roborev Finding 2)", async () => {
+    const bob = "https://bob.solid-test.jeswr.org/profile/card#me";
+    const forceRefreshes: (boolean | undefined)[] = [];
+    const fallback = {
+      matches: async () => true,
+      upgrade: async (req: Request, forceRefresh?: boolean) => {
+        forceRefreshes.push(forceRefresh);
+        return new Request(req, { headers: { "x-fallback": "1" } });
+      },
+    };
+    const p = new WebIdBoundWebAuthnProvider(fakeInner(bob), fallback, WEBID);
+    // A stale-token RETRY calls upgrade(req, true) → the wrong-account delegation
+    // must forward forceRefresh so the fallback mints a FRESH token, not the
+    // rejected cached one.
+    const out = await p.upgrade(new Request(`${STORAGE}x`), true);
+    expect(out.headers.get("x-fallback")).toBe("1");
+    expect(forceRefreshes).toEqual([true]);
+  });
+
+  it("forwards forceRefresh to the fallback when the ceremony itself fails (roborev Finding 2)", async () => {
+    const failing = {
+      matches: async () => true,
+      upgrade: async () => {
+        throw new Error("user cancelled the passkey prompt");
+      },
+    } as unknown as WebAuthnTokenProvider;
+    const forceRefreshes: (boolean | undefined)[] = [];
+    const fallback = {
+      matches: async () => true,
+      upgrade: async (req: Request, forceRefresh?: boolean) => {
+        forceRefreshes.push(forceRefresh);
+        return new Request(req, { headers: { "x-fallback": "1" } });
+      },
+    };
+    const p = new WebIdBoundWebAuthnProvider(failing, fallback, WEBID);
+    await p.upgrade(new Request(`${STORAGE}x`), true);
+    expect(forceRefreshes).toEqual([true]);
+  });
+
+  it("invalidate() invalidates BOTH the inner passkey provider AND the fallback (roborev Finding 6)", async () => {
+    const innerInvalidate = vi.fn(async () => {});
+    const fallbackInvalidate = vi.fn(async () => {});
+    const inner = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      invalidate: innerInvalidate,
+    } as unknown as WebAuthnTokenProvider;
+    const fallback = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      invalidate: fallbackInvalidate,
+    };
+    const p = new WebIdBoundWebAuthnProvider(inner, fallback, WEBID);
+    const req = new Request(`${STORAGE}x`);
+    await p.invalidate(req);
+    // Both must be invalidated: upgrade() can return EITHER an inner-minted OR a
+    // fallback-issued token, and on a later rejection we don't know which.
+    expect(innerInvalidate).toHaveBeenCalledWith(req);
+    expect(fallbackInvalidate).toHaveBeenCalledWith(req);
+  });
+
+  it("invalidate() swallows a thrown inner invalidate and still invalidates the fallback", async () => {
+    const fallbackInvalidate = vi.fn(async () => {});
+    const inner = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      invalidate: async () => {
+        throw new Error("inner invalidate blew up");
+      },
+    } as unknown as WebAuthnTokenProvider;
+    const fallback = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      invalidate: fallbackInvalidate,
+    };
+    const p = new WebIdBoundWebAuthnProvider(inner, fallback, WEBID);
+    const req = new Request(`${STORAGE}x`);
+    await expect(p.invalidate(req)).resolves.toBeUndefined();
+    expect(fallbackInvalidate).toHaveBeenCalledWith(req);
+  });
+
+  it("invalidate() works when the fallback has no invalidate (best-effort)", async () => {
+    const innerInvalidate = vi.fn(async () => {});
+    const inner = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      invalidate: innerInvalidate,
+    } as unknown as WebAuthnTokenProvider;
+    const fallback = { matches: async () => true, upgrade: async (req: Request) => req };
+    const p = new WebIdBoundWebAuthnProvider(inner, fallback, WEBID);
+    const req = new Request(`${STORAGE}x`);
+    await expect(p.invalidate(req)).resolves.toBeUndefined();
+    expect(innerInvalidate).toHaveBeenCalledWith(req);
   });
 
   it("preserves a body-bearing request's body for the fallback after a wrong-account token (roborev)", async () => {

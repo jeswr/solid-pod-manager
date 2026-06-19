@@ -103,4 +103,16 @@ describe("composePasskeyProvider", () => {
     await composed.upgrade(new Request(OTHER), true);
     expect(i.upgrade).toHaveBeenCalledWith(expect.any(Request), true);
   });
+
+  it("forwards forceRefresh on the PASSKEY path too (so its fallback delegation refreshes — roborev Finding 2)", async () => {
+    const i = fakeInteractive();
+    const p = fakePasskey(true); // matcher matches the STORAGE host → passkey path
+    const composed = composePasskeyProvider(i.provider, p.provider);
+    await composed.upgrade(new Request(`${STORAGE}private/notes`), true);
+    // The composer must hand forceRefresh to passkey.upgrade so that WHEN that
+    // upgrade delegates to its interactive fallback on a stale-token retry, the
+    // fallback mints a fresh token rather than reusing the rejected cached one.
+    expect(p.upgrade).toHaveBeenCalledWith(expect.any(Request), true);
+    expect(i.upgrade).not.toHaveBeenCalled();
+  });
 });

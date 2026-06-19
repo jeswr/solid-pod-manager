@@ -91,10 +91,13 @@ export function composePasskeyProvider(
       if (await passkey.matches(request)) {
         // The WebID-bound passkey provider mints a passkey token and, on a
         // wrong-account or failed ceremony, delegates to the interactive
-        // fallback it holds — never rejecting the fetch. (It ignores
-        // forceRefresh: a passkey upgrade is stateless — a fresh ceremony every
-        // time — so there is no cached credential to force past.)
-        return passkey.upgrade(request);
+        // fallback it holds — never rejecting the fetch. The passkey upgrade
+        // itself is STATELESS (a fresh ceremony every time, so forceRefresh is
+        // meaningless for it) — but we forward `forceRefresh` so that when the
+        // upgrade DELEGATES to the interactive fallback during a stale-token
+        // RETRY, the fallback mints a fresh token rather than reusing the
+        // rejected cached one (roborev Finding 2).
+        return passkey.upgrade(request, forceRefresh);
       }
       return interactive.upgrade(request, forceRefresh);
     },

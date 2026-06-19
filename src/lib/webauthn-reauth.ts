@@ -41,9 +41,18 @@ import type { KeyValueStorage } from "./login-ux.js";
  * wrong-account upgrade to (the app's interactive `WebIdDPoPTokenProvider`).
  * Re-exported so the session provider can type its cast without importing the
  * vendored client's type directly.
+ *
+ * `upgrade` accepts the OPTIONAL `forceRefresh` flag the proactive-auth-fetch
+ * stale-token retry passes (roborev Finding 2): when the passkey path delegates to
+ * the interactive fallback during a stale-token RETRY, that retry's `forceRefresh`
+ * must reach the fallback so it mints a FRESH token rather than reusing the rejected
+ * cached one. The vendored `TokenProvider.upgrade` is 1-arg; the real interactive
+ * `WebIdDPoPTokenProvider.upgrade(request, forceRefresh?)` accepts it, and a 1-arg
+ * provider simply ignores the extra argument.
  */
-export type TokenProviderLike = Pick<TokenProvider, "matches" | "upgrade"> &
-  Partial<Pick<TokenProvider, "invalidate">>;
+export type TokenProviderLike = Pick<TokenProvider, "matches"> & {
+  upgrade(request: Request, forceRefresh?: boolean): Promise<Request>;
+} & Partial<Pick<TokenProvider, "invalidate">>;
 
 /**
  * Read the unverified `webid` claim from a Solid-OIDC `at+jwt` access token. NOT
@@ -107,19 +116,24 @@ export class WebIdBoundWebAuthnProvider implements TokenProvider {
     return this.#inner.matches(request);
   }
 
-  async upgrade(request: Request): Promise<Request> {
+  async upgrade(request: Request, forceRefresh?: boolean): Promise<Request> {
     // The inner provider may consume the request body (it clones/rewraps the
     // Request for the DPoP-bound resource proof). Keep a pristine clone for the
     // fallback path so a body-bearing POST/PUT can still be re-sent (roborev).
     const forFallback = request.clone();
     let upgraded: Request;
     try {
+      // The passkey upgrade itself is STATELESS — a fresh ceremony + DPoP key on
+      // every call — so `forceRefresh` is meaningless for it (there is no cached
+      // credential to force past). But on a stale-token RETRY the DELEGATION to the
+      // interactive fallback below MUST forward `forceRefresh` so the fallback mints
+      // a fresh token rather than reusing its rejected cached one (roborev Finding 2).
       upgraded = await this.#inner.upgrade(request);
     } catch {
       // The passkey ceremony / exchange failed (broker refusal, cancelled
       // prompt, network). Do NOT reject the fetch — hand off to interactive
       // login (which surfaces a real error to the UI if IT fails).
-      return this.#fallback.upgrade(forFallback);
+      return this.#fallback.upgrade(forFallback, forceRefresh);
     }
     const auth = upgraded.headers.get("authorization") ?? "";
     const token = auth.replace(/^DPoP\s+/i, "");
@@ -127,13 +141,22 @@ export class WebIdBoundWebAuthnProvider implements TokenProvider {
     if (webId !== this.#expectedWebId) {
       // Wrong account (or unreadable token): discard the passkey token and run
       // the interactive login for the expected account instead.
-      return this.#fallback.upgrade(forFallback);
+      return this.#fallback.upgrade(forFallback, forceRefresh);
     }
     return upgraded;
   }
 
-  invalidate(request: Request): Promise<void> {
-    return this.#inner.invalidate?.(request) ?? Promise.resolve();
+  async invalidate(request: Request): Promise<void> {
+    // INVALIDATE BOTH (roborev): `upgrade()` can return a token minted by EITHER the
+    // inner passkey provider OR (on a wrong-account / failed ceremony) the interactive
+    // `#fallback`. When a returned token is later rejected and the stale-token retry
+    // calls `invalidate`, we don't know which provider issued it — so invalidate both,
+    // best-effort. Invalidating only `#inner` would leave a stale fallback-issued token
+    // cached. Both are swallowed so one's failure never blocks the other.
+    await Promise.allSettled([
+      Promise.resolve(this.#inner.invalidate?.(request)),
+      Promise.resolve(this.#fallback.invalidate?.(request)),
+    ]);
   }
 }
 
@@ -181,6 +204,28 @@ export interface PasskeyRegistration {
   resourceHosts: string[];
 }
 
+/**
+ * Whether a parsed localStorage entry is a well-formed {@link PasskeyRegistration}
+ * the login-restore path can safely consume WITHOUT throwing (roborev): a `webId`
+ * string, an `issuer` string that parses as a URL (so `issuerHost(issuer)` /
+ * `new URL(issuer)` never throws), and a `resourceHosts` array of strings (so the
+ * `new Set(resourceHosts)` in `buildWebAuthnConfig` never throws). Anything else —
+ * an old schema, a scalar, a missing field, a non-array `resourceHosts` — is dropped.
+ */
+function isWellFormedRegistration(value: unknown): value is PasskeyRegistration {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.webId !== "string") return false;
+  if (typeof v.issuer !== "string") return false;
+  try {
+    void new URL(v.issuer);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(v.resourceHosts)) return false;
+  return v.resourceHosts.every((h) => typeof h === "string");
+}
+
 export class PasskeyRegistry {
   readonly #storage: KeyValueStorage;
   constructor(storage: KeyValueStorage = globalThis.localStorage) {
@@ -190,7 +235,15 @@ export class PasskeyRegistry {
   list(): PasskeyRegistration[] {
     try {
       const raw = this.#storage.getItem(PASSKEY_STORE_KEY);
-      return raw ? (JSON.parse(raw) as PasskeyRegistration[]) : [];
+      if (!raw) return [];
+      const parsed: unknown = JSON.parse(raw);
+      // SHAPE-VALIDATE (roborev): valid JSON of the WRONG shape (an old schema, a
+      // scalar, a non-array, a missing/invalid `issuer`, a non-array `resourceHosts`)
+      // would escape the try and later throw in `.some()/.find()/issuerHost()/new Set()`
+      // on the login-restore path. Filter to only well-formed entries so corrupt/old
+      // storage NEVER throws downstream — a bad entry just costs one declined prompt.
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(isWellFormedRegistration);
     } catch {
       return []; // corrupt storage must not block login
     }

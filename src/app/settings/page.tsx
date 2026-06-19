@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Check,
@@ -23,6 +23,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { passkeyCardReady } from "@/lib/passkey-card";
 
 export default function SettingsPage() {
   const { profile, webId, activeStorage, logout } = useSession();
@@ -161,7 +162,7 @@ export default function SettingsPage() {
  * create nothing — the existing redirect sign-in keeps working unchanged.
  */
 function PasskeyCard() {
-  const { status, hasPasskey, registerPasskey } = useSession();
+  const { status, webId, hasPasskey, registerPasskey } = useSession();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Locally remember that a passkey set-up SUCCEEDED this session even when the
@@ -171,7 +172,22 @@ function PasskeyCard() {
   // Finding 4). The credential exists on the device either way, so the ready state
   // is correct; only the cross-load hint failed.
   const [setupComplete, setSetupComplete] = useState(false);
-  const ready = hasPasskey || setupComplete;
+  // RESET ON IDENTITY CHANGE (roborev S1): `setupComplete` is component-local and
+  // (without this) would persist across a logout→login of a DIFFERENT account while
+  // this component stays mounted — falsely hiding the "Set up a passkey" button for
+  // the new account (whose passkey state is unrelated). Key it off the active WebID:
+  // whenever the signed-in identity changes, clear the this-session set-up flag so the
+  // card reflects only the CURRENT account's state. `hasPasskey` already tracks the
+  // active account (the session sets it per-WebID), so only `setupComplete` needs the
+  // reset. (PasskeyCard returns null when logged out, but a remount is not guaranteed
+  // on an in-place account switch, hence this effect rather than relying on unmount.)
+  useEffect(() => {
+    setSetupComplete(false);
+  }, [webId]);
+  // The PURE ready-state decision (roborev S2) — extracted to `src/lib/passkey-card`
+  // so it is unit-testable without a React render (the vitest harness is node-env /
+  // `src/lib/**` only and has no `@testing-library/react`).
+  const ready = passkeyCardReady({ hasPasskey, setupComplete });
 
   if (status !== "logged-in") return null;
 

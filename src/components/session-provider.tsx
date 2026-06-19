@@ -58,8 +58,23 @@ import { nativeFetch } from "@/lib/native-fetch";
 import {
   computeAllowedOrigins,
   installProactiveAuthFetch,
+  type AuthTokenProvider,
 } from "@/lib/proactive-auth-fetch";
 import { establishStillCurrent, runFencedPublish } from "@/lib/establish-fence";
+import {
+  buildWebAuthnReauthProviderForWebId,
+  PasskeyRegistry,
+  type TokenProviderLike,
+} from "@/lib/webauthn-reauth";
+import {
+  registerPasskey as runRegisterPasskey,
+  WebAuthnRegistrationError,
+} from "@/lib/webauthn-register";
+import { composePasskeyProvider } from "@/lib/passkey-provider";
+
+// Re-export so login/account/settings UI can branch on the broker's
+// no-auto-provision refusal without importing the lib module directly.
+export { WebAuthnRegistrationError };
 
 type Status = "loading" | "logged-out" | "authenticating" | "logged-in";
 
@@ -124,6 +139,22 @@ export interface Session {
   logout(): void;
   /** Pick which storage to browse when the profile advertises several. */
   setActiveStorage(storage: string): void;
+  /**
+   * Whether THIS device has a passkey registered for the active session's WebID
+   * (the opt-in redirect-free re-auth is wired for it on the next app load). UI
+   * flag only — the hint + the on-device credential intentionally outlive logout.
+   */
+  hasPasskey: boolean;
+  /**
+   * Opt-in: set up a passkey for this device against the active session's issuer
+   * (one-time, after a normal sign-in). Resolves with `{ saved }` on success —
+   * `saved: false` means the credential WAS created but this browser couldn't
+   * persist the local hint (storage blocked/full): a non-fatal warning, NOT a
+   * failure. Rejects with {@link WebAuthnRegistrationError} carrying the broker's
+   * message only when the broker actually refuses (e.g. the WebID is not
+   * provisioned — NO identity is created). Call only while `status === "logged-in"`.
+   */
+  registerPasskey(): Promise<{ saved: boolean }>;
 }
 
 const SessionContext = createContext<Session | null>(null);
@@ -173,6 +204,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // popup, and a click handler cannot await (the user activation would be
   // spent). Null until the auth module loads; the probe then says "open".
   const providerSyncRef = useRef<WebIdDPoPTokenProvider>(null);
+  // The app's Client ID Document URL (`/clientid.jsonld`), captured when the auth
+  // module wires up so the passkey registration ceremony binds the SAME client id
+  // the authorization-code flow uses.
+  const clientIdRef = useRef<string>(undefined);
+  // Per-device "passkey registered for this WebID" memory (localStorage). Drives
+  // both whether the composed re-auth provider is built and the UI affordances.
+  const passkeyRegistryRef = useRef<PasskeyRegistry>(null);
   // The CURRENT credential-origin boundary — the set of resource origins the
   // proactive-auth fetch may attach the session's DPoP token to. Read FRESH per
   // request by the global fetch wrapper, so a post-login storage/WebID change
@@ -206,10 +244,19 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [activeStorage, setActive] = useState<string>();
   const [recentAccounts, setRecentAccounts] = useState<RecentAccount[]>([]);
   const [blockedPopup, setBlockedPopup] = useState<BlockedPopup | null>(null);
+  // Whether THIS device has a passkey registered for the active session's WebID
+  // (drives the "Sign in with passkey" / "Set up passkey" affordances).
+  const [hasPasskey, setHasPasskey] = useState(false);
   // A synchronous mirror of `blockedPopup` for `cancelLogin` (a stable callback) to read
   // whether a blocked-popup affordance is showing, without taking `blockedPopup` as a dep.
   const blockedPopupRef = useRef<BlockedPopup | null>(null);
   blockedPopupRef.current = blockedPopup;
+
+  /** The per-device passkey registry (client-only; created on first use). */
+  const getPasskeyRegistry = useCallback((): PasskeyRegistry => {
+    passkeyRegistryRef.current ??= new PasskeyRegistry();
+    return passkeyRegistryRef.current;
+  }, []);
 
   /** The popup controller (client-only; created on first use). */
   const getController = useCallback((): PopupLoginController => {
@@ -322,6 +369,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // production both app and IdP are HTTPS so it resolves there too
       // (solid-client-id skill).
       const clientId = new URL("/clientid.jsonld", location.href).toString();
+      // Capture it so the passkey registration ceremony binds the SAME client id.
+      clientIdRef.current = clientId;
 
       // Durable DPoP-bound refresh-token session (IndexedDB, origin-scoped) —
       // lets a returning user restore via a refresh grant (a fetch) instead of
@@ -357,6 +406,53 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         },
       );
 
+      // OPT-IN redirect-free PASSKEY re-auth, COMPOSED into the SINGLE provider the
+      // #123 proactive-auth-fetch installs (the old `ReactiveFetchManager([passkey,
+      // provider])` array is gone — there is no provider[0] slot anymore). The
+      // `composePasskeyProvider` wrapper re-expresses that first-`matches`-wins
+      // precedence: it routes `upgrade()` through the WebID-bound passkey provider
+      // when the passkey's host matcher matches, otherwise through the interactive
+      // `WebIdDPoPTokenProvider`; `matches`/`invalidate` stay the interactive
+      // provider's (the structural contract + stale-token retry are unchanged).
+      //
+      // Scoped to the SINGLE account being restored on this load (the persisted
+      // active WebID) — NOT every registered WebID. The vendored provider has no
+      // app-side WebID binding, so wiring it for all accounts could try account B's
+      // passkey while restoring account A on a shared resource host (roborev High).
+      // Built ONCE per load (matching the manager-built-once design); the payoff is
+      // RETURN visits to the last account. Absent entirely when that account has no
+      // passkey, so the pipeline is exactly today's redirect login.
+      //
+      // NO AUTO-PROMPT ON LOAD (the Issue-1 invariant): this does NOT widen the set
+      // of requests that reach `upgrade()`. The `canAttachNonInteractively` gate
+      // below still decides whether ANY upgrade happens — on a PASSIVE boot read
+      // with a dead refresh token it returns false, so `upgrade()` (and therefore
+      // the passkey `navigator.credentials.get()` native prompt) NEVER fires
+      // automatically on page load. The passkey path is reached only when the gate
+      // already permits a non-interactive attach (a live session) or on an explicit
+      // user-gesture login. So nothing user-visible (popup, tab, OR passkey prompt)
+      // happens automatically on load — only the silent refresh-grant.
+      const restoringWebId =
+        typeof localStorage !== "undefined"
+          ? localStorage.getItem(ACTIVE_WEBID_KEY)
+          : null;
+      const webAuthnProvider = restoringWebId
+        ? buildWebAuthnReauthProviderForWebId(
+            getPasskeyRegistry(),
+            restoringWebId,
+            clientId,
+            // On a wrong-account / failed passkey upgrade, the WebID-bound wrapper
+            // DELEGATES to this interactive provider (it owns its own fallback —
+            // there is no manager next-provider). It is structurally a
+            // TokenProvider (matches/upgrade/invalidate).
+            provider as unknown as TokenProviderLike,
+          )
+        : undefined;
+      const authProvider: AuthTokenProvider = composePasskeyProvider(
+        provider as unknown as AuthTokenProvider,
+        webAuthnProvider,
+      );
+
       // Patch the global `fetch` with the PROACTIVE-ATTACH wrapper (replacing the old
       // reactive `ReactiveFetchManager`, which sent every request unauthenticated first
       // and only upgraded on a 401 — paying a wasted 401→upgrade→retry per distinct URL,
@@ -369,7 +465,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // single time for the app's lifetime); we deliberately never un-patch (see the
       // cleanup note). `installProactiveAuthFetch` returns an uninstall we don't retain.
       installProactiveAuthFetch({
-        provider,
+        provider: authProvider,
         allowedOrigins: () => allowedOriginsRef.current,
         // The active issuer's origin — used ONLY to scope the provider-internal-OAuth
         // bypass (so a token/refresh/discovery call to the IdP is never re-upgraded, even
@@ -498,6 +594,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             // logged-out issuer / clobber a newer login). The superseding actor owns it.
             if (outcome && !cancelled && stillCurrent(establishGeneration)) {
               activeIssuerRef.current = issuer;
+              // Surface the passkey affordance for the restored account (UI flag
+              // only; the composed re-auth provider for this WebID was already
+              // wired at startup if a passkey exists for it).
+              setHasPasskey(getPasskeyRegistry().hasFor(last));
               restored = true;
             }
           }
@@ -772,6 +872,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             });
             setProfile(p);
             setActive(p.storages[0]);
+            // Surface the passkey affordance for this WebID (UI flag only). Note:
+            // the composed re-auth provider is built ONCE at startup for the
+            // PERSISTED active WebID, so a passkey set up later this session pays
+            // off on the NEXT load — which matches the design (return visits).
+            setHasPasskey(getPasskeyRegistry().hasFor(id));
             setStatus("logged-in");
           },
         });
@@ -849,7 +954,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         throw e;
       }
     },
-    [getController, refreshAllowedOrigins, closeCredentialBoundary, stillCurrent],
+    [
+      getController,
+      refreshAllowedOrigins,
+      closeCredentialBoundary,
+      stillCurrent,
+      getPasskeyRegistry,
+    ],
   );
 
   const login = useCallback(
@@ -962,6 +1073,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setProfile(undefined);
     setActive(undefined);
     setStatus("logged-out");
+    // Reset ONLY the UI flag — the passkey hint (and the on-device credential)
+    // intentionally OUTLIVE logout so the next visit can offer passkey sign-in.
+    setHasPasskey(false);
     pendingWebIdRef.current = undefined;
     if (typeof localStorage !== "undefined") {
       localStorage.removeItem(ACTIVE_WEBID_KEY);
@@ -1042,6 +1156,64 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const setActiveStorage = useCallback((storage: string) => setActive(storage), []);
 
+  /**
+   * Opt-in: set up a passkey for THIS device against the active session's issuer.
+   * Runs the broker register ceremony (`register-options` → create() → register)
+   * while the OP session is live, then records the per-device hint so the next
+   * visit can sign in redirect-free. The composed re-auth provider for this WebID
+   * is built the next time the app loads (the provider is composed at startup
+   * from the persisted active WebID); the payoff is on RETURN visits — the design.
+   *
+   * NO auto-provision: if the broker refuses (e.g. the WebID is not a provisioned
+   * mapping) {@link runRegisterPasskey} throws {@link WebAuthnRegistrationError}
+   * with the broker's own message — it propagates to the caller for display, and
+   * NOTHING is created.
+   */
+  const registerPasskey = useCallback(async () => {
+    const issuer = activeIssuerRef.current;
+    const clientId = clientIdRef.current;
+    if (!issuer || !clientId || status !== "logged-in" || !webId) {
+      throw new Error("Sign in before setting up a passkey.");
+    }
+    const result = await runRegisterPasskey({ issuer, clientId });
+    // Bind the hint to the ACTIVE account's WebID. The broker registers the
+    // credential against the session's resolved WebID; if its returned WebID
+    // disagrees with the signed-in account, do NOT record a hint that would let
+    // one account's passkey masquerade as another's (roborev High).
+    if (result.webId !== webId) {
+      throw new WebAuthnRegistrationError(
+        "The passkey was registered for a different account than the one you're signed in as. Please sign in again and retry.",
+        409,
+      );
+    }
+    // Resource hosts the composed provider must match on a protected read: the
+    // account's storages (storage host often != issuer host); the registry adds
+    // the WebID host + the issuer host defensively.
+    const resourceHosts = (profile?.storages ?? [])
+      .map((s) => {
+        try {
+          return new URL(s).host;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((h): h is string => h !== undefined);
+    const saved = getPasskeyRegistry().remember({
+      webId,
+      issuer,
+      resourceHosts,
+    });
+    // Tie hasPasskey to the PERSISTED hint: if the write failed, the next load
+    // cannot build a re-auth provider from the registry, so "Passkey ready on
+    // this device" would be a lie (roborev). Only flip it when the hint stuck.
+    if (saved) setHasPasskey(true);
+    // The credential exists on this device regardless; only the local hint may
+    // have failed to persist (storage blocked/full). Return that as a NON-fatal
+    // warning state — never an error — so the UI does not show a destructive
+    // "setup failed" message that invites a pointless duplicate retry (roborev).
+    return { saved };
+  }, [status, webId, profile, getPasskeyRegistry]);
+
   const session = useMemo<Session>(
     () => ({
       status,
@@ -1054,6 +1226,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       cancelLogin,
       logout,
       setActiveStorage,
+      hasPasskey,
+      registerPasskey,
     }),
     [
       status,
@@ -1066,6 +1240,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       cancelLogin,
       logout,
       setActiveStorage,
+      hasPasskey,
+      registerPasskey,
     ],
   );
 

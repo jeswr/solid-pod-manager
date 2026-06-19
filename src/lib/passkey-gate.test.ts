@@ -12,11 +12,15 @@ import {
 } from "./passkey-gate.js";
 
 const WEBID = "https://alice.solid-test.jeswr.org/profile/card#me";
+const OTHER_WEBID = "https://bob.solid-test.jeswr.org/profile/card#me";
 
 /** Default inputs = a logged-out boot with NO renewable interactive session. */
 const base: PasskeyGateInputs = {
   passkeyInteractiveWebId: undefined,
   hasPasskeyProvider: false,
+  // The per-load provider is built for WEBID by default (so a licence for WEBID
+  // matches the built-for account); tests that license a DIFFERENT WebID override it.
+  passkeyProviderWebId: WEBID,
   originAllowed: true,
   interactiveRenewable: false,
 };
@@ -104,9 +108,73 @@ describe("canAttachNonInteractivelyDecision — the passkey licence (roborev Fin
     const decision = canAttachNonInteractivelyDecision({
       passkeyInteractiveWebId: WEBID, // licensed by the user-gesture signInWithPasskey
       hasPasskeyProvider: true, // a passkey is wired for this WebID this load
+      passkeyProviderWebId: WEBID, // the per-load provider was built FOR this WebID
       originAllowed: true, // the WebID/profile read is inside the boundary
       interactiveRenewable: false, // refresh token DEAD — the exact flicker trigger
     });
     expect(decision).toBe(true); // attaches via the passkey path → no popup, no flash
+  });
+});
+
+describe("canAttachNonInteractivelyDecision — the licence is bound to the BUILT-FOR WebID (roborev H1)", () => {
+  it("a licence for a WebID DIFFERENT from the provider's built-for WebID does NOT qualify (identity-confusion fix)", () => {
+    // The H1 case: two passkey accounts; the per-load provider is built for WEBID,
+    // but the user clicked OTHER_WEBID's chip → its sign-in licenses OTHER_WEBID. The
+    // composed upgrade() would still route to WEBID's bound provider on a shared host,
+    // so the licence must NOT qualify the passkey branch. With a dead interactive
+    // session it falls through to interactiveRenewable=false ⇒ no attach.
+    expect(
+      canAttachNonInteractivelyDecision({
+        ...base,
+        passkeyInteractiveWebId: OTHER_WEBID, // clicked / licensed account B
+        passkeyProviderWebId: WEBID, // but the per-load provider is bound to A
+        hasPasskeyProvider: true,
+        originAllowed: true,
+        interactiveRenewable: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("a wrong-WebID licence still falls back to interactive renewability when available", () => {
+    // The licence is ignored (wrong account), but an interactive renewable session
+    // still attaches via the unchanged path — never blocked by the H1 mismatch.
+    expect(
+      canAttachNonInteractivelyDecision({
+        ...base,
+        passkeyInteractiveWebId: OTHER_WEBID,
+        passkeyProviderWebId: WEBID,
+        hasPasskeyProvider: true,
+        originAllowed: true,
+        interactiveRenewable: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("a matching licence (licensed === built-for) DOES qualify with a dead interactive session", () => {
+    expect(
+      canAttachNonInteractivelyDecision({
+        ...base,
+        passkeyInteractiveWebId: WEBID,
+        passkeyProviderWebId: WEBID,
+        hasPasskeyProvider: true,
+        originAllowed: true,
+        interactiveRenewable: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("a licence with NO built-for WebID (no provider wired) does NOT qualify", () => {
+    // Defense in depth: even if a licence ref were somehow set with no provider built,
+    // an undefined built-for WebID can never equal a defined licensed WebID.
+    expect(
+      canAttachNonInteractivelyDecision({
+        ...base,
+        passkeyInteractiveWebId: WEBID,
+        passkeyProviderWebId: undefined,
+        hasPasskeyProvider: false,
+        originAllowed: true,
+        interactiveRenewable: false,
+      }),
+    ).toBe(false);
   });
 });

@@ -66,6 +66,7 @@ import { runBootRestore } from "@/lib/boot-restore";
 import {
   buildWebAuthnReauthProviderForWebId,
   PasskeyRegistry,
+  rejectOnlyFallback,
   type TokenProviderLike,
 } from "@/lib/webauthn-reauth";
 import {
@@ -242,6 +243,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // The composed passkey provider built this load (used by the gate to test whether
   // a request host is one the passkey can serve). Null when no passkey is wired.
   const passkeyProviderRef = useRef<{ matches(request: Request): Promise<boolean> } | null>(null);
+  // The WebID the per-load passkey provider above was ACTUALLY BUILT FOR (the
+  // `WebIdBoundWebAuthnProvider`'s `expectedWebId`), captured alongside it (roborev H1).
+  // The per-load passkey provider serves exactly ONE WebID (the persisted active /
+  // most-recent passkey WebID). `signInWithPasskey(id)` must therefore REFUSE any `id`
+  // that is NOT this built-for WebID — otherwise clicking account B's chip while the
+  // provider is bound to A would license B's boundary + publish B, but the composed
+  // `upgrade()` would route to A's bound provider on a shared resource host and, if the
+  // native prompt returned A's credential (webid===A===expectedWebId), attach A's token
+  // while the UI shows B (identity confusion). Undefined when no passkey provider is wired.
+  const passkeyProviderWebIdRef = useRef<string | undefined>(undefined);
   // The CURRENT credential-origin boundary — the set of resource origins the
   // proactive-auth fetch may attach the session's DPoP token to. Read FRESH per
   // request by the global fetch wrapper, so a post-login storage/WebID change
@@ -492,17 +503,50 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             // On a wrong-account / failed passkey upgrade, the WebID-bound wrapper
             // DELEGATES to this interactive provider (it owns its own fallback —
             // there is no manager next-provider). It is structurally a
-            // TokenProvider (matches/upgrade/invalidate).
+            // TokenProvider (matches/upgrade/invalidate). This is the BACKGROUND
+            // variant: a popup it opens lives outside a user gesture, blocked but
+            // recovered via the blocked-popup affordance (correct for passive reads).
             provider as unknown as TokenProviderLike,
+          )
+        : undefined;
+      // REJECT-FAST variant for the EXPLICIT user-gesture `signInWithPasskey` path
+      // (roborev H2): same WebID + host matcher, but its fallback REJECTS instead of
+      // delegating to an interactive popup inside `upgrade()`. A failed ceremony then
+      // surfaces as a rejection of the protected read, so the recent-account click's
+      // `.catch` runs the interactive `login()` SYNCHRONOUSLY under the live gesture
+      // (its popup opens under activation) — never a popup blocked outside the click.
+      // On the happy path no popup is ever created on this path, so nothing flashes.
+      const explicitWebAuthnProvider = restoringWebId
+        ? buildWebAuthnReauthProviderForWebId(
+            registry,
+            restoringWebId,
+            clientId,
+            rejectOnlyFallback,
           )
         : undefined;
       // Capture the per-load passkey provider so the session-liveness gate can test
       // whether a request host is one this passkey serves (the Finding-3 gate widening,
       // licensed ONLY by a user-gesture `signInWithPasskey`).
       passkeyProviderRef.current = webAuthnProvider ?? null;
+      // Capture the WebID this provider was BUILT FOR (roborev H1): `signInWithPasskey`
+      // and the gate's passkey branch require the clicked / licensed WebID to equal it,
+      // so the licensed boundary can never diverge from the provider the composed
+      // `upgrade()` actually routes to (identity-confusion fix). Only meaningful when a
+      // provider is wired.
+      passkeyProviderWebIdRef.current = webAuthnProvider ? restoringWebId : undefined;
       const authProvider: AuthTokenProvider = composePasskeyProvider(
         provider as unknown as AuthTokenProvider,
         webAuthnProvider,
+        // The reject-fast explicit provider, selected by the composer ONLY while a
+        // user-gesture passkey sign-in is in flight (the licence ref is set for the
+        // built-for WebID — H1 guarantees the licence WebID equals the built-for one).
+        explicitWebAuthnProvider !== undefined
+          ? {
+              provider: explicitWebAuthnProvider,
+              isExplicitPasskeySignIn: () =>
+                passkeyInteractiveWebIdRef.current !== undefined,
+            }
+          : undefined,
       );
 
       // Patch the global `fetch` with the PROACTIVE-ATTACH wrapper (replacing the old
@@ -581,6 +625,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           return canAttachNonInteractivelyDecision({
             passkeyInteractiveWebId: passkeyInteractiveWebIdRef.current,
             hasPasskeyProvider: passkeyProviderRef.current !== null,
+            // H1: only license the passkey branch when the licensed WebID equals the
+            // WebID the per-load passkey provider was built for — so the licensed
+            // boundary can never diverge from the provider the composed `upgrade()`
+            // actually routes to (identity-confusion fix). Second line of defense:
+            // `WebIdBoundWebAuthnProvider` fail-closed-delegates a wrong-account token.
+            passkeyProviderWebId: passkeyProviderWebIdRef.current,
             originAllowed,
             interactiveRenewable,
           });
@@ -1166,11 +1216,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
    *      persist → publish.
    *
    * REJECTS (so the caller falls back to the interactive `login`) when no passkey
-   * is wired for `webId` this load, or the ceremony / profile read fails. The
-   * passkey provider's own `upgrade()` already DELEGATES a failed ceremony to the
-   * interactive fallback, but that fallback needs a popup which only exists under a
-   * user gesture — so on failure we surface the error and let the recent-account
-   * CLICK (a live user gesture) drive the interactive `login()` fallback.
+   * is wired for `webId` this load, when `webId` is NOT the WebID the per-load
+   * passkey provider was built for (roborev H1 — the provider serves exactly one
+   * account, so a second passkey account clicked this load takes the interactive
+   * path THIS load and gets the passkey path on a later load once it becomes the
+   * active/most-recent account), or when the ceremony / profile read fails. On the
+   * EXPLICIT path the passkey provider uses the REJECT-FAST fallback (roborev H2),
+   * so a failed/wrong-account ceremony REJECTS the protected read immediately rather
+   * than trying an interactive popup inside `upgrade()` (which would run outside the
+   * click's activation and be popup-blocked) — letting the recent-account CLICK (a
+   * live user gesture) drive the interactive `login()` fallback with its popup under
+   * activation.
    *
    * NO-AUTO-PROMPT-ON-LOAD is preserved: this path is reachable ONLY from a
    * user-gesture click; the boot restore never calls it, and the licence ref is
@@ -1181,8 +1237,21 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // No passkey wired for this WebID this load → cannot serve redirect-free;
       // reject so the caller uses the interactive path. (Built once at startup for
       // the active / most-recent passkey WebID — the roborev-High one-account scoping.)
+      //
+      // BIND TO THE BUILT-FOR WebID (roborev H1): the per-load passkey provider serves
+      // exactly the ONE WebID it was built for (`passkeyProviderWebIdRef`). If the user
+      // clicks a DIFFERENT passkey account's chip (`id !== passkeyProviderWebIdRef`), the
+      // composed `upgrade()` would still route to the BUILT-FOR account's bound provider
+      // on a shared resource host — so accepting the licence here would arm + publish the
+      // clicked account while attaching the built-for account's credential (identity
+      // confusion). THROW instead, so `attemptRecent`'s `.catch` falls back to the
+      // interactive `login()` THIS load; this account gets the passkey path on a
+      // subsequent load once it becomes the active/most-recent account (the one-account-
+      // per-load design). The `hasFor(id)` check below stays as defense in depth.
       if (
         passkeyProviderRef.current === null ||
+        passkeyProviderWebIdRef.current === undefined ||
+        id !== passkeyProviderWebIdRef.current ||
         !getPasskeyRegistry().hasFor(id)
       ) {
         throw new Error("No passkey is set up for this account on this device.");

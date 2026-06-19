@@ -35,6 +35,18 @@ export interface PasskeyGateInputs {
   passkeyInteractiveWebId: string | undefined;
   /** Whether a composed passkey provider was wired this load (else there is nothing to license). */
   hasPasskeyProvider: boolean;
+  /**
+   * The WebID the per-load passkey provider was BUILT FOR — the
+   * `WebIdBoundWebAuthnProvider`'s `expectedWebId` (roborev H1). The per-load
+   * passkey provider serves exactly this one WebID, so the passkey branch must
+   * only fire when the LICENSED WebID equals it: a licence for a DIFFERENT WebID
+   * (a second passkey account clicked while the provider is bound to the first)
+   * must NOT qualify — the composed `upgrade()` would otherwise route to the
+   * built-for account's provider and risk attaching ITS credential while the UI
+   * shows the clicked account (identity confusion). `undefined` when no provider
+   * is wired.
+   */
+  passkeyProviderWebId: string | undefined;
   /** Whether the request URL is inside the current credential boundary (own-pod origins). */
   originAllowed: boolean;
   /**
@@ -50,11 +62,13 @@ export interface PasskeyGateInputs {
  *
  * Two ways to qualify:
  *  1. PASSKEY LICENCE — a user-gesture passkey sign-in is in flight
- *     (`passkeyInteractiveWebId` set), a passkey provider is wired, and the
- *     request is inside the credential boundary. The composed `upgrade()` then
- *     serves it via the native passkey prompt (no window). This is what lets a
- *     DEAD-refresh-token passkey account sign in redirect-free. UNSET on boot ⇒
- *     a passive boot read never qualifies here.
+ *     (`passkeyInteractiveWebId` set), a passkey provider is wired, the LICENSED
+ *     WebID equals the provider's BUILT-FOR WebID (`passkeyProviderWebId` — roborev
+ *     H1: the per-load provider serves only that one account), and the request is
+ *     inside the credential boundary. The composed `upgrade()` then serves it via
+ *     the native passkey prompt (no window). This is what lets a DEAD-refresh-token
+ *     passkey account sign in redirect-free. UNSET on boot ⇒ a passive boot read
+ *     never qualifies here.
  *  2. INTERACTIVE RENEWAL — the pre-existing path: the interactive provider holds
  *     a live/refresh token (a plain fetch, no popup).
  *
@@ -62,9 +76,21 @@ export interface PasskeyGateInputs {
  * behaviour for a dead session).
  */
 export function canAttachNonInteractivelyDecision(inputs: PasskeyGateInputs): boolean {
-  const { passkeyInteractiveWebId, hasPasskeyProvider, originAllowed, interactiveRenewable } =
-    inputs;
-  if (passkeyInteractiveWebId !== undefined && hasPasskeyProvider && originAllowed) {
+  const {
+    passkeyInteractiveWebId,
+    hasPasskeyProvider,
+    passkeyProviderWebId,
+    originAllowed,
+    interactiveRenewable,
+  } = inputs;
+  if (
+    passkeyInteractiveWebId !== undefined &&
+    hasPasskeyProvider &&
+    // H1: the licence is only valid for the account the per-load provider was built
+    // for. A licence for a DIFFERENT WebID must fall through to interactive renewal.
+    passkeyInteractiveWebId === passkeyProviderWebId &&
+    originAllowed
+  ) {
     return true;
   }
   return interactiveRenewable;

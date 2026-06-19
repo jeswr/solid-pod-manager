@@ -57,9 +57,13 @@
  *     affordance, never under the gesture). Instead the explicit passkey provider uses
  *     the REJECT-FAST fallback (`rejectOnlyFallback`): a failed ceremony REJECTS the
  *     read immediately, and the recent-account click's `.catch` then runs the
- *     interactive `login()` SYNCHRONOUSLY under the same live gesture (its popup opens
- *     under activation). On the HAPPY path no popup is ever created on the explicit
- *     path, so nothing flashes.
+ *     interactive `login()`. That `.catch` also fires AFTER the async ceremony, so the
+ *     click's transient activation may already be spent — `login()`'s popup may then be
+ *     BLOCKED and recovers cleanly via the app's blocked-popup affordance (a button
+ *     click supplies fresh activation). The genuine value of reject-fast is therefore
+ *     NOT "the fallback popup opens under the gesture" but that `upgrade()` does not
+ *     silently open a popup OUTSIDE any UI control on the explicit path. On the HAPPY
+ *     path no popup is ever created on the explicit path, so nothing flashes.
  * `composePasskeyProvider` picks between the two via the `isExplicitPasskeySignIn`
  * predicate (the session provider supplies it from the user-gesture passkey LICENCE
  * ref). When no explicit provider is supplied the behaviour is exactly the
@@ -103,9 +107,11 @@ export type InteractiveProvider = AuthTokenProvider;
  * INSTEAD of `passkey` (the background-fallback variant) WHENEVER
  * `isExplicitPasskeySignIn()` is true — i.e. a user-gesture `signInWithPasskey` is
  * in flight. A failed ceremony then REJECTS the read so the recent-account click's
- * `.catch` can open the interactive popup under the live gesture, rather than
- * `upgrade()` opening one outside activation (which the popup blocker catches). When
- * `explicit`/the predicate are omitted, behaviour is the single-provider one.
+ * `.catch` runs the interactive `login()` — and crucially `upgrade()` does NOT itself
+ * open a popup outside any UI control. (That `.catch` fires after the async ceremony,
+ * so the click's activation may be spent and `login()`'s popup may be blocked; it then
+ * recovers via the blocked-popup affordance.) When `explicit`/the predicate are
+ * omitted, behaviour is the single-provider one.
  */
 export function composePasskeyProvider(
   interactive: InteractiveProvider,
@@ -129,10 +135,13 @@ export function composePasskeyProvider(
       if (await passkey.matches(request)) {
         // EXPLICIT vs BACKGROUND (roborev H2): an in-flight user-gesture passkey
         // sign-in uses the REJECT-FAST provider, so a failed ceremony rejects the
-        // read immediately (the click's `.catch` then opens the interactive popup
-        // under the live gesture). Read the predicate FRESH per request so it
-        // reflects the licence ref at the moment of the read. Both providers share
-        // the same host matcher (`passkey.matches`), so this never widens the set.
+        // read immediately (the click's `.catch` then runs the interactive `login()`;
+        // `upgrade()` never opens a popup itself here). The fallback popup may be
+        // blocked — the click's activation can be spent by the async ceremony — and
+        // recovers via the blocked-popup affordance. Read the predicate FRESH per
+        // request so it reflects the licence ref at the moment of the read. Both
+        // providers share the same host matcher (`passkey.matches`), so this never
+        // widens the set.
         const selected =
           explicit !== undefined && explicit.isExplicitPasskeySignIn()
             ? explicit.provider

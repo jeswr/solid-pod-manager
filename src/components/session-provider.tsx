@@ -146,8 +146,12 @@ export interface Session {
    * window) for the first protected read, then reads the profile + publishes.
    * Call DIRECTLY from the recent-account click handler (a user gesture). REJECTS
    * if no passkey is wired for `webId` this load, or the ceremony / profile read
-   * fails — the caller then falls through to the interactive {@link login} path
-   * (whose popup, if any, still opens under that same user click).
+   * fails — the caller then falls through to the interactive {@link login} path.
+   * That fallback runs AFTER the async ceremony, so the original click's transient
+   * activation may be SPENT; the interactive popup may then be BLOCKED and recovers
+   * via the existing blocked-popup ("Continue signing in") affordance rather than
+   * opening under the live gesture. The value preserved is that the HAPPY passkey
+   * path opens NO popup at all (nothing flashes automatically).
    */
   signInWithPasskey(webId: string, issuer: string): Promise<void>;
   /** Cancel an in-flight login: closes the popup, rejects the pending flow. */
@@ -511,11 +515,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         : undefined;
       // REJECT-FAST variant for the EXPLICIT user-gesture `signInWithPasskey` path
       // (roborev H2): same WebID + host matcher, but its fallback REJECTS instead of
-      // delegating to an interactive popup inside `upgrade()`. A failed ceremony then
-      // surfaces as a rejection of the protected read, so the recent-account click's
-      // `.catch` runs the interactive `login()` SYNCHRONOUSLY under the live gesture
-      // (its popup opens under activation) — never a popup blocked outside the click.
-      // On the happy path no popup is ever created on this path, so nothing flashes.
+      // delegating to an interactive popup inside `upgrade()`. The genuine value: a failed
+      // ceremony surfaces as a rejection of the protected read so that `upgrade()` NEVER
+      // opens a popup ITSELF on the explicit path (which would be an unactivated window
+      // outside any UI control) — instead the recent-account click's `.catch` runs the
+      // interactive `login()`. That `.catch` fires AFTER the async ceremony, so the click's
+      // activation may already be spent; `login()`'s popup may then be BLOCKED and recovers
+      // via the blocked-popup affordance. On the happy path no popup is created on this
+      // path at all, so nothing flashes.
       const explicitWebAuthnProvider = restoringWebId
         ? buildWebAuthnReauthProviderForWebId(
             registry,

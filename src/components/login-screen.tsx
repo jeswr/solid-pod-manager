@@ -172,10 +172,12 @@ export function LoginScreen() {
    * on the first protected read), killing the "tab rapidly opening and closing"
    * flicker the old `login(..., silentFirst)` path produced for passkey accounts
    * (dead refresh token → about:blank popup → fast `prompt=none` against the live
-   * IdP cookie). The recent-account click IS a user gesture, so if the passkey
-   * ceremony fails we fall through to the interactive `login()` — whose popup, if
-   * any, still opens under that same click (acceptable; NOT the automatic-on-load
-   * flicker this fix targets).
+   * IdP cookie). If the passkey ceremony fails we fall through to the interactive
+   * `login()`. That fallback runs AFTER the async ceremony, so the click's transient
+   * activation may be SPENT — `login()`'s popup may then be BLOCKED and recovers via
+   * the existing blocked-popup ("Continue signing in") affordance rather than opening
+   * under the click. That is acceptable: it is a one-click recovery, NOT the
+   * automatic-on-load flicker this fix targets, and the happy path opens no popup.
    *
    * For a NON-passkey account, behaviour is unchanged: when the app still holds a
    * session / refresh token for that issuer, NO popup opens; otherwise the silent
@@ -186,11 +188,17 @@ export function LoginScreen() {
     setError(null);
     setIssuerChoices(null);
     if (accountHasPasskey(account.webId) && account.issuer) {
-      // No await before the call: keep the user activation live for the fallback popup.
+      // No await before the call: start the passkey ceremony synchronously off the click.
       signInWithPasskey(account.webId, account.issuer).catch((e) => {
         if (e instanceof LoginSupersededError) return; // benign (the #123 fence)
-        // The passkey ceremony / read failed → fall back to the interactive login
-        // under the SAME user click (its popup, if needed, opens here).
+        // The passkey ceremony / read failed → fall back to the interactive `login()`.
+        // This `.catch` runs AFTER the async ceremony, so the original click's transient
+        // activation is likely SPENT by now: `login()`'s `window.open` may be BLOCKED. That
+        // is fine — it recovers cleanly via the existing blocked-popup ("Continue signing
+        // in") affordance (SessionProvider), whose button click supplies fresh activation.
+        // The property this path preserves is that NOTHING flashes automatically: the happy
+        // passkey path opens no popup at all, and the failure path degrades to a one-click
+        // affordance rather than an unactivated/surprise window.
         login(account.webId, { issuer: account.issuer, silentFirst: true }).catch(fail);
       });
       return;

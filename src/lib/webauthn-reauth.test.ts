@@ -1,0 +1,307 @@
+// AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate; see docs/MODEL-PROVENANCE.md
+// vitest — node env, no DOM, no network. Exercises the per-device passkey memory
+// and the WebAuthnConfig builder (the opt-in switch for redirect-free re-auth).
+import { describe, it, expect, beforeEach } from "vitest";
+import { WebAuthnTokenProvider } from "@jeswr/solid-webauthn-client";
+import type { KeyValueStorage } from "./login-ux.js";
+import {
+  buildWebAuthnConfig,
+  buildWebAuthnReauthProviderForWebId,
+  issuerHost,
+  PasskeyRegistry,
+  webIdClaimOf,
+  WebIdBoundWebAuthnProvider,
+} from "./webauthn-reauth.js";
+
+/** In-memory KeyValueStorage stub (matches localStorage's shape). */
+class MemoryStorage implements KeyValueStorage {
+  #map = new Map<string, string>();
+  getItem(key: string): string | null {
+    return this.#map.get(key) ?? null;
+  }
+  setItem(key: string, value: string): void {
+    this.#map.set(key, value);
+  }
+  raw(key: string): string | null {
+    return this.getItem(key);
+  }
+  poison(key: string): void {
+    this.#map.set(key, "{not json");
+  }
+}
+
+const ISSUER = "https://idp.solid-test.jeswr.org";
+// A common Solid layout: storage host differs from the issuer host.
+const WEBID = "https://alice.solid-test.jeswr.org/profile/card#me";
+const STORAGE = "https://alice.solid-test.jeswr.org/storage/";
+const CLIENT_ID = "https://app.solid-test.jeswr.org/clientid.jsonld";
+
+const reg = (over: Partial<import("./webauthn-reauth.js").PasskeyRegistration> = {}) => ({
+  webId: WEBID,
+  issuer: ISSUER,
+  resourceHosts: [new URL(STORAGE).host],
+  ...over,
+});
+
+describe("issuerHost", () => {
+  it("returns the host of an issuer origin (ignoring path/scheme)", () => {
+    expect(issuerHost("https://idp.solid-test.jeswr.org")).toBe("idp.solid-test.jeswr.org");
+    expect(issuerHost("https://idp.solid-test.jeswr.org/oidc")).toBe("idp.solid-test.jeswr.org");
+  });
+});
+
+describe("PasskeyRegistry", () => {
+  let storage: MemoryStorage;
+  let registry: PasskeyRegistry;
+  beforeEach(() => {
+    storage = new MemoryStorage();
+    registry = new PasskeyRegistry(storage);
+  });
+
+  it("starts empty and reports no passkey", () => {
+    expect(registry.list()).toEqual([]);
+    expect(registry.hasFor(WEBID)).toBe(false);
+  });
+
+  it("remembers a registration and matches by exact WebID", () => {
+    expect(registry.remember(reg())).toBe(true);
+    expect(registry.hasFor(WEBID)).toBe(true);
+    // A DIFFERENT WebID on the SAME issuer must NOT be considered registered
+    // (roborev High: no cross-account passkey bleed).
+    expect(registry.hasFor("https://bob.solid-test.jeswr.org/profile/card#me")).toBe(false);
+  });
+
+  it("deduplicates by WebID (re-registering refreshes, does not duplicate)", () => {
+    registry.remember(reg());
+    registry.remember(reg({ resourceHosts: ["new.example"] }));
+    expect(registry.list()).toHaveLength(1);
+    expect(registry.list()[0].resourceHosts).toEqual(["new.example"]);
+  });
+
+  it("keeps two distinct WebIDs on the same issuer separate", () => {
+    registry.remember(reg());
+    registry.remember(reg({ webId: "https://bob.solid-test.jeswr.org/profile/card#me" }));
+    expect(registry.list()).toHaveLength(2);
+    expect(registry.hasFor(WEBID)).toBe(true);
+    expect(registry.hasFor("https://bob.solid-test.jeswr.org/profile/card#me")).toBe(true);
+  });
+
+  it("forget removes only the matching WebID", () => {
+    registry.remember(reg());
+    registry.remember(reg({ webId: "https://c.example/#me" }));
+    registry.forget(WEBID);
+    expect(registry.hasFor(WEBID)).toBe(false);
+    expect(registry.hasFor("https://c.example/#me")).toBe(true);
+  });
+
+  it("survives corrupt storage (never throws)", () => {
+    storage.poison("solid-pod-manager:passkey-issuers");
+    expect(registry.list()).toEqual([]);
+    expect(registry.hasFor(WEBID)).toBe(false);
+  });
+
+  it("remember returns false (not throw) when storage is unavailable", () => {
+    const blocked = {
+      getItem: () => null,
+      setItem: () => {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    };
+    const r = new PasskeyRegistry(blocked);
+    expect(r.remember(reg())).toBe(false); // credential exists; hint just unsaved
+  });
+});
+
+describe("buildWebAuthnConfig", () => {
+  it("returns undefined when there are no registrations (opt-out by default)", () => {
+    expect(buildWebAuthnConfig([], CLIENT_ID)).toBeUndefined();
+  });
+
+  it("keys config by RESOURCE host (storage host != issuer host) and binds clientId", () => {
+    const config = buildWebAuthnConfig([reg()], CLIENT_ID);
+    expect(config).toBeDefined();
+    const storageHost = new URL(STORAGE).host;
+    // The storage host (where protected reads land) is keyed — the bug roborev
+    // flagged: keying by issuer host alone would never match resource reads.
+    expect(config?.[storageHost]).toEqual({ issuer: ISSUER, clientId: CLIENT_ID });
+    // The issuer host is also covered defensively (broker-cohosted resources).
+    expect(config?.[issuerHost(ISSUER)]).toEqual({ issuer: ISSUER, clientId: CLIENT_ID });
+  });
+
+  it("always covers the WebID host even if it is not in resourceHosts", () => {
+    const config = buildWebAuthnConfig([reg({ resourceHosts: [] })], CLIENT_ID);
+    expect(config?.[new URL(WEBID).host]).toBeDefined();
+  });
+});
+
+describe("buildWebAuthnReauthProviderForWebId", () => {
+  const noopFallback = { matches: async () => true, upgrade: async (r: Request) => r };
+
+  it("returns undefined when that WebID has no passkey", () => {
+    const registry = new PasskeyRegistry(new MemoryStorage());
+    expect(
+      buildWebAuthnReauthProviderForWebId(registry, WEBID, CLIENT_ID, noopFallback),
+    ).toBeUndefined();
+  });
+
+  it("returns a WebID-bound provider for a registered WebID", () => {
+    const registry = new PasskeyRegistry(new MemoryStorage());
+    registry.remember(reg());
+    const provider = buildWebAuthnReauthProviderForWebId(registry, WEBID, CLIENT_ID, noopFallback);
+    expect(provider).toBeInstanceOf(WebIdBoundWebAuthnProvider);
+  });
+
+  it("is scoped to the requested WebID only — a different account's passkey is NOT wired", () => {
+    const registry = new PasskeyRegistry(new MemoryStorage());
+    registry.remember(reg()); // alice
+    // Restoring bob (no passkey) must NOT pick up alice's passkey on the shared host.
+    expect(
+      buildWebAuthnReauthProviderForWebId(
+        registry,
+        "https://bob.solid-test.jeswr.org/profile/card#me",
+        CLIENT_ID,
+        noopFallback,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("matches a request to the STORAGE host (not just the issuer), declines others", async () => {
+    const registry = new PasskeyRegistry(new MemoryStorage());
+    registry.remember(reg());
+    const provider = buildWebAuthnReauthProviderForWebId(registry, WEBID, CLIENT_ID, noopFallback);
+    expect(provider).toBeDefined();
+    // Protected read on the storage host — must match (the resource-host fix).
+    await expect(
+      provider?.matches(new Request(`${STORAGE}private/notes`)),
+    ).resolves.toBe(true);
+    await expect(
+      provider?.matches(new Request("https://unrelated.example/x")),
+    ).resolves.toBe(false);
+  });
+});
+
+/** Minimal unsigned JWT with a given `webid` claim (no crypto — payload only). */
+function jwtWithWebId(webid: string): string {
+  const b64 = (o: unknown) =>
+    Buffer.from(JSON.stringify(o)).toString("base64url");
+  return `${b64({ alg: "ES256", typ: "at+jwt" })}.${b64({ webid })}.sig`;
+}
+
+describe("webIdClaimOf", () => {
+  it("reads the webid claim from an at+jwt", () => {
+    expect(webIdClaimOf(jwtWithWebId(WEBID))).toBe(WEBID);
+  });
+  it("returns undefined for malformed tokens (never throws)", () => {
+    expect(webIdClaimOf("not-a-jwt")).toBeUndefined();
+    expect(webIdClaimOf("")).toBeUndefined();
+    expect(webIdClaimOf("a.b.c")).toBeUndefined(); // b is not base64 JSON
+  });
+});
+
+describe("WebIdBoundWebAuthnProvider", () => {
+  // A fake inner provider that mints a token for a CONFIGURABLE webid — stands in
+  // for the platform prompt returning a credential for some account on the RP.
+  function fakeInner(mintedWebId: string) {
+    return {
+      matches: async () => true,
+      upgrade: async (req: Request) =>
+        new Request(req, {
+          headers: { authorization: `DPoP ${jwtWithWebId(mintedWebId)}` },
+        }),
+      invalidate: async () => {},
+    } as unknown as WebAuthnTokenProvider;
+  }
+
+  // A fallback that tags the request so we can assert delegation happened. Real
+  // life: the interactive WebIdDPoPTokenProvider (popup/silent code flow).
+  function fakeFallback() {
+    const calls: Request[] = [];
+    const fallback = {
+      matches: async () => true,
+      upgrade: async (req: Request) => {
+        calls.push(req);
+        return new Request(req, { headers: { "x-fallback": "1" } });
+      },
+    };
+    return { fallback, calls };
+  }
+
+  it("returns the upgraded request when the minted WebID matches the expected one", async () => {
+    const { fallback, calls } = fakeFallback();
+    const p = new WebIdBoundWebAuthnProvider(fakeInner(WEBID), fallback, WEBID);
+    const out = await p.upgrade(new Request(`${STORAGE}x`));
+    expect(out.headers.get("authorization")).toContain("DPoP ");
+    expect(calls).toHaveLength(0); // no fallback when the account matches
+  });
+
+  it("DELEGATES to the interactive fallback when the prompt returns a DIFFERENT account on the same RP (roborev High)", async () => {
+    const bob = "https://bob.solid-test.jeswr.org/profile/card#me";
+    const { fallback, calls } = fakeFallback();
+    const p = new WebIdBoundWebAuthnProvider(fakeInner(bob), fallback, WEBID);
+    // Account A expected, credential resolved to B → delegate (NOT throw): the
+    // manager has no next-provider fallback of its own.
+    const out = await p.upgrade(new Request(`${STORAGE}x`));
+    expect(out.headers.get("x-fallback")).toBe("1");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("DELEGATES on an unreadable token rather than accepting or rejecting", async () => {
+    const bad = {
+      matches: async () => true,
+      upgrade: async (req: Request) =>
+        new Request(req, { headers: { authorization: "DPoP garbage" } }),
+    } as unknown as WebAuthnTokenProvider;
+    const { fallback, calls } = fakeFallback();
+    const p = new WebIdBoundWebAuthnProvider(bad, fallback, WEBID);
+    const out = await p.upgrade(new Request(`${STORAGE}x`));
+    expect(out.headers.get("x-fallback")).toBe("1");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("DELEGATES when the passkey ceremony/exchange itself fails (no rejected fetch)", async () => {
+    const failing = {
+      matches: async () => true,
+      upgrade: async () => {
+        throw new Error("user cancelled the passkey prompt");
+      },
+    } as unknown as WebAuthnTokenProvider;
+    const { fallback, calls } = fakeFallback();
+    const p = new WebIdBoundWebAuthnProvider(failing, fallback, WEBID);
+    const out = await p.upgrade(new Request(`${STORAGE}x`));
+    expect(out.headers.get("x-fallback")).toBe("1");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("preserves a body-bearing request's body for the fallback after a wrong-account token (roborev)", async () => {
+    const bob = "https://bob.solid-test.jeswr.org/profile/card#me";
+    // Inner provider CONSUMES the body (like the real DPoP-bound rewrap would).
+    const consuming = {
+      matches: async () => true,
+      upgrade: async (req: Request) => {
+        await req.text(); // drain the original body stream
+        return new Request("https://x.example/", {
+          headers: { authorization: `DPoP ${jwtWithWebId(bob)}` },
+        });
+      },
+    } as unknown as WebAuthnTokenProvider;
+    // The fallback reads the body it receives — it must still be there.
+    const bodies: string[] = [];
+    const fallback = {
+      matches: async () => true,
+      upgrade: async (req: Request) => {
+        // Read the body BEFORE re-wrapping (clone first so the wrapped Request
+        // still has a usable body — a test-only nicety).
+        bodies.push(await req.clone().text());
+        return new Request(req, { headers: { "x-fallback": "1" } });
+      },
+    };
+    const p = new WebIdBoundWebAuthnProvider(consuming, fallback, WEBID);
+    const req = new Request(`${STORAGE}private/notes`, {
+      method: "PUT",
+      body: "the-payload",
+    });
+    const out = await p.upgrade(req);
+    expect(out.headers.get("x-fallback")).toBe("1");
+    expect(bodies).toEqual(["the-payload"]); // body survived for the fallback
+  });
+});

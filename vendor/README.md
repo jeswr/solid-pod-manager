@@ -41,3 +41,44 @@ PR #…` comment blocks there.
 Until then: any upstream-worthy fix made here must ALSO be pushed to the matching
 upstream PR branch and this tarball re-packed from the integration branch (that is how
 this tarball was produced; its provenance is reproducible with `npm pack` on that branch).
+
+---
+
+# Vendored `@jeswr/solid-webauthn-client` (+ `-protocol`) — passkey re-auth (A5)
+
+The redirect-free WebAuthn (passkey) re-auth client for Solid-OIDC, wired into the
+login UX (`src/lib/webauthn-reauth.ts`, `src/lib/webauthn-register.ts`). Vendored as
+tarballs for the same reason as the reactive-auth fork above: the maintainer's policy
+is to vendor unpublished `@jeswr/*`/`@solid/*` packages rather than depend on a
+registry release that does not yet exist.
+
+## What is vendored and why
+
+| Tarball | Source | Notes |
+|----|----|----|
+| `jeswr-solid-webauthn-protocol-0.0.0-a5-848ab65.tgz` | `npm pack` of `@jeswr/solid-webauthn-protocol` from `~/Documents/GitHub/jeswr/solid-webauthn` @ `848ab65` (branch `feat/webauthn-client-a5`) | shared wire contract (bundle codec, the `urn:solid:token-type:webauthn-assertion` URN, registration/assertion types) — the single source of truth shared with the broker. |
+| `jeswr-solid-webauthn-client-0.0.0-a5-848ab65.tgz` | `npm pack` of `@jeswr/solid-webauthn-client` from the same workspace/commit | `WebAuthnTokenProvider` (a `TokenProvider` for the reactive-auth pipeline), `WebAuthnTokenExchange`, `dpopBoundRequest`. Its `@jeswr/solid-webauthn-protocol` dependency was repointed from `"*"` to `file:jeswr-solid-webauthn-protocol-0.0.0-a5-848ab65.tgz` so npm resolves it from this `vendor/` dir with no registry. Its other deps (`@simplewebauthn/browser`, `oauth4webapi`) resolve from the registry. |
+
+Wiring (post-#123): the client is NO LONGER registered in a `ReactiveFetchManager([...])`
+array — the #123 proactive-auth-fetch rewrite installs a SINGLE token provider into
+`installProactiveAuthFetch`. The `WebAuthnTokenProvider` is instead COMPOSED with the
+interactive `WebIdDPoPTokenProvider` (`src/lib/passkey-provider.ts`): the composed
+provider routes `upgrade()` through the WebID-bound passkey provider when its
+`matches(request)` is true, falling back to the interactive provider on a wrong-account
+or failed ceremony. See `docs/passkey-webauthn-port-design.md` §5 in prod-solid-server
+for the locked design and the no-auto-provision contract.
+
+## Removal checklist (when the `@jeswr/*` packages are published)
+
+1. `package.json`: replace the three `file:vendor/jeswr-solid-webauthn-*` deps with the
+   published versions from the registry; `npm install`.
+2. Delete the two `jeswr-solid-webauthn-*-a5-848ab65.tgz` tarballs.
+3. Re-pack reproducibly: `npm pack --workspace=@jeswr/solid-webauthn-protocol` and
+   `--workspace=@jeswr/solid-webauthn-client` from the solid-webauthn workspace, then
+   repoint the client tarball's protocol dep to the vendored protocol path (the client's
+   published `package.json` keeps `"*"`).
+4. `npm run lint && npm run typecheck && npm run test && npm run build` must stay green.
+
+E2E against a DEPLOYED broker with `/​.oidc/webauthn/*` endpoints is out of scope until
+the broker is deployed (the broker server-side landed on prod-solid-server but is not yet
+deployed); the assertion→token-exchange round-trip can only be exercised live there.

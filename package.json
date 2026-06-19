@@ -15,7 +15,10 @@
   },
   "dependencies": {
     "@jeswr/fetch-rdf": "^0.1.0",
+    "@jeswr/solid-webauthn-client": "file:vendor/jeswr-solid-webauthn-client-0.0.0-a5-848ab65.tgz",
+    "@jeswr/solid-webauthn-protocol": "file:vendor/jeswr-solid-webauthn-protocol-0.0.0-a5-848ab65.tgz",
     "@rdfjs/wrapper": "^0.34.0",
+    "@simplewebauthn/browser": "^13.1.2",
     "@solid/object": "^0.6.0",
     "@solid/reactive-authentication": "file:vendor/solid-reactive-authentication-0.1.3-pr11-14.tgz",
     "class-variance-authority": "^0.7.1",

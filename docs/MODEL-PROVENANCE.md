@@ -152,3 +152,38 @@ Auth — proactive-attach fetch (eliminate the per-resource 401 dance, #123 Phas
 - `e2e/auth-401-budget.spec.ts` + `e2e/seed-children.ts` — the Playwright 401-budget
   e2e against local CSS (≤1 401 per storage root; total ≤ #roots; count does not
   scale with child count).
+
+Passkey re-auth client integration (A5 client wiring, adapted to the #123 proactive-auth model):
+
+The app-side payoff of the passkey workstream that landed server-side on prod-solid-server.
+Wires the redirect-free WebAuthn (passkey) re-auth client (`@jeswr/solid-webauthn-client`,
+vendored as a tarball) into the Pod Manager login UX. Re-applied onto the CURRENT
+session-provider, which uses `installProactiveAuthFetch` (a SINGLE provider), NOT the old
+`ReactiveFetchManager` array — so the passkey provider is COMPOSED with the interactive
+`WebIdDPoPTokenProvider` rather than wired as `provider[0]` in a manager array.
+
+- `vendor/jeswr-solid-webauthn-client-0.0.0-a5-848ab65.tgz` and
+  `vendor/jeswr-solid-webauthn-protocol-0.0.0-a5-848ab65.tgz` — `npm pack` of those two
+  workspaces from `~/Documents/GitHub/jeswr/solid-webauthn` @ `848ab65`
+  (branch `feat/webauthn-client-a5`). Provenance recorded in `vendor/README.md`.
+- `src/lib/webauthn-reauth.ts` — builds the `WebAuthnTokenProvider` (re-auth strategy),
+  the `WebIdBoundWebAuthnProvider` (fail-closed WebID binding), and the per-device
+  "passkey registered" memory (`PasskeyRegistry`); copied verbatim from the A5 branch.
+- `src/lib/webauthn-register.ts` — the `register-options` → `startRegistration` → `register`
+  ceremony, surfacing the broker's no-auto-provision error verbatim; copied verbatim.
+- `src/lib/passkey-provider.ts` — NET-NEW (#123 adaptation): the composing
+  `AuthTokenProvider` that slots the WebID-bound passkey provider into the SINGLE-provider
+  proactive-auth-fetch — `upgrade()` routes through the passkey path when its inner
+  `matches(request)` is true (which itself falls back to the interactive provider on a
+  wrong-account/failed ceremony), while `matches`/`invalidate` delegate to the
+  `WebIdDPoPTokenProvider`. Opus-authored.
+- `src/lib/webauthn-reauth.test.ts`, `src/lib/webauthn-register.test.ts`,
+  `src/lib/passkey-provider.test.ts` — unit tests; Opus-authored.
+- Edits to `src/components/session-provider.tsx` (compose the passkey provider into
+  `installProactiveAuthFetch`; expose `hasPasskey` + `registerPasskey`; the no-auto-prompt-
+  on-load decision) and `src/components/login-screen.tsx` / `src/app/settings/page.tsx`
+  (the opt-in "Sign in with passkey" affordances) — Opus-authored.
+
+E2E against a DEPLOYED broker with the `/​.oidc/webauthn/*` endpoints is OUT OF SCOPE — the
+broker server-side landed on prod-solid-server but is not yet deployed; the
+assertion→token-exchange round-trip can only be exercised live there.

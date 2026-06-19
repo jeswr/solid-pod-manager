@@ -1,18 +1,25 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import {
+  Check,
   ChevronRight,
   Database,
   Fingerprint,
   Globe,
   IdCard,
+  KeyRound,
   ListTree,
+  Loader2,
   LogOut,
   Server,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useSession } from "@/components/session-provider";
+import {
+  useSession,
+  WebAuthnRegistrationError,
+} from "@/components/session-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -119,6 +126,8 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      <PasskeyCard />
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Session</CardTitle>
@@ -139,6 +148,111 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/**
+ * Opt-in "Sign in with a passkey" set-up — the app-side payoff of the passkey
+ * workstream. After this one-time set-up the next visit to this device signs in
+ * redirect-free (the platform passkey prompt instead of the provider popup).
+ *
+ * NO auto-provision: if the provider refuses (e.g. the account is not
+ * provisioned for passkeys) we surface the provider's OWN message verbatim and
+ * create nothing — the existing redirect sign-in keeps working unchanged.
+ */
+function PasskeyCard() {
+  const { status, hasPasskey, registerPasskey } = useSession();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (status !== "logged-in") return null;
+
+  async function setUp() {
+    setError(null);
+    setBusy(true);
+    try {
+      const { saved } = await registerPasskey();
+      if (saved) {
+        toast.success("Passkey set up", {
+          description: "Next time on this device you can sign in with your passkey.",
+        });
+      } else {
+        // The credential WAS created — this is a non-fatal warning, not a
+        // failure, so do not invite a duplicate retry.
+        toast.warning("Passkey created", {
+          description:
+            "Your passkey was created, but this browser couldn't remember it for next time. You can still sign in with it.",
+        });
+      }
+    } catch (e) {
+      if (e instanceof DOMException && (e.name === "NotAllowedError" || e.name === "AbortError")) {
+        // The user dismissed the platform prompt — not an error worth shouting.
+        setBusy(false);
+        return;
+      }
+      // Surface the provider's no-auto-provision (or any) message verbatim; do
+      // NOT attempt to create an identity.
+      const message =
+        e instanceof WebAuthnRegistrationError
+          ? e.message
+          : "We couldn't set up a passkey right now. Please try again.";
+      setError(message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Sign-in &amp; security</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex items-start gap-3">
+          <KeyRound
+            className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <div className="min-w-0">
+            <p className="text-sm font-medium">Sign in with a passkey</p>
+            <p className="mt-0.5 text-sm text-muted-foreground">
+              {hasPasskey
+                ? "This device is set up. Next time you can sign in with your fingerprint, face, or device PIN — no sign-in window."
+                : "Set up a passkey to sign in next time with your fingerprint, face, or device PIN — without opening a sign-in window."}
+            </p>
+          </div>
+        </div>
+
+        {error ? (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
+
+        {hasPasskey ? (
+          <p className="inline-flex items-center gap-2 text-sm font-medium text-primary">
+            <Check className="size-4" aria-hidden="true" />
+            Passkey ready on this device
+          </p>
+        ) : (
+          <div>
+            <Button variant="outline" onClick={setUp} disabled={busy}>
+              {busy ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  Setting up…
+                </>
+              ) : (
+                <>
+                  <KeyRound className="size-4" aria-hidden="true" />
+                  Set up a passkey
+                </>
+              )}
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

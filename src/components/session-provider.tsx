@@ -58,6 +58,7 @@ import { nativeFetch } from "@/lib/native-fetch";
 import {
   computeAllowedOrigins,
   installProactiveAuthFetch,
+  isOriginAllowed,
   type AuthTokenProvider,
 } from "@/lib/proactive-auth-fetch";
 import { establishStillCurrent, runFencedPublish } from "@/lib/establish-fence";
@@ -72,6 +73,7 @@ import {
   WebAuthnRegistrationError,
 } from "@/lib/webauthn-register";
 import { composePasskeyProvider } from "@/lib/passkey-provider";
+import { canAttachNonInteractivelyDecision } from "@/lib/passkey-gate";
 
 // Re-export so login/account/settings UI can branch on the broker's
 // no-auto-provision refusal without importing the lib module directly.
@@ -134,6 +136,19 @@ export interface Session {
    * from the click handler, like {@link login}.
    */
   loginWithIssuer(issuer: string): Promise<void>;
+  /**
+   * REDIRECT-FREE passkey sign-in for a recent account that has a passkey
+   * registered on THIS device (the Finding-3 flicker fix). Establishes the
+   * session WITHOUT opening any OAuth popup / `prompt=none` window: it arms the
+   * active issuer/WebID + credential boundary like a login, licenses the composed
+   * passkey `upgrade()` (`navigator.credentials.get()` — a NATIVE prompt, NO
+   * window) for the first protected read, then reads the profile + publishes.
+   * Call DIRECTLY from the recent-account click handler (a user gesture). REJECTS
+   * if no passkey is wired for `webId` this load, or the ceremony / profile read
+   * fails — the caller then falls through to the interactive {@link login} path
+   * (whose popup, if any, still opens under that same user click).
+   */
+  signInWithPasskey(webId: string, issuer: string): Promise<void>;
   /** Cancel an in-flight login: closes the popup, rejects the pending flow. */
   cancelLogin(): void;
   /** Log out: clears session state. Keeps the recent-accounts memory. */
@@ -212,6 +227,21 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // Per-device "passkey registered for this WebID" memory (localStorage). Drives
   // both whether the composed re-auth provider is built and the UI affordances.
   const passkeyRegistryRef = useRef<PasskeyRegistry>(null);
+  // The WebID for which a USER GESTURE has licensed a redirect-free passkey
+  // re-auth on the NEXT protected read (the Finding-3 flicker fix). Set ONLY by
+  // `signInWithPasskey` (a recent-account click on a passkey-marked account), so the
+  // session-liveness gate (`canAttachNonInteractively`) may permit the composed
+  // passkey `upgrade()` — `navigator.credentials.get()`, a NATIVE prompt, NO window
+  // — even when the interactive provider has no renewable session (a dead refresh
+  // token). UNSET on boot, so the boot silent-restore's PASSIVE profile read can NEVER
+  // reach `upgrade()` / a passkey prompt automatically on load (the load-bearing
+  // no-auto-prompt-on-load invariant is preserved by construction). Cleared once the
+  // passkey sign-in settles (publish / fail / supersede) so it never licenses a later
+  // passive read.
+  const passkeyInteractiveWebIdRef = useRef<string | undefined>(undefined);
+  // The composed passkey provider built this load (used by the gate to test whether
+  // a request host is one the passkey can serve). Null when no passkey is wired.
+  const passkeyProviderRef = useRef<{ matches(request: Request): Promise<boolean> } | null>(null);
   // The CURRENT credential-origin boundary — the set of resource origins the
   // proactive-auth fetch may attach the session's DPoP token to. Read FRESH per
   // request by the global fetch wrapper, so a post-login storage/WebID change
@@ -416,13 +446,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // `WebIdDPoPTokenProvider`; `matches`/`invalidate` stay the interactive
       // provider's (the structural contract + stale-token retry are unchanged).
       //
-      // Scoped to the SINGLE account being restored on this load (the persisted
-      // active WebID) — NOT every registered WebID. The vendored provider has no
-      // app-side WebID binding, so wiring it for all accounts could try account B's
-      // passkey while restoring account A on a shared resource host (roborev High).
-      // Built ONCE per load (matching the manager-built-once design); the payoff is
-      // RETURN visits to the last account. Absent entirely when that account has no
-      // passkey, so the pipeline is exactly today's redirect login.
+      // Scoped to the SINGLE account this load wires passkey re-auth for — NOT every
+      // registered WebID. The vendored provider has no app-side WebID binding, so
+      // wiring it for all accounts could try account B's passkey while restoring
+      // account A on a shared resource host (roborev High). That single account is
+      // the persisted active WebID, OR — after an explicit logout + reload, when that
+      // pointer was cleared — the most-recently-registered passkey WebID (roborev
+      // Finding 1: the hint + on-device credential outlive logout, so a returning
+      // logged-out user can still re-auth redirect-free). Built ONCE per load
+      // (matching the manager-built-once design); the payoff is RETURN visits.
+      // Absent entirely when no account has a passkey, so the pipeline is exactly
+      // today's redirect login.
       //
       // NO AUTO-PROMPT ON LOAD (the Issue-1 invariant): this does NOT widen the set
       // of requests that reach `upgrade()`. The `canAttachNonInteractively` gate
@@ -433,13 +467,26 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // already permits a non-interactive attach (a live session) or on an explicit
       // user-gesture login. So nothing user-visible (popup, tab, OR passkey prompt)
       // happens automatically on load — only the silent refresh-grant.
+      // The single account this load wires passkey re-auth for. Prefer the
+      // persisted active WebID (the silent-restore pointer). When it is ABSENT —
+      // which is the case after an EXPLICIT logout + reload, since logout REMOVES
+      // `ACTIVE_WEBID_KEY` — fall back to the MOST-RECENTLY-REGISTERED passkey
+      // WebID so a returning, logged-out user can STILL sign in redirect-free with
+      // their on-device passkey (the A5 design: "the hint + on-device credential
+      // outlive logout"). The `PasskeyRegistry` itself is NOT cleared on logout
+      // (`clearToLoggedOut` resets only the `hasPasskey` UI flag), so it survives.
+      // STILL ONE ACCOUNT PER LOAD (the roborev-High scoping): we pick exactly one
+      // WebID — never wire every registered WebID — so a passkey for account B is
+      // never tried while a shared resource host is read for account A. `list()`
+      // is most-recent-first (`remember` unshifts), so `[0]` is the latest.
+      const registry = getPasskeyRegistry();
       const restoringWebId =
-        typeof localStorage !== "undefined"
+        (typeof localStorage !== "undefined"
           ? localStorage.getItem(ACTIVE_WEBID_KEY)
-          : null;
+          : null) ?? registry.list()[0]?.webId;
       const webAuthnProvider = restoringWebId
         ? buildWebAuthnReauthProviderForWebId(
-            getPasskeyRegistry(),
+            registry,
             restoringWebId,
             clientId,
             // On a wrong-account / failed passkey upgrade, the WebID-bound wrapper
@@ -449,6 +496,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             provider as unknown as TokenProviderLike,
           )
         : undefined;
+      // Capture the per-load passkey provider so the session-liveness gate can test
+      // whether a request host is one this passkey serves (the Finding-3 gate widening,
+      // licensed ONLY by a user-gesture `signInWithPasskey`).
+      passkeyProviderRef.current = webAuthnProvider ?? null;
       const authProvider: AuthTokenProvider = composePasskeyProvider(
         provider as unknown as AuthTokenProvider,
         webAuthnProvider,
@@ -501,14 +552,38 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         // (`upgrade(req, { interactive: false })` that returns the request unauthenticated
         // instead of running the code flow); then this gate can attach whenever ANY
         // non-interactive renewal is possible and never risk a background popup.
-        canAttachNonInteractively: () => {
-          const issuer = activeIssuerRef.current;
-          if (!issuer) return false;
+        canAttachNonInteractively: (request) => {
+          // Delegate to the PURE, unit-tested decision (`passkey-gate.ts`). The
+          // PASSKEY LICENCE branch (the Finding-3 flicker fix): a USER-GESTURE passkey
+          // sign-in (`signInWithPasskey`) sets `passkeyInteractiveWebIdRef` so the
+          // composed passkey `upgrade()` (a NATIVE prompt, NO window) may serve the
+          // first protected read EVEN WHEN the interactive provider has no renewable
+          // session (a dead refresh token). That ref is UNSET on boot, so a PASSIVE
+          // boot read can never satisfy the passkey branch — the no-auto-prompt-on-load
+          // invariant holds by construction. We only license requests INSIDE the
+          // current credential boundary; the composed `upgrade()` itself routes to the
+          // passkey path solely for hosts the passkey matches (else interactive).
+          let originAllowed = false;
           try {
-            return provider.canRenewWithoutInteraction(new URL(issuer));
+            originAllowed = isOriginAllowed(allowedOriginsRef.current, request.url);
           } catch {
-            return false;
+            originAllowed = false;
           }
+          let interactiveRenewable = false;
+          const issuer = activeIssuerRef.current;
+          if (issuer) {
+            try {
+              interactiveRenewable = provider.canRenewWithoutInteraction(new URL(issuer));
+            } catch {
+              interactiveRenewable = false;
+            }
+          }
+          return canAttachNonInteractivelyDecision({
+            passkeyInteractiveWebId: passkeyInteractiveWebIdRef.current,
+            hasPasskeyProvider: passkeyProviderRef.current !== null,
+            originAllowed,
+            interactiveRenewable,
+          });
         },
       });
       providerSyncRef.current = provider;
@@ -989,6 +1064,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // correctly OPENS the popup here (inside the user activation), since it will need fresh
       // interactive auth rather than reusing the prior account's session. If `input` is actually
       // a bare issuer URL it simply won't match any session.webId → popup opens (conservative).
+      //
+      // NOTE (the Finding-3 flicker fix): a passkey-marked recent account never reaches `login()`
+      // on its HAPPY path — the login screen calls `signInWithPasskey` first (popup-FREE, native
+      // prompt). `login()` runs here only as the INTERACTIVE FALLBACK after a passkey ceremony
+      // fails, where opening a popup under the user's click is the correct recovery — so this path
+      // deliberately does NOT special-case passkeys (no popup suppression).
       openPopupUnlessRenewable(getController(), providerSyncRef.current, opts?.issuer, input);
       setStatus("authenticating");
       // Close the (possibly PRIOR account's) credential boundary up front: the smart-input
@@ -1067,6 +1148,134 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     [completeLogin, getController],
   );
 
+  /**
+   * REDIRECT-FREE passkey sign-in (the Finding-3 flicker fix). Establishes the
+   * session for a recent account that has a passkey wired THIS load — WITHOUT
+   * `provider.login()` and WITHOUT any popup / `prompt=none` window. It mirrors
+   * the establish/fence tail of {@link completeLogin}, minus the OIDC popup hop:
+   *
+   *   1. bump-capture the establish generation (so a racing logout / login
+   *      supersedes us, the #123 fence);
+   *   2. arm the active issuer + WebID pointers + a provisional credential
+   *      boundary, and LICENSE the composed passkey `upgrade()` for the first
+   *      protected read (`passkeyInteractiveWebIdRef`), so `fetchProfile` is served
+   *      by `navigator.credentials.get()` — a native prompt, NO window — rather
+   *      than an OAuth code flow;
+   *   3. run the fence-gated publish tail (`runFencedPublish`): provisional-arm →
+   *      read profile (via the passkey `upgrade()`) → FENCE → authoritative-arm →
+   *      persist → publish.
+   *
+   * REJECTS (so the caller falls back to the interactive `login`) when no passkey
+   * is wired for `webId` this load, or the ceremony / profile read fails. The
+   * passkey provider's own `upgrade()` already DELEGATES a failed ceremony to the
+   * interactive fallback, but that fallback needs a popup which only exists under a
+   * user gesture — so on failure we surface the error and let the recent-account
+   * CLICK (a live user gesture) drive the interactive `login()` fallback.
+   *
+   * NO-AUTO-PROMPT-ON-LOAD is preserved: this path is reachable ONLY from a
+   * user-gesture click; the boot restore never calls it, and the licence ref is
+   * unset on boot, so a passive boot read can never reach the passkey prompt.
+   */
+  const signInWithPasskey = useCallback(
+    async (id: string, issuer: string) => {
+      // No passkey wired for this WebID this load → cannot serve redirect-free;
+      // reject so the caller uses the interactive path. (Built once at startup for
+      // the active / most-recent passkey WebID — the roborev-High one-account scoping.)
+      if (
+        passkeyProviderRef.current === null ||
+        !getPasskeyRegistry().hasFor(id)
+      ) {
+        throw new Error("No passkey is set up for this account on this device.");
+      }
+      setStatus("authenticating");
+      // Close any prior account's boundary before arming this one (account-switch safety,
+      // mirroring `login`/`completeLogin`).
+      closeCredentialBoundary();
+      // FENCE: bump-capture this establish's generation at its TRUE start so a racing
+      // logout / login supersedes us and our resumed publish bails (#123 fence).
+      const establishGeneration = ++establishGenerationRef.current;
+      pendingLoginGenRef.current = establishGeneration; // cancellable from the start
+      // Point the 401/upgrade resolver + logout target at this account.
+      pendingWebIdRef.current = id;
+      activeIssuerRef.current = issuer;
+      inFlightLoginRef.current = { issuer, generation: establishGeneration };
+      // LICENSE the passkey `upgrade()` for the upcoming protected read (the only
+      // thing that lets the gate permit a non-interactive attach with a dead refresh
+      // token). Scoped to this WebID; cleared in `finally` so it never licenses a
+      // later passive read.
+      passkeyInteractiveWebIdRef.current = id;
+      try {
+        const published = await runFencedPublish<PodProfile>(establishGeneration, {
+          liveGeneration: () => establishGenerationRef.current,
+          armProvisional: () => refreshAllowedOrigins(id, [], issuer),
+          // The profile read goes through the global fetch → composed provider →
+          // passkey `upgrade()` (native prompt, no window) for the WebID host.
+          readProfile: () => fetchProfile(id),
+          armAuthoritative: (p) => refreshAllowedOrigins(id, p.storages, issuer),
+          persist: (p) => {
+            const accounts = new RecentAccounts();
+            accounts.remember({
+              webId: id,
+              displayName: p.displayName,
+              avatarUrl: p.avatarUrl,
+              issuer,
+              storage: p.storages[0],
+            });
+            setRecentAccounts(accounts.list());
+            if (typeof localStorage !== "undefined") {
+              localStorage.setItem(ACTIVE_WEBID_KEY, id);
+            }
+          },
+          publish: (p) => {
+            setWebId((prev) => {
+              if (prev && prev !== id) readCache.clearWebId(prev);
+              return id;
+            });
+            setProfile(p);
+            setActive(p.storages[0]);
+            setHasPasskey(getPasskeyRegistry().hasFor(id));
+            setStatus("logged-in");
+          },
+        });
+        if (!published) {
+          // Superseded by a logout / newer login during the profile read — the
+          // superseding actor owns the boundary/UI. Throw the benign supersession
+          // signal (swallowed by the UI's `fail`).
+          throw new LoginSupersededError();
+        }
+        if (inFlightLoginRef.current?.generation === establishGeneration) {
+          inFlightLoginRef.current = undefined;
+        }
+      } catch (e) {
+        if (inFlightLoginRef.current?.generation === establishGeneration) {
+          inFlightLoginRef.current = undefined;
+        }
+        // FENCE (failure-path half): only clean up when STILL current — a logout /
+        // newer login that superseded us owns the boundary/UI (#123 fence).
+        if (stillCurrent(establishGeneration)) {
+          closeCredentialBoundary();
+          setStatus("logged-out");
+        }
+        throw e;
+      } finally {
+        // The passkey licence is single-use for THIS establish: clear it (CAS by the
+        // ref still pointing at this id) so it never licenses a later passive read.
+        if (passkeyInteractiveWebIdRef.current === id) {
+          passkeyInteractiveWebIdRef.current = undefined;
+        }
+        if (pendingLoginGenRef.current === establishGeneration) {
+          pendingLoginGenRef.current = undefined;
+        }
+      }
+    },
+    [
+      getPasskeyRegistry,
+      closeCredentialBoundary,
+      refreshAllowedOrigins,
+      stillCurrent,
+    ],
+  );
+
   // SHARED FULL LOGGED-OUT CLEANUP (the #123 whole-branch round-8 MEDIUM): clear ALL prior-account
   // state so "logged out" truly means logged out — the in-memory UI (webId/profile/active), the
   // read cache, the credential boundary, the durable restore pointer (`ACTIVE_WEBID_KEY`), and the
@@ -1086,6 +1295,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     // Reset ONLY the UI flag — the passkey hint (and the on-device credential)
     // intentionally OUTLIVE logout so the next visit can offer passkey sign-in.
     setHasPasskey(false);
+    // Revoke any in-flight passkey-upgrade LICENCE (the Finding-3 ref): a logout /
+    // cancel racing a `signInWithPasskey` must not leave a read licensed to mint a
+    // passkey token after sign-out. (Defense in depth — the boundary close below
+    // already empties `allowedOriginsRef`, and the gate's passkey branch requires an
+    // allowed origin, so a post-logout read could not attach anyway.)
+    passkeyInteractiveWebIdRef.current = undefined;
     pendingWebIdRef.current = undefined;
     if (typeof localStorage !== "undefined") {
       localStorage.removeItem(ACTIVE_WEBID_KEY);
@@ -1233,6 +1448,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       recentAccounts,
       login,
       loginWithIssuer,
+      signInWithPasskey,
       cancelLogin,
       logout,
       setActiveStorage,
@@ -1247,6 +1463,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       recentAccounts,
       login,
       loginWithIssuer,
+      signInWithPasskey,
       cancelLogin,
       logout,
       setActiveStorage,

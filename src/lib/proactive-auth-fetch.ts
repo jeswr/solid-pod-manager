@@ -36,7 +36,7 @@ import {
   type AllowedOriginsInputs,
 } from "./auth-origin-boundary.js";
 
-export { computeAllowedOrigins, type AllowedOriginsInputs };
+export { computeAllowedOrigins, isOriginAllowed, type AllowedOriginsInputs };
 
 /**
  * The reactive-auth `TokenProvider` structural contract (matches/upgrade), plus the

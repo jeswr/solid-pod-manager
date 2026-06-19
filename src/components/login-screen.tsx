@@ -77,7 +77,8 @@ function loginErrorMessage(error: unknown): string {
  * user activation is never lost (src/lib/popup-login.ts).
  */
 export function LoginScreen() {
-  const { login, loginWithIssuer, cancelLogin, recentAccounts, status } = useSession();
+  const { login, loginWithIssuer, signInWithPasskey, cancelLogin, recentAccounts, status } =
+    useSession();
   const [webId, setWebId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showSignIn, setShowSignIn] = useState(false);
@@ -163,17 +164,37 @@ export function LoginScreen() {
   }
 
   /**
-   * Recent-account click: WebID + remembered issuer. When the app still holds
-   * a session (or refresh token) for that issuer, NO popup opens — the login
-   * completes with fetches alone (the session probe in `session.login`).
-   * Otherwise, unlike a typed sign-in, this keeps the silent `prompt=none`
-   * attempt first — the user signed in here before, so a live IdP session is
-   * likely and silent success means zero typing (the popup closes itself in
-   * under a second).
+   * Recent-account click: WebID + remembered issuer.
+   *
+   * PASSKEY-FIRST, POPUP-FREE (the Finding-3 flicker fix): when THIS account has a
+   * passkey on this device, try the redirect-free `signInWithPasskey` FIRST — it
+   * opens NO OAuth popup at all (the session is served by the native passkey prompt
+   * on the first protected read), killing the "tab rapidly opening and closing"
+   * flicker the old `login(..., silentFirst)` path produced for passkey accounts
+   * (dead refresh token → about:blank popup → fast `prompt=none` against the live
+   * IdP cookie). The recent-account click IS a user gesture, so if the passkey
+   * ceremony fails we fall through to the interactive `login()` — whose popup, if
+   * any, still opens under that same click (acceptable; NOT the automatic-on-load
+   * flicker this fix targets).
+   *
+   * For a NON-passkey account, behaviour is unchanged: when the app still holds a
+   * session / refresh token for that issuer, NO popup opens; otherwise the silent
+   * `prompt=none` attempt runs first (a live IdP session is likely for a returning
+   * account, so silent success means zero typing).
    */
   function attemptRecent(account: { webId: string; issuer?: string }) {
     setError(null);
     setIssuerChoices(null);
+    if (accountHasPasskey(account.webId) && account.issuer) {
+      // No await before the call: keep the user activation live for the fallback popup.
+      signInWithPasskey(account.webId, account.issuer).catch((e) => {
+        if (e instanceof LoginSupersededError) return; // benign (the #123 fence)
+        // The passkey ceremony / read failed → fall back to the interactive login
+        // under the SAME user click (its popup, if needed, opens here).
+        login(account.webId, { issuer: account.issuer, silentFirst: true }).catch(fail);
+      });
+      return;
+    }
     login(account.webId, { issuer: account.issuer, silentFirst: true }).catch(fail);
   }
 

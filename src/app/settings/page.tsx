@@ -164,6 +164,14 @@ function PasskeyCard() {
   const { status, hasPasskey, registerPasskey } = useSession();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Locally remember that a passkey set-up SUCCEEDED this session even when the
+  // local hint could not be persisted (`{ saved: false }` — credential created,
+  // hint not stored, so `hasPasskey` stays false). Without this the UI keeps
+  // showing "Set up a passkey", inviting a pointless duplicate ceremony (roborev
+  // Finding 4). The credential exists on the device either way, so the ready state
+  // is correct; only the cross-load hint failed.
+  const [setupComplete, setSetupComplete] = useState(false);
+  const ready = hasPasskey || setupComplete;
 
   if (status !== "logged-in") return null;
 
@@ -172,6 +180,10 @@ function PasskeyCard() {
     setBusy(true);
     try {
       const { saved } = await registerPasskey();
+      // The credential was created on this device on ANY success — flip to the
+      // ready state and hide the button regardless of whether the local hint
+      // persisted (roborev Finding 4).
+      setSetupComplete(true);
       if (saved) {
         toast.success("Passkey set up", {
           description: "Next time on this device you can sign in with your passkey.",
@@ -216,7 +228,7 @@ function PasskeyCard() {
           <div className="min-w-0">
             <p className="text-sm font-medium">Sign in with a passkey</p>
             <p className="mt-0.5 text-sm text-muted-foreground">
-              {hasPasskey
+              {ready
                 ? "This device is set up. Next time you can sign in with your fingerprint, face, or device PIN — no sign-in window."
                 : "Set up a passkey to sign in next time with your fingerprint, face, or device PIN — without opening a sign-in window."}
             </p>
@@ -229,7 +241,7 @@ function PasskeyCard() {
           </p>
         ) : null}
 
-        {hasPasskey ? (
+        {ready ? (
           <p className="inline-flex items-center gap-2 text-sm font-medium text-primary">
             <Check className="size-4" aria-hidden="true" />
             Passkey ready on this device

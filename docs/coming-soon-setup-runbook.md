@@ -10,7 +10,7 @@
 > duplicate them:
 > - Per-console form fields → [`docs/platform-approvals.md`](./platform-approvals.md)
 > - Adapter model, tiers, demo-vs-live policy → [`docs/integrations-catalog.md`](./integrations-catalog.md)
-> - Token-proxy internals/security → [`prod-solid-server/services/token-proxy/README.md`](../../prod-solid-server/services/token-proxy/README.md)
+> - Token-proxy internals/security → [`prod-solid-server/services/token-proxy/README.md`](https://github.com/jeswr/prod-solid-server/blob/main/services/token-proxy/README.md) (sibling repo)
 > - Box compose/Caddy wiring → `prod-solid-server/deploy/docker-compose.single.yml`,
 >   `prod-solid-server/deploy/Caddyfile.single`, `prod-solid-server/deploy/.env.prod.example`
 >

@@ -116,3 +116,89 @@ describe("composePasskeyProvider", () => {
     expect(i.upgrade).not.toHaveBeenCalled();
   });
 });
+
+describe("composePasskeyProvider — explicit reject-fast vs background provider (roborev H2)", () => {
+  /** A second passkey provider tagging its upgrade so we can tell it apart. */
+  function fakeExplicitPasskey() {
+    const matches = vi.fn(async (req: Request) => req.url.startsWith(STORAGE));
+    const upgrade = vi.fn(
+      async (req: Request) => new Request(req, { headers: { "x-explicit-passkey": "1" } }),
+    );
+    const provider = { matches, upgrade } as unknown as WebIdBoundWebAuthnProvider;
+    return { provider, matches, upgrade };
+  }
+
+  it("routes a passkey-matched request through the EXPLICIT provider while a sign-in is in flight", async () => {
+    const i = fakeInteractive();
+    const bg = fakePasskey(true); // background provider matches the STORAGE host
+    const ex = fakeExplicitPasskey();
+    const composed = composePasskeyProvider(i.provider, bg.provider, {
+      provider: ex.provider,
+      isExplicitPasskeySignIn: () => true, // a user-gesture passkey sign-in is in flight
+    });
+    const out = await composed.upgrade(new Request(`${STORAGE}private/notes`));
+    // The EXPLICIT (reject-fast) provider serves it — so a failed ceremony rejects the
+    // read and the click's .catch opens the interactive popup under activation.
+    expect(out.headers.get("x-explicit-passkey")).toBe("1");
+    expect(ex.upgrade).toHaveBeenCalledOnce();
+    expect(bg.upgrade).not.toHaveBeenCalled();
+    expect(i.upgrade).not.toHaveBeenCalled();
+  });
+
+  it("routes a passkey-matched request through the BACKGROUND provider when NO sign-in is in flight", async () => {
+    const i = fakeInteractive();
+    const bg = fakePasskey(true);
+    const ex = fakeExplicitPasskey();
+    const composed = composePasskeyProvider(i.provider, bg.provider, {
+      provider: ex.provider,
+      isExplicitPasskeySignIn: () => false, // background / passive read (live session)
+    });
+    const out = await composed.upgrade(new Request(`${STORAGE}private/notes`));
+    expect(out.headers.get("x-passkey")).toBe("1"); // the background provider's tag
+    expect(bg.upgrade).toHaveBeenCalledOnce();
+    expect(ex.upgrade).not.toHaveBeenCalled();
+  });
+
+  it("reads the predicate FRESH per request (a sign-in that ends mid-session reverts to background)", async () => {
+    const i = fakeInteractive();
+    const bg = fakePasskey(true);
+    const ex = fakeExplicitPasskey();
+    let explicit = true;
+    const composed = composePasskeyProvider(i.provider, bg.provider, {
+      provider: ex.provider,
+      isExplicitPasskeySignIn: () => explicit,
+    });
+    await composed.upgrade(new Request(`${STORAGE}a`));
+    expect(ex.upgrade).toHaveBeenCalledOnce();
+    explicit = false; // the licence cleared (sign-in settled)
+    await composed.upgrade(new Request(`${STORAGE}b`));
+    expect(bg.upgrade).toHaveBeenCalledOnce();
+    expect(ex.upgrade).toHaveBeenCalledOnce(); // unchanged — not used the second time
+  });
+
+  it("the explicit provider never widens the request set — a non-passkey host still gets interactive", async () => {
+    const i = fakeInteractive();
+    const bg = fakePasskey(true); // matches only the STORAGE host
+    const ex = fakeExplicitPasskey();
+    const composed = composePasskeyProvider(i.provider, bg.provider, {
+      provider: ex.provider,
+      isExplicitPasskeySignIn: () => true,
+    });
+    const out = await composed.upgrade(new Request(OTHER));
+    expect(out.headers.get("x-interactive")).toBe("1");
+    expect(ex.upgrade).not.toHaveBeenCalled();
+    expect(bg.upgrade).not.toHaveBeenCalled();
+  });
+
+  it("forwards forceRefresh to the explicit provider too", async () => {
+    const i = fakeInteractive();
+    const bg = fakePasskey(true);
+    const ex = fakeExplicitPasskey();
+    const composed = composePasskeyProvider(i.provider, bg.provider, {
+      provider: ex.provider,
+      isExplicitPasskeySignIn: () => true,
+    });
+    await composed.upgrade(new Request(`${STORAGE}x`), true);
+    expect(ex.upgrade).toHaveBeenCalledWith(expect.any(Request), true);
+  });
+});

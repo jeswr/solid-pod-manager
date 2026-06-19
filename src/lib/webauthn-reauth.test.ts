@@ -8,7 +8,9 @@ import {
   buildWebAuthnConfig,
   buildWebAuthnReauthProviderForWebId,
   issuerHost,
+  PasskeyCeremonyFailedError,
   PasskeyRegistry,
+  rejectOnlyFallback,
   webIdClaimOf,
   WebIdBoundWebAuthnProvider,
 } from "./webauthn-reauth.js";
@@ -409,6 +411,52 @@ describe("WebIdBoundWebAuthnProvider", () => {
     expect(fallbackInvalidate).toHaveBeenCalledWith(req);
   });
 
+  it("invalidate() swallows a SYNCHRONOUSLY-thrown inner invalidate and still invalidates the fallback (roborev A1)", async () => {
+    // A1: a 1-arg/sync inner `invalidate` that throws SYNCHRONOUSLY (not a rejected
+    // promise) must not abort the best-effort fan-out. `Promise.resolve(call())` would
+    // let the sync throw escape array construction and reject `invalidate()` before the
+    // fallback runs; the async-thunk wrapping converts it to a settled rejection.
+    const fallbackInvalidate = vi.fn(async () => {});
+    const inner = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      // NOTE: a NON-async function that throws synchronously.
+      invalidate: () => {
+        throw new Error("inner invalidate threw synchronously");
+      },
+    } as unknown as WebAuthnTokenProvider;
+    const fallback = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      invalidate: fallbackInvalidate,
+    };
+    const p = new WebIdBoundWebAuthnProvider(inner, fallback, WEBID);
+    const req = new Request(`${STORAGE}x`);
+    await expect(p.invalidate(req)).resolves.toBeUndefined();
+    expect(fallbackInvalidate).toHaveBeenCalledWith(req);
+  });
+
+  it("invalidate() swallows a SYNCHRONOUSLY-thrown fallback invalidate and still invalidates the inner (roborev A1)", async () => {
+    // Symmetric: a sync throw from the FALLBACK's invalidate must not prevent the inner's.
+    const innerInvalidate = vi.fn(async () => {});
+    const inner = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      invalidate: innerInvalidate,
+    } as unknown as WebAuthnTokenProvider;
+    const fallback = {
+      matches: async () => true,
+      upgrade: async (req: Request) => req,
+      invalidate: () => {
+        throw new Error("fallback invalidate threw synchronously");
+      },
+    };
+    const p = new WebIdBoundWebAuthnProvider(inner, fallback, WEBID);
+    const req = new Request(`${STORAGE}x`);
+    await expect(p.invalidate(req)).resolves.toBeUndefined();
+    expect(innerInvalidate).toHaveBeenCalledWith(req);
+  });
+
   it("invalidate() works when the fallback has no invalidate (best-effort)", async () => {
     const innerInvalidate = vi.fn(async () => {});
     const inner = {
@@ -421,6 +469,45 @@ describe("WebIdBoundWebAuthnProvider", () => {
     const req = new Request(`${STORAGE}x`);
     await expect(p.invalidate(req)).resolves.toBeUndefined();
     expect(innerInvalidate).toHaveBeenCalledWith(req);
+  });
+
+  // REJECT-FAST FALLBACK (roborev H2): on the EXPLICIT user-gesture signInWithPasskey
+  // path the passkey provider is built with `rejectOnlyFallback`, so a failed / wrong-
+  // account ceremony REJECTS the read (rather than delegating to an interactive popup
+  // inside upgrade(), which would run outside the user activation and be popup-blocked).
+  // The recent-account click's .catch then opens the interactive login under the gesture.
+  describe("with rejectOnlyFallback (the explicit signInWithPasskey provider, roborev H2)", () => {
+    it("REJECTS with PasskeyCeremonyFailedError when the ceremony itself fails (no interactive delegation)", async () => {
+      const failing = {
+        matches: async () => true,
+        upgrade: async () => {
+          throw new Error("user cancelled the passkey prompt");
+        },
+      } as unknown as WebAuthnTokenProvider;
+      const p = new WebIdBoundWebAuthnProvider(failing, rejectOnlyFallback, WEBID);
+      await expect(p.upgrade(new Request(`${STORAGE}x`))).rejects.toBeInstanceOf(
+        PasskeyCeremonyFailedError,
+      );
+    });
+
+    it("REJECTS with PasskeyCeremonyFailedError on a WRONG-account minted token", async () => {
+      const bob = "https://bob.solid-test.jeswr.org/profile/card#me";
+      const p = new WebIdBoundWebAuthnProvider(fakeInner(bob), rejectOnlyFallback, WEBID);
+      await expect(p.upgrade(new Request(`${STORAGE}x`))).rejects.toBeInstanceOf(
+        PasskeyCeremonyFailedError,
+      );
+    });
+
+    it("STILL returns the upgraded request when the minted WebID matches (happy path unaffected)", async () => {
+      const p = new WebIdBoundWebAuthnProvider(fakeInner(WEBID), rejectOnlyFallback, WEBID);
+      const out = await p.upgrade(new Request(`${STORAGE}x`));
+      expect(out.headers.get("authorization")).toContain("DPoP ");
+    });
+
+    it("rejectOnlyFallback declines all matches + has a no-op invalidate", async () => {
+      await expect(rejectOnlyFallback.matches(new Request(STORAGE))).resolves.toBe(false);
+      await expect(rejectOnlyFallback.invalidate?.(new Request(STORAGE))).resolves.toBeUndefined();
+    });
   });
 
   it("preserves a body-bearing request's body for the fallback after a wrong-account token (roborev)", async () => {

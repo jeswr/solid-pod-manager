@@ -152,10 +152,18 @@ export class WebIdBoundWebAuthnProvider implements TokenProvider {
     // `#fallback`. When a returned token is later rejected and the stale-token retry
     // calls `invalidate`, we don't know which provider issued it — so invalidate both,
     // best-effort. Invalidating only `#inner` would leave a stale fallback-issued token
-    // cached. Both are swallowed so one's failure never blocks the other.
+    // cached.
+    //
+    // Wrap each optional call in an ASYNC THUNK before `Promise.allSettled` (roborev A1):
+    // `Promise.resolve(this.#inner.invalidate?.(request))` evaluates the call EAGERLY, so a
+    // SYNCHRONOUS throw from a 1-arg/sync `invalidate` would escape array construction —
+    // aborting before the fallback is invalidated AND rejecting `invalidate()` despite the
+    // best-effort contract. An async thunk converts a sync throw into a rejected promise that
+    // `allSettled` absorbs, so each call is independently isolated and the method always
+    // resolves. `return` void.
     await Promise.allSettled([
-      Promise.resolve(this.#inner.invalidate?.(request)),
-      Promise.resolve(this.#fallback.invalidate?.(request)),
+      (async () => this.#inner.invalidate?.(request))(),
+      (async () => this.#fallback.invalidate?.(request))(),
     ]);
   }
 }
@@ -324,6 +332,43 @@ export function buildWebAuthnConfig(
   }
   return config;
 }
+
+/**
+ * The sentinel a {@link rejectOnlyFallback}'s `upgrade` throws when a passkey
+ * ceremony fails on the EXPLICIT `signInWithPasskey` path. It tells the session
+ * provider's `signInWithPasskey` "the passkey could not serve this read — do NOT
+ * try an interactive popup from inside `upgrade()` (it runs after async work,
+ * outside the user activation, and the browser blocks it); reject so the
+ * RECENT-ACCOUNT CLICK's `.catch` runs `login()` synchronously under the live
+ * gesture instead" (roborev H2).
+ */
+export class PasskeyCeremonyFailedError extends Error {
+  constructor(message = "Passkey ceremony failed; fall back to interactive login.") {
+    super(message);
+    this.name = "PasskeyCeremonyFailedError";
+  }
+}
+
+/**
+ * A {@link TokenProviderLike} whose `upgrade` always REJECTS with
+ * {@link PasskeyCeremonyFailedError} (roborev H2). Used as the fallback for the
+ * EXPLICIT `signInWithPasskey` passkey provider so a failed/wrong-account passkey
+ * ceremony surfaces as an immediate rejection of the protected read — letting the
+ * recent-account click's `.catch` open the interactive popup UNDER the user's
+ * gesture, rather than `WebIdBoundWebAuthnProvider.upgrade` trying to open one
+ * itself AFTER async work (which the popup blocker would catch, recoverable only
+ * via the blocked-popup affordance — never an under-activation popup).
+ *
+ * `matches` returns false (it is never selected as a primary provider) and
+ * `invalidate` is a no-op (it never mints a token to invalidate).
+ */
+export const rejectOnlyFallback: TokenProviderLike = {
+  matches: async () => false,
+  upgrade: async () => {
+    throw new PasskeyCeremonyFailedError();
+  },
+  invalidate: async () => {},
+};
 
 /**
  * Construct the re-auth provider scoped to a SINGLE WebID — the account being

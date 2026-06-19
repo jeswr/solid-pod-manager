@@ -39,6 +39,7 @@ import {
 } from "@/lib/login-input";
 import { PopupBlockedError } from "@/lib/popup-login";
 import { AmbiguousIssuerError } from "@/lib/webid-token-provider";
+import { PasskeyRegistry } from "@/lib/webauthn-reauth";
 
 /** Friendly, jargon-light error copy for the login failure modes. */
 function loginErrorMessage(error: unknown): string {
@@ -82,8 +83,31 @@ export function LoginScreen() {
   const [showSignIn, setShowSignIn] = useState(false);
   // Set when the entered WebID advertises several issuers: the USER picks.
   const [issuerChoices, setIssuerChoices] = useState<string[] | null>(null);
+  // The WebIDs this device has a passkey registered for (client-only —
+  // localStorage). Drives the "passkey" hint on returning-account buttons: a
+  // sign-in there is served redirect-free by the composed WebAuthn re-auth
+  // provider on the first protected read. Keyed by WebID (NOT issuer) so two
+  // accounts on the same provider don't both light up. Empty until the effect
+  // runs (and on SSR).
+  const [passkeyWebIds, setPasskeyWebIds] = useState<Set<string>>(new Set());
   const busy = status === "authenticating";
   const returning = recentAccounts.length > 0;
+
+  // Load the per-device passkey hints once on the client (localStorage is not
+  // available during SSR / the static export's prerender).
+  useEffect(() => {
+    try {
+      const ids = new PasskeyRegistry().list().map((r) => r.webId);
+      setPasskeyWebIds(new Set(ids));
+    } catch {
+      // No localStorage / corrupt store — no hints, normal login unchanged.
+    }
+  }, []);
+
+  /** Whether THIS exact account (by WebID) has a passkey registered here. */
+  function accountHasPasskey(accountWebId: string): boolean {
+    return passkeyWebIds.has(accountWebId);
+  }
 
   // WebID deep-link contract: the Solid server's profile page links to
   // `/?webid=<URL-encoded WebID>` — landing with it prefills the sign-in form
@@ -235,11 +259,19 @@ export function LoginScreen() {
                       </AvatarFallback>
                     </Avatar>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">
+                      <span className="flex items-center gap-2 truncate font-medium">
                         {a.displayName}
+                        {accountHasPasskey(a.webId) && (
+                          <Badge variant="secondary" className="gap-1">
+                            <KeyRound className="size-3" aria-hidden="true" />
+                            Passkey
+                          </Badge>
+                        )}
                       </span>
                       <span className="block truncate text-xs text-muted-foreground">
-                        {a.webId}
+                        {accountHasPasskey(a.webId)
+                          ? "Sign in with your passkey — no sign-in window"
+                          : a.webId}
                       </span>
                     </span>
                     <ArrowRight className="size-4 text-muted-foreground" aria-hidden="true" />

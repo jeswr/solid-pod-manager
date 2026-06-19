@@ -61,6 +61,7 @@ import {
   type AuthTokenProvider,
 } from "@/lib/proactive-auth-fetch";
 import { establishStillCurrent, runFencedPublish } from "@/lib/establish-fence";
+import { runBootRestore } from "@/lib/boot-restore";
 import {
   buildWebAuthnReauthProviderForWebId,
   PasskeyRegistry,
@@ -573,44 +574,53 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           // IdP cookie lives via `openPopupUnlessRenewable` + the silent-first probe. So:
           // renewable session ⇒ restore + logged-in; otherwise ⇒ logged-out.
           const issuer = remembered.find((a) => a.webId === last)?.issuer;
-          let restored = false;
-          if (issuer) {
-            // Mark the restoring issuer so a logout racing this restore fully discards its
-            // durable credential (the #123 roborev HIGH); cleared in `finally` below.
-            restoringIssuerRef.current = issuer;
-            const provider = await providerReadyRef.current;
-            const outcome = await provider
-              // SUPERSESSION-SAFE COMMIT (the #123 roborev HIGH): pass the generation re-check
-              // so the provider commits the restored session to its WIDE state (issuer-keyed
-              // session/settled caches + the `#issuer` pin + persistence + the refresh
-              // scheduler) ONLY if the boot restore is still current. A newer interactive login
-              // that won the race — even on the SAME issuer — keeps ITS committed session, so a
-              // late-resolving restore can never replace it and make B's next `upgrade()`
-              // attach A's session.
-              ?.restoreIssuer(new URL(issuer), () => stillCurrent(establishGeneration))
-              .catch(() => undefined);
-            // FENCE: a logout / login won the race during `restoreIssuer` — do NOT re-point
-            // `activeIssuerRef` against this superseded restore (it would resurrect a
-            // logged-out issuer / clobber a newer login). The superseding actor owns it.
-            if (outcome && !cancelled && stillCurrent(establishGeneration)) {
-              activeIssuerRef.current = issuer;
-              // Surface the passkey affordance for the restored account (UI flag
-              // only; the composed re-auth provider for this WebID was already
-              // wired at startup if a passkey exists for it).
-              setHasPasskey(getPasskeyRegistry().hasFor(last));
-              restored = true;
-            }
-          }
-          if (restored) {
-            await restore(last, establishGeneration);
-          } else if (!cancelled && stillCurrent(establishGeneration)) {
-            // No renewable session → fall back to login, boundary closed — but ONLY if this
-            // restore is STILL current. A login the user fired during `restoreIssuer` owns
-            // the boundary + UI now; clearing here would wipe it (the #123 roborev HIGH,
-            // failure-path half).
-            closeCredentialBoundary();
-            setStatus("logged-out");
-          }
+          // Delegate the boot silent-restore DECISION to the extracted, unit-tested
+          // `runBootRestore` (refresh-grant ONLY → renewable ⇒ publish logged-in |
+          // dead ⇒ logged-out). It has NO popup-open / passkey-prompt dependency BY
+          // CONSTRUCTION (the Issue-1 invariant: nothing user-visible fires on load
+          // — only the silent refresh-grant). The fences/ownership pointers below
+          // stay exactly as the #123 work placed them.
+          await runBootRestore({
+            restoreSession: async () => {
+              if (!issuer) return false;
+              // Mark the restoring issuer so a logout racing this restore fully discards
+              // its durable credential (the #123 roborev HIGH); cleared in `finally`.
+              restoringIssuerRef.current = issuer;
+              const provider = await providerReadyRef.current;
+              const outcome = await provider
+                // SUPERSESSION-SAFE COMMIT (the #123 roborev HIGH): pass the generation
+                // re-check so the provider commits the restored session to its WIDE state
+                // (issuer-keyed session/settled caches + the `#issuer` pin + persistence +
+                // the refresh scheduler) ONLY if the boot restore is still current. A newer
+                // interactive login that won the race — even on the SAME issuer — keeps ITS
+                // committed session, so a late-resolving restore can never replace it and
+                // make B's next `upgrade()` attach A's session.
+                ?.restoreIssuer(new URL(issuer), () => stillCurrent(establishGeneration))
+                .catch(() => undefined);
+              // FENCE: a logout / login won the race during `restoreIssuer` — do NOT
+              // re-point `activeIssuerRef` against this superseded restore (it would
+              // resurrect a logged-out issuer / clobber a newer login). The superseding
+              // actor owns it. Return false so the decision does not publish logged-in.
+              if (outcome && !cancelled && stillCurrent(establishGeneration)) {
+                activeIssuerRef.current = issuer;
+                // Surface the passkey affordance for the restored account (UI flag
+                // only; the composed re-auth provider for this WebID was already
+                // wired at startup if a passkey exists for it).
+                setHasPasskey(getPasskeyRegistry().hasFor(last));
+                return true;
+              }
+              return false;
+            },
+            stillCurrent: () => !cancelled && stillCurrent(establishGeneration),
+            publishRestored: () => restore(last, establishGeneration),
+            toLoggedOut: () => {
+              // No renewable session → fall back to login, boundary closed. (The caller's
+              // `stillCurrent` gate already guarded this — a login the user fired during
+              // `restoreIssuer` owns the boundary + UI now, the #123 roborev HIGH.)
+              closeCredentialBoundary();
+              setStatus("logged-out");
+            },
+          });
         } catch {
           // A failed silent restore must leave the boundary CLOSED (the wrapper attaches
           // nothing) while we fall back to login — never a stale-issuer open boundary. FENCE:

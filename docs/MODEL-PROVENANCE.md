@@ -171,6 +171,13 @@ session-provider, which uses `installProactiveAuthFetch` (a SINGLE provider), NO
   "passkey registered" memory (`PasskeyRegistry`); copied verbatim from the A5 branch.
 - `src/lib/webauthn-register.ts` — the `register-options` → `startRegistration` → `register`
   ceremony, surfacing the broker's no-auto-provision error verbatim; copied verbatim.
+- `src/lib/boot-restore.ts` (+ .test.ts) — NET-NEW: the pure, injectable boot
+  silent-restore decision extracted from `SessionProvider`'s on-load IIFE so the
+  Issue-1 no-popup-on-load invariant is unit-testable (the harness is node-env /
+  `src/lib`-only, no jsdom component render). By construction it takes NO
+  popup-open / passkey-prompt dependency — the only renewal mechanism is the
+  injected refresh-grant; the test proves a dead refresh token ⇒ logged-out with a
+  real popup controller's `window.open` never called. Opus-authored.
 - `src/lib/passkey-provider.ts` — NET-NEW (#123 adaptation): the composing
   `AuthTokenProvider` that slots the WebID-bound passkey provider into the SINGLE-provider
   proactive-auth-fetch — `upgrade()` routes through the passkey path when its inner

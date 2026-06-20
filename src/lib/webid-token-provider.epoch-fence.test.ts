@@ -56,6 +56,167 @@ const alwaysVisible: VisibilityLifecycle = {
 
 let as: FakeAuthorizationServer;
 
+// ── Observable-state drain machinery (ported from the #787 proactive-flake fix) ──
+//
+// The fixed-count `for (…) await vi.advanceTimersByTimeAsync(0)` drains this file
+// used after a parked refresh/restore/commit was released hit the SAME
+// thread-pool-crypto-macrotask flake #787 fixed in the proactive suite: the
+// released refresh chain does `crypto.subtle.sign` (ES256 DPoP proof) on the libuv
+// thread pool — a MACROTASK that `advanceTimersByTimeAsync` cannot see and that,
+// under the full parallel `vitest run`, takes UNBOUNDED wall-clock as other workers
+// contend for the pool. A fixed tick count is not a sound bound on it. So we drain
+// on OBSERVABLE STATE instead: real-macrotask yield + zero-advance timer flush until
+// no token fetch and no crypto sign are in flight and the timer queue is stable.
+
+/**
+ * Count of token-endpoint fetches CURRENTLY IN FLIGHT (issued, not yet settled),
+ * and of `crypto.subtle.sign` operations in flight (the PRE-FETCH DPoP-proof step a
+ * released refresh does before issuing its fetch — the one window the fetch counter
+ * cannot see). Together they make "no refresh/restore/commit job is active" directly
+ * observable. The crypto counter also counts the fake AS's server-side ID-token
+ * signing, which only ever makes a drain wait slightly longer, never shorter.
+ */
+let tokenFetchesInFlight = 0;
+let cryptoSignsInFlight = 0;
+/** The original `crypto.subtle.sign`, captured so `afterEach` can restore it. */
+const realCryptoSign = crypto.subtle.sign.bind(crypto.subtle);
+
+/** The URL of any valid `fetch` input (string | URL | Request) — never throws. */
+function urlOf(input: Parameters<typeof fetch>[0]): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return (input as Request).url;
+}
+
+/**
+ * Wrap any `fetch` implementation so token-endpoint calls increment
+ * {@link tokenFetchesInFlight} for the duration of the request, regardless of the
+ * underlying behaviour (success, rejection, a held gate). EVERY `fetch` stub a test
+ * drains via {@link waitForIdle} must be installed through this — the default
+ * `as.fetch` AND every per-test gate stub — so the in-flight observable covers their
+ * refresh paths too.
+ */
+function trackTokenFetches(impl: typeof fetch): typeof fetch {
+  return (input, init) => {
+    if (!urlOf(input).endsWith("/token")) return impl(input, init);
+    tokenFetchesInFlight++;
+    let pending: ReturnType<typeof fetch>;
+    try {
+      pending = Promise.resolve(impl(input, init));
+    } catch (e) {
+      // A stub that throws SYNCHRONOUSLY must not leave the counter stuck > 0
+      // (that would make `waitForIdle` never see idle). The async path uses finally.
+      tokenFetchesInFlight--;
+      throw e;
+    }
+    return pending.finally(() => {
+      tokenFetchesInFlight--;
+    });
+  };
+}
+
+/**
+ * The REAL `setTimeout` / `Date.now`, captured at module load BEFORE any
+ * `vi.useFakeTimers()` patches them. The drain needs a genuine event-loop yield
+ * (once fake timers are installed `globalThis.setTimeout` never fires on its own)
+ * and a real wall-clock for the quiet-window / deadline checks.
+ */
+const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+const realNow = Date.now.bind(Date);
+
+/** Yield one REAL macrotask — lets libuv thread-pool work (ES256/DPoP signing) land. */
+const realYield = (): Promise<void> =>
+  new Promise((resolve) => realSetTimeout(resolve, 0));
+
+/**
+ * Hard REAL-TIME deadline for a single drain. Exceeding it means the released work
+ * never quiesced (a genuine hang / unbounded scheduling bug, not load): throw a
+ * diagnostic rather than return silently. Above any real drain, below vitest's 5s.
+ */
+const DRAIN_DEADLINE_MS = 4_000;
+/**
+ * The real-time window over which BOTH in-flight observables (token fetches and
+ * `crypto.subtle.sign`) AND the pending fake-timer count must stay quiet before a
+ * drain concludes nothing more is happening. With the crypto counter observing the
+ * pre-fetch signing directly, this only has to bridge the sub-ms synchronous gaps
+ * between consecutive observable operations — 50ms is ample and keeps the file fast.
+ */
+const QUIET_WINDOW_MS = 50;
+
+/** One drain round: let thread-pool crypto land, then fire any timer due at t=0. */
+async function drainRound(): Promise<void> {
+  await realYield(); // real macrotask — thread-pool crypto (DPoP/ES256) resolves
+  await vi.advanceTimersByTimeAsync(0); // fire any timer scheduled at t=0
+}
+
+/**
+ * Drain (WITHOUT advancing the fake clock) until released refresh/restore/commit
+ * work is fully PROCESSED, not merely reached: a real-time window in which the
+ * pending fake-timer count is stable AND no token fetch / `crypto.subtle.sign` is in
+ * flight. This replaces the fixed-count `advanceTimersByTimeAsync(0)` drains: it
+ * cannot return while a released grant is still doing its (unbounded under load)
+ * pre-fetch crypto or its in-flight fetch, so the follow-up assertions see the
+ * settled post-race state regardless of thread-pool contention. Throws on the hard
+ * real-time deadline so a genuine hang is a clear failure, not a silent timeout.
+ */
+async function waitForIdle(start: number = realNow()): Promise<void> {
+  let lastTimers = vi.getTimerCount();
+  let idleSince = realNow();
+  for (;;) {
+    await drainRound();
+    const timers = vi.getTimerCount();
+    const now = realNow();
+    const busy =
+      timers !== lastTimers ||
+      tokenFetchesInFlight > 0 ||
+      cryptoSignsInFlight > 0;
+    if (busy) {
+      lastTimers = timers;
+      idleSince = now;
+    } else if (now - idleSince >= QUIET_WINDOW_MS) {
+      return;
+    }
+    if (now - start >= DRAIN_DEADLINE_MS) {
+      throw new Error(
+        `drain did not reach idle within ${DRAIN_DEADLINE_MS}ms ` +
+          `(pending timers=${timers}, token fetches in flight=` +
+          `${tokenFetchesInFlight}, crypto signs in flight=${cryptoSignsInFlight}).`,
+      );
+    }
+  }
+}
+
+/** Count of COMPLETED refresh-token grants the fake AS has recorded. */
+const refreshGrantCount = (): number =>
+  as.tokenRequests.filter((r) => r.get("grant_type") === "refresh_token").length;
+
+/**
+ * POSITIVE-assertion drain: advance the fake clock by `ms` (past a proactive fire
+ * point), then drain — WITHOUT a fixed tick count — until the refresh-grant count
+ * has GROWN to `>= target`, THEN until the refresh is fully processed
+ * ({@link waitForIdle}). The grow-condition IS the positive assertion ("the
+ * proactive refresh fired"), so this cannot return before the grant lands (the
+ * #787 flake: a fixed advance count stepping past a not-yet-armed/landed grant
+ * because the DPoP-proof crypto resolved late on the thread pool). Throws on the
+ * real-time deadline so a genuine "the proactive refresh never fired" bug is a
+ * clear failure, not a silent hang.
+ */
+async function tickUntilRefreshGrants(ms: number, target: number): Promise<void> {
+  await vi.advanceTimersByTimeAsync(ms);
+  const start = realNow();
+  while (refreshGrantCount() < target) {
+    await drainRound();
+    if (realNow() - start >= DRAIN_DEADLINE_MS) {
+      throw new Error(
+        `expected >= ${target} refresh grant(s) within ${DRAIN_DEADLINE_MS}ms, ` +
+          `saw ${refreshGrantCount()} (pending timers=${vi.getTimerCount()}) — ` +
+          `the proactive refresh never reached the token endpoint.`,
+      );
+    }
+  }
+  await waitForIdle(start); // the grant landed; let its handling + reschedule settle
+}
+
 /** A gate that parks the NEXT refresh-token grant at the token endpoint. */
 function makeRefreshGate(realFetch: typeof fetch) {
   let releaseToken: () => void = () => {};
@@ -67,7 +228,10 @@ function makeRefreshGate(realFetch: typeof fetch) {
     signalParked = r;
   });
   let armed = true;
-  const fetchImpl = (async (
+  // Composed through `trackTokenFetches` so a parked-then-released refresh grant is
+  // observed in-flight by `waitForIdle` (the in-flight counter spans the await on
+  // the gate), letting the post-release drain wait on real state, not a tick count.
+  const fetchImpl = trackTokenFetches((async (
     input: Parameters<typeof fetch>[0],
     init?: RequestInit,
   ) => {
@@ -81,7 +245,7 @@ function makeRefreshGate(realFetch: typeof fetch) {
       await tokenGate;
     }
     return realFetch(input, init);
-  }) as typeof fetch;
+  }) as typeof fetch);
   return { fetchImpl, parked, releaseToken };
 }
 
@@ -149,12 +313,30 @@ beforeEach(async () => {
     grantTypesSupported: ["authorization_code", "refresh_token"],
     webIdClaim: WEBID,
   });
-  vi.stubGlobal("fetch", as.fetch);
+  tokenFetchesInFlight = 0;
+  cryptoSignsInFlight = 0;
+  // Track IN-FLIGHT token-endpoint calls so `waitForIdle` waits until none is
+  // outstanding (the default stub; per-test gate stubs compose through this too).
+  vi.stubGlobal("fetch", trackTokenFetches(as.fetch));
+  // Track IN-FLIGHT `crypto.subtle.sign` so a drain also observes the pre-fetch
+  // DPoP-proof crypto a released refresh/restore/commit does before it issues its
+  // token fetch — the one window the fetch counter cannot see (the #787 root cause).
+  crypto.subtle.sign = ((...args: Parameters<SubtleCrypto["sign"]>) => {
+    cryptoSignsInFlight++;
+    return realCryptoSign(...args).finally(() => {
+      cryptoSignsInFlight--;
+    });
+  }) as SubtleCrypto["sign"];
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  // Clear any still-pending fake timer BEFORE restoring real timers (so a leftover
+  // timer cannot fire against real time in a later file), then un-fake / un-stub and
+  // restore the real `crypto.subtle.sign` last.
+  vi.clearAllTimers();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+  crypto.subtle.sign = realCryptoSign;
 });
 
 describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
@@ -193,7 +375,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
 
     // ── Release A's parked proactive refresh; let its (now-stale) commit run to completion.
     gate.releaseToken();
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // drain until A's released commit fully settles (no fixed tick count)
 
     // ── THE FENCE: A's late proactive commit YIELDED — B's credential is intact, NOT overwritten
     // by A's refreshed token. (Pre-fence, the persisted token here would be A's rotated value.)
@@ -231,7 +413,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
 
     // Release the parked proactive refresh; let its (now epoch-stale) commit run.
     gate.releaseToken();
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // drain until the released commit fully settles (no fixed tick count)
 
     // ── THE FENCE: the late proactive commit YIELDED — the issuer is NOT resurrected. Persistence
     // stays empty, and an upgrade must RE-AUTHENTICATE (a 2nd authorize), proving no settled
@@ -271,7 +453,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
 
     gate.releaseToken();
     await restorePromise;
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // drain until the released restore commit fully settles
 
     // ── THE FENCE: the late restore commit YIELDED — the issuer is NOT resurrected. Persistence
     // is empty (the forget cleared it AND the stale restore did not re-persist), and an upgrade
@@ -410,7 +592,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     // Release the parked proactive refresh; its commit must SUCCEED (epoch unchanged) and persist
     // the ROTATED token.
     gate.releaseToken();
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // drain until the released same-account refresh commits + persists
 
     // ── THE FENCE (correctly NOT triggered): the same-account refresh committed — the persisted
     // token is the ROTATED one, NOT the stale consumed `original`. (Pre-fix, the bump would have
@@ -457,9 +639,12 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     // one (which would swap B's session for A's). Its grant request is distinct.
     vi.setSystemTime(Date.now() + 3601 * 1000);
     const bUpgrade = provider.upgrade(new Request("https://pod.test/b-resource"));
-    // Let B's renewal reach the token endpoint (it is NOT held — the gate is single-shot, already
-    // consumed by A's parked grant).
-    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+    // Let B's renewal reach + complete the token endpoint. NOTE: `waitForIdle` is NOT usable here —
+    // A's grant is INTENTIONALLY still parked (in-flight), so the system is never globally idle.
+    // `await bUpgrade` is the real synchronization point (it awaits B's renewal crypto + fetch); the
+    // bounded real-yield drain just lets thread-pool crypto land between fake-timer flushes (more
+    // robust than a bare `advanceTimersByTimeAsync(0)` count, which cannot outwait pool contention).
+    for (let i = 0; i < 8; i++) await drainRound();
     await bUpgrade;
 
     const refreshesAfterB = as.tokenRequests.filter(
@@ -471,7 +656,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(getCode).toHaveBeenCalledTimes(2); // A's + B's logins only — no spurious re-auth
 
     gate.releaseToken(); // drain A's parked grant (its commit yields — stale epoch)
-    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // A is now released ⇒ drain to true idle (no fixed tick count)
   });
 
   it("MEDIUM: login() does NOT re-pin a forgotten issuer when forgetIssuer races the commit", async () => {
@@ -558,7 +743,9 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     const bGate = new Promise<void>((r) => (releaseB = r));
     let signalBParked: () => void = () => {};
     const bParked = new Promise<void>((r) => (signalBParked = r));
-    vi.stubGlobal("fetch", (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    // Composed through `trackTokenFetches` so both parked grants count as in-flight
+    // for `waitForIdle` (so the post-release drains wait on real state, not ticks).
+    vi.stubGlobal("fetch", trackTokenFetches((async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       const grant = await peekGrantType(input, init);
       if (url.endsWith("/token") && grant === "refresh_token") {
@@ -569,7 +756,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
         await bGate; // hold B's login token exchange (B is mid-establishment)
       }
       return real(input, init);
-    }) as typeof fetch);
+    }) as typeof fetch));
 
     await pumpUntil(aParked); // A's proactive refresh is in `#sessions`
     // Start B's fresh login (account switch); it bumps the epoch + evicts A's stale entries, then
@@ -593,18 +780,24 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
         upgradeDone = true;
       });
     await Promise.resolve();
-    for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(0);
+    // `waitForIdle` is NOT usable in this window — B's authorization-code token grant is
+    // INTENTIONALLY parked (in-flight), so the system is never globally idle. These two drains are
+    // a deterministic negative check ("the upgrade did NOT join A's refresh, so it stays pending"),
+    // NOT the #787 post-crypto-with-nothing-parked flake. A bounded real-yield drain (`drainRound`)
+    // lets any thread-pool crypto land between flushes and is strictly more robust than a bare
+    // `advanceTimersByTimeAsync(0)` count; the assertion is `upgradeDone === false`, not "idle".
+    for (let i = 0; i < 4; i++) await drainRound();
 
     // Release ONLY A's parked refresh. If the upgrade had JOINED A (the bug), it resolves now.
     releaseA();
-    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 8; i++) await drainRound(); // B still parked ⇒ cannot waitForIdle here
     expect(upgradeDone).toBe(false); // did NOT join A's refresh — it is establishing fresh
 
     // Release B's auth-code gate: B's login AND the fresh upgrade (both on the auth-code path) drain.
     releaseB();
     await bLogin;
-    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
-    await upgrade;
+    await upgrade; // the real sync point — both promises awaited
+    await waitForIdle(); // both gates released ⇒ drain to true idle
     expect(upgradeDone).toBe(true);
   });
 
@@ -693,7 +886,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     // tokens — A's redemption now 400s). Then release it; A's failure handler runs STALE.
     as.activeRefreshTokens.clear();
     gate.releaseToken();
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // A released ⇒ drain until its stale failure handler fully settles
 
     // ── THE FENCE: A's stale invalid_grant cleanup did NOT wipe B — B's persisted credential
     // survives and B's session is still reusable (no re-auth). (Pre-fix, the store would be empty
@@ -857,7 +1050,11 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     // Upgrade C JOINS B's in-flight `#sessions` promise (reads it and awaits the raw work).
     const upgradeC = provider.upgrade(new Request("https://pod.test/c")).catch((e) => e);
     await Promise.resolve();
-    for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(0);
+    // `waitForIdle` is NOT usable here — B's renewal grant is INTENTIONALLY parked (in-flight), so
+    // the system is never globally idle. This is a deterministic "let C JOIN B's in-flight
+    // `#sessions` promise" wait; a bounded real-yield drain (`drainRound`) lets thread-pool crypto
+    // land between fake-timer flushes and is strictly more robust than a bare advance count.
+    for (let i = 0; i < 4; i++) await drainRound();
 
     // Logout WHILE the renewal is pending: forgetIssuer deletes `#sessions` + bumps the epoch.
     await provider.forgetIssuer(ISSUER);
@@ -866,7 +1063,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     // see `#sessions` is now EMPTY (forgotten) → FAIL CLOSED (reject), neither reusing the old
     // token nor silently re-authenticating.
     gate.releaseToken();
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // renewal released ⇒ drain until the stale commit + joiners settle
     const [rb, rc] = await Promise.all([upgradeB, upgradeC]);
 
     // NO silent re-auth after logout (getCode never fired again), and the joined upgrades did NOT
@@ -912,7 +1109,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     as.activeRefreshTokens.clear();
     if (bToken) as.activeRefreshTokens.add(bToken); // keep B's token redeemable
     gate.releaseToken();
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // A released ⇒ drain until its stale failure handler fully settles
 
     // ── THE FENCE: A's stale failure handler returned early WITHOUT touching B's issuer-wide state.
     // B's IN-MEMORY session + scheduler + persisted credential are intact: an upgrade reuses B's
@@ -924,15 +1121,12 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     expect(getCode).toHaveBeenCalledTimes(2); // A's + B's logins only — B's session reused
 
     // And B's proactive scheduler survived — advancing the clock fires B's proactive refresh.
-    const refreshesBeforeTick = as.tokenRequests.filter(
-      (r) => r.get("grant_type") === "refresh_token",
-    ).length;
-    await vi.advanceTimersByTimeAsync(65_000);
-    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
-    const refreshesAfter = as.tokenRequests.filter(
-      (r) => r.get("grant_type") === "refresh_token",
-    ).length;
-    expect(refreshesAfter).toBeGreaterThan(refreshesBeforeTick); // B's proactive scheduler fired
+    const refreshesBeforeTick = refreshGrantCount();
+    // Advance past B's fire point, then drain (no fixed tick count) until B's proactive grant
+    // actually lands — the grow-condition IS the positive assertion, so the late thread-pool DPoP
+    // crypto cannot make a fixed advance count step past a grant that has not yet landed (#787).
+    await tickUntilRefreshGrants(65_000, refreshesBeforeTick + 1);
+    expect(refreshGrantCount()).toBeGreaterThan(refreshesBeforeTick); // B's proactive scheduler fired
   });
 
   it("MEDIUM: login().discardIfSuperseded forgets THIS login's abandoned credential but is a NO-OP once a newer login owns the slot", async () => {
@@ -993,7 +1187,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     // Release the parked proactive refresh; its commit must YIELD (stale epoch) — NOT re-commit the
     // discarded session/credential.
     gate.releaseToken();
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // refresh released ⇒ drain until its (yielded) stale commit fully settles
 
     // ── THE FENCE: the in-flight proactive refresh did NOT resurrect the discarded credential.
     expect(store.peek(ISSUER_HREF)).toBeUndefined();
@@ -1074,7 +1268,7 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     as.activeRefreshTokens.clear();
     if (bToken) as.activeRefreshTokens.add(bToken);
     gate.releaseToken();
-    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(0);
+    await waitForIdle(); // A released ⇒ drain until A's stale fresh-auth fall-through aborts + settles
     await aLogin;
 
     // ── THE FENCE: A's stale login did NOT bump/evict — B's session + credential are intact.
@@ -1093,9 +1287,11 @@ describe("per-issuer epoch fence (the #123 whole-branch HIGHs)", () => {
     const { provider, getCode } = makeProvider(store, { proactive: true });
     await provider.login(ISSUER);
     const original = store.peek(ISSUER_HREF)?.refreshToken;
+    const refreshesBefore = refreshGrantCount();
 
-    await vi.advanceTimersByTimeAsync(65_000);
-    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0);
+    // Advance past the fire point, then drain (no fixed tick count) until the proactive grant lands
+    // AND its commit settles — only then is the rotated token persisted (the assertion below).
+    await tickUntilRefreshGrants(65_000, refreshesBefore + 1);
 
     const rotated = store.peek(ISSUER_HREF)?.refreshToken;
     expect(rotated).toBeDefined();

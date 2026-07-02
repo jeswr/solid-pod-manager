@@ -16,7 +16,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@jeswr/app-shell": "github:jeswr/app-shell#main",
+    "@jeswr/app-shell": "github:jeswr/app-shell#cc86f7851b5aeadcd7e59489fbd54845585920d9",
     "@jeswr/federation-client": "github:jeswr/federation-client#5ec046165f8d8e53c371ee6bcc94b43725bdda8c",
     "@jeswr/fetch-rdf": "^0.1.0",
     "@jeswr/solid-community-feeds": "github:jeswr/solid-community-feeds#b38babe3e386f93f92126cb448b3f6821dbe8e87",

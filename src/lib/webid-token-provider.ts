@@ -108,9 +108,34 @@ export interface WebIdDPoPTokenProviderOptions {
    * Override the fetch used to dereference the public WebID profile. Defaults to
    * the `globalThis.fetch` captured at CONSTRUCTION time (before
    * {@link https://github.com/solid-contrib/reactive-authentication ReactiveFetchManager}
-   * patches the global) — see the recursion note in the class docs. Test-only.
+   * patches the global) — see the recursion note in the class docs.
+   *
+   * ALSO the default for {@link oauthFetch}: the app pins this to the pristine
+   * `native-fetch.ts` snapshot, which keeps BOTH the profile read AND the
+   * provider's own OIDC traffic out of the patched-global loop.
    */
   profileFetch?: typeof fetch;
+  /**
+   * The fetch carrying the provider's OWN OIDC/OAuth HTTP requests — discovery,
+   * dynamic client registration, and the authorization-code/refresh token grants
+   * (threaded through oauth4webapi's `[oauth.customFetch]`). Defaults to
+   * {@link profileFetch} (and, like it, ultimately to the construction-time
+   * `globalThis.fetch`).
+   *
+   * MUST be an out-of-loop (pristine) fetch whenever the app patches the global
+   * fetch with a proactive auth transport whose credential boundary includes the
+   * ISSUER's origin (the Pod Manager's does — `computeAllowedOrigins` adds the
+   * active issuer). If these requests ride the PATCHED global instead, the
+   * proactive wrapper re-enters `provider.upgrade()` for a provider-internal call
+   * its heuristic does not exempt — a dynamic-client-registration POST carries no
+   * `DPoP` proof header and lands on an arbitrary registration-endpoint path, so
+   * `isProviderOAuthRequest` lets it through — which single-flights onto the very
+   * `#authenticate()` promise that ISSUED the request: a circular await that
+   * stalls interactive login forever, after the profile read and before the popup
+   * ever opens. Pinning does not change WHAT is sent (DPoP proofs / tokens are
+   * untouched), only WHICH transport carries it.
+   */
+  oauthFetch?: typeof fetch;
   /**
    * Durable store for the DPoP-bound refresh-token session (see
    * {@link ./session-persistence.ts}). When supplied, a successful login/refresh
@@ -437,6 +462,13 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    */
   readonly #profileFetch: typeof fetch;
   /**
+   * The out-of-loop fetch for the provider's OWN OIDC requests (discovery /
+   * registration / token grant) — see {@link WebIdDPoPTokenProviderOptions.oauthFetch}.
+   * Passed to every oauth4webapi call as `[oauth.customFetch]` so none of them ride
+   * a patched global fetch back into `upgrade()` (the login-stall deadlock).
+   */
+  readonly #oauthFetch: typeof fetch;
+  /**
    * Memoised issuer resolution: the user is asked for their WebID ONCE per
    * provider instance, not on every 401 — and concurrent 401s share the same
    * in-flight prompt (single-flight). Cleared on failure so a cancelled or
@@ -556,6 +588,7 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     this.#allowInsecureLoopback = options.allowInsecureLoopback ?? false;
     this.#profileFetch =
       options.profileFetch ?? globalThis.fetch.bind(globalThis);
+    this.#oauthFetch = options.oauthFetch ?? this.#profileFetch;
     this.#sessionStore = options.sessionStore;
     this.#proactiveRefresh = options.proactiveRefresh ?? false;
     this.#visibility =
@@ -569,15 +602,27 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
     this.#clearTimeout = options.clearTimeoutFn ?? ((handle) => clearTimeout(handle));
   }
 
-  /** oauth4webapi request options, enabling insecure loopback per the policy. */
+  /**
+   * oauth4webapi request options: pin every OIDC request to the out-of-loop
+   * {@link #oauthFetch} (NEVER the patched global — the re-entrancy deadlock),
+   * and enable insecure loopback per the policy.
+   */
   #httpOptions(
     issuer: URL,
     signal: AbortSignal,
-  ): { signal: AbortSignal; [oauth.allowInsecureRequests]?: true } {
+  ): {
+    signal: AbortSignal;
+    [oauth.customFetch]: typeof fetch;
+    [oauth.allowInsecureRequests]?: true;
+  } {
     if (this.#allowInsecureLoopback && isLoopback(issuer.hostname)) {
-      return { signal, [oauth.allowInsecureRequests]: true };
+      return {
+        signal,
+        [oauth.customFetch]: this.#oauthFetch,
+        [oauth.allowInsecureRequests]: true,
+      };
     }
-    return { signal };
+    return { signal, [oauth.customFetch]: this.#oauthFetch };
   }
 
   /**
@@ -2052,7 +2097,11 @@ export class WebIdDPoPTokenProvider implements TokenProvider {
    */
   async #resolveClient(
     authorizationServer: oauth.AuthorizationServer,
-    http: { signal: AbortSignal; [oauth.allowInsecureRequests]?: true },
+    http: {
+      signal: AbortSignal;
+      [oauth.customFetch]: typeof fetch;
+      [oauth.allowInsecureRequests]?: true;
+    },
   ): Promise<oauth.Client> {
     if (this.#clientId !== undefined) {
       // A public browser client identified by a dereferenceable URL. `oauth.Client`

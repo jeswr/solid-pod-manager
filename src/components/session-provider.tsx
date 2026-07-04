@@ -442,6 +442,21 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           clientId,
           allowInsecureLoopback: true, // local CSS over HTTP; remote stays HTTPS-strict
           sessionStore,
+          // Pin the provider's public WebID-profile read AND its OWN OIDC hops
+          // (discovery / dynamic client registration / token grant) to the SAME
+          // KNOWN-PRISTINE snapshot the proactive wrapper is anchored on
+          // (`native-fetch.ts`, captured before any global patch). The proactive
+          // credential boundary deliberately includes the active ISSUER origin, so
+          // routing a provider-internal OIDC call over the patched global re-enters
+          // `upgrade()` and single-flights onto the very `#authenticate()` promise
+          // that issued it — a circular await that stalls interactive login. The
+          // wrapper's `isProviderOAuthRequest` heuristic exempts discovery/token but
+          // NOT a dynamic-client-registration POST; pinning here closes the hole at
+          // the source, independent of that heuristic. Explicit, not the fragile
+          // implicit construction-order default (`globalThis.fetch` captured before
+          // `installProactiveAuthFetch` runs later in this same effect).
+          profileFetch: nativeFetch,
+          oauthFetch: nativeFetch,
           // Keep the cached session continuously fresh in the BACKGROUND so a
           // long import or an idle→active session never hits an expired token
           // mid-flow. Visibility-gated (no churn in a hidden tab); torn down on

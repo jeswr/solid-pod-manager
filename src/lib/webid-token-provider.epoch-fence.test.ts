@@ -41,11 +41,20 @@ const ISSUER = new URL("https://as.test");
 const ISSUER_HREF = ISSUER.href;
 
 const profileTurtle = `<${WEBID}> <http://www.w3.org/ns/solid/terms#oidcIssuer> <https://as.test> .`;
-const profileFetch: typeof fetch = async () =>
-  new Response(profileTurtle, {
-    status: 200,
-    headers: { "content-type": "text/turtle" },
-  });
+const profileFetch: typeof fetch = async (input, init) => {
+  // Serve ONLY the public WebID profile here; the provider now also uses this
+  // out-of-loop fetch for its OWN OIDC hops (oauthFetch defaults to profileFetch —
+  // the login-stall pin), so delegate discovery/registration/token to the ambient
+  // (test-stubbed) global fetch = the fake OP (the pre-pin routing).
+  const { url } = new Request(input as RequestInfo, init);
+  if (url.replace(/#.*$/, "") === WEBID.replace(/#.*$/, "")) {
+    return new Response(profileTurtle, {
+      status: 200,
+      headers: { "content-type": "text/turtle" },
+    });
+  }
+  return globalThis.fetch(input, init);
+};
 
 /** Always-visible lifecycle so proactive timers fire under fake timers. */
 const alwaysVisible: VisibilityLifecycle = {

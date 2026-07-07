@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { SessionProvider } from "@/components/session-provider";
 import { AppShell } from "@/components/app-shell";
+import { RoutedErrorBoundary } from "@/components/routed-error-boundary";
 
 // Inter: a workhorse UI sans with strong tabular figures — ideal for the
 // data-dense "My data" lists and dashboard counts (web-typography skill).
@@ -50,7 +51,9 @@ export default function RootLayout({
         >
           <TooltipProvider delayDuration={200}>
             <SessionProvider>
-              <AppShell>{children}</AppShell>
+              <AppShell>
+                <RoutedErrorBoundary>{children}</RoutedErrorBoundary>
+              </AppShell>
             </SessionProvider>
           </TooltipProvider>
           <Toaster richColors closeButton />

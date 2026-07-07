@@ -1,4 +1,11 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Pod Manager
+
+Pod Manager is a Solid app for viewing and organising the data in your personal
+[Solid](https://solidproject.org) pod, and controlling which apps can see what — files,
+tasks, bookmarks, contacts, calendar, notes, issues, and 30 connectable data sources, all
+in one calm, private place that is **yours**. Sign in with your WebID; your data never
+leaves your pod. Built with Next.js (App Router) + shadcn/ui + Tailwind, shipped as a
+static export.
 
 ## Integrations (Connect sources)
 

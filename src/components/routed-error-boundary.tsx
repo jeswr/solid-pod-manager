@@ -1,6 +1,7 @@
-// AUTHORED-BY Claude Fable 5
+// AUTHORED-BY Claude Opus 4.8
 "use client";
 
+import type { ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import { ErrorBoundary } from "@jeswr/app-shell";
 import { ErrorState } from "@/components/states";
@@ -20,7 +21,7 @@ import { ErrorState } from "@/components/states";
  * app-shell's default ErrorState resolves against its private `--as-*` token
  * CSS, which we deliberately don't import (one token home).
  */
-export function RoutedErrorBoundary({ children }: { children: React.ReactNode }) {
+export function RoutedErrorBoundary({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   return (
     <ErrorBoundary

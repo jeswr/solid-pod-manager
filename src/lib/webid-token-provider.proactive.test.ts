@@ -384,7 +384,10 @@ afterEach(async () => {
   //     to zero here makes the beforeEach reset a true no-op. Deadline-bounded:
   //     exceeding it means work leaked past teardown — fail loudly, not flakily.
   //  4. only then un-fake timers, un-stub globals, and restore the real
-  //     `crypto.subtle.sign` last.
+  //     `crypto.subtle.sign` last. This restoration sits in a `finally` so it
+  //     ALSO runs when the drain deadline throws — a leaked-work failure must
+  //     stay one loud failure, not skip teardown and cascade fake timers / a
+  //     stubbed fetch / the sign wrapper into every later test.
   for (const provider of liveProviders) provider.teardown();
   liveProviders.length = 0;
   vi.clearAllTimers();
@@ -393,19 +396,22 @@ afterEach(async () => {
   // and a test that failed before its `vi.useFakeTimers()` line must still
   // tear down cleanly (fake-timer APIs would throw without fake timers).
   const start = realNow();
-  while (tokenFetchesInFlight > 0 || cryptoSignsInFlight > 0) {
-    await realYield();
-    if (realNow() - start >= DRAIN_DEADLINE_MS) {
-      throw new Error(
-        `afterEach drain: in-flight work leaked past teardown ` +
-          `(token fetches in flight=${tokenFetchesInFlight}, ` +
-          `crypto signs in flight=${cryptoSignsInFlight}).`,
-      );
+  try {
+    while (tokenFetchesInFlight > 0 || cryptoSignsInFlight > 0) {
+      await realYield();
+      if (realNow() - start >= DRAIN_DEADLINE_MS) {
+        throw new Error(
+          `afterEach drain: in-flight work leaked past teardown ` +
+            `(token fetches in flight=${tokenFetchesInFlight}, ` +
+            `crypto signs in flight=${cryptoSignsInFlight}).`,
+        );
+      }
     }
+  } finally {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    crypto.subtle.sign = realCryptoSign;
   }
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
-  crypto.subtle.sign = realCryptoSign;
 });
 
 describe("proactive refresh: scheduling", () => {

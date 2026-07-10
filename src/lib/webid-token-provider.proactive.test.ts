@@ -115,6 +115,18 @@ interface Harness {
 }
 
 /**
+ * Every provider a test built, so `afterEach` can `teardown()` each one. A
+ * provider that is NOT torn down keeps its proactive machinery notionally live
+ * across the test boundary: an in-flight refresh chain (DPoP signing → token
+ * fetch) started in test N can settle DURING test N+1, where it hits the
+ * freshly re-stubbed global fetch (the NEW fake AS) and records a phantom
+ * grant in the new test's `as.tokenRequests` — the cross-test contamination
+ * flake (suite-tracker-trp). Teardown-then-drain in `afterEach` (below) makes
+ * each test hermetic.
+ */
+const liveProviders: WebIdDPoPTokenProvider[] = [];
+
+/**
  * Build a proactive-enabled provider. `setTimeoutFn`/`clearTimeoutFn` bind to
  * the (faked) globals so vitest's `advanceTimersByTime` drives the scheduler.
  */
@@ -128,6 +140,7 @@ function makeProvider(visibility = new FakeVisibility()): Harness {
     setTimeoutFn: (h, ms) => setTimeout(h, ms),
     clearTimeoutFn: (t) => clearTimeout(t),
   });
+  liveProviders.push(provider);
   return { provider, getCode, visibility };
 }
 
@@ -351,12 +364,45 @@ beforeEach(async () => {
   }) as SubtleCrypto["sign"];
 });
 
-afterEach(() => {
-  // Order matters: clear any still-pending fake timer BEFORE restoring real
-  // timers (so a leftover timer cannot fire against real time in a later file),
-  // then un-fake and un-stub so no fake clock / stubbed fetch bleeds across
-  // tests or workers. Restore the real `crypto.subtle.sign` last.
+afterEach(async () => {
+  // HERMETIC teardown (suite-tracker-trp — the cross-test contamination fix).
+  // Order matters:
+  //  1. teardown() every provider the test built — sets its destroyed flag so
+  //     no in-flight chain can (re)arm a timer, and releases visibility
+  //     listeners. Without this, a background refresh started in this test
+  //     stays live into the NEXT test and lands a phantom grant on ITS fake AS.
+  //  2. clear any still-pending fake timer BEFORE restoring real timers (so a
+  //     leftover timer cannot fire against real time in a later test/file).
+  //  3. DRAIN in-flight async work to completion WHILE the test's fetch stub +
+  //     crypto wrapper are still installed. Two reasons this must precede the
+  //     unstub: (a) an in-flight refresh that has done its DPoP signing but not
+  //     yet issued its fetch would otherwise call the RESTORED global fetch — a
+  //     real network attempt from a torn-down test; (b) a still-pending tracked
+  //     fetch/sign settling AFTER `beforeEach` reset the shared counters would
+  //     run its `.finally()` decrement against the NEXT test's zeroed counter,
+  //     driving it negative and silently weakening every later drain. Draining
+  //     to zero here makes the beforeEach reset a true no-op. Deadline-bounded:
+  //     exceeding it means work leaked past teardown — fail loudly, not flakily.
+  //  4. only then un-fake timers, un-stub globals, and restore the real
+  //     `crypto.subtle.sign` last.
+  for (const provider of liveProviders) provider.teardown();
+  liveProviders.length = 0;
   vi.clearAllTimers();
+  // Real yields only (not `drainRound`): the providers are destroyed and the
+  // fake-timer queue cleared, so what remains is promise/thread-pool work —
+  // and a test that failed before its `vi.useFakeTimers()` line must still
+  // tear down cleanly (fake-timer APIs would throw without fake timers).
+  const start = realNow();
+  while (tokenFetchesInFlight > 0 || cryptoSignsInFlight > 0) {
+    await realYield();
+    if (realNow() - start >= DRAIN_DEADLINE_MS) {
+      throw new Error(
+        `afterEach drain: in-flight work leaked past teardown ` +
+          `(token fetches in flight=${tokenFetchesInFlight}, ` +
+          `crypto signs in flight=${cryptoSignsInFlight}).`,
+      );
+    }
+  }
   vi.useRealTimers();
   vi.unstubAllGlobals();
   crypto.subtle.sign = realCryptoSign;
